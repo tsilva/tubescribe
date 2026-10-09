@@ -7,11 +7,43 @@ import time
 
 from .asr import Client
 from .storage import Store, now, worker_lock
+from .tunnel import tunnel
 from .youtube import YouTubeError, download
 
 
 def log(event, **data):
     print(json.dumps({"time": now(), "event": event, **data}, ensure_ascii=False), flush=True)
+
+
+class InferenceUnavailable(RuntimeError):
+    pass
+
+
+def ensure_ready(client: Client, store: Store, endpoint: str):
+    try:
+        return client.health()
+    except Exception as original:
+        config_path = store.root / "tunnel.json"
+        if not config_path.exists():
+            raise InferenceUnavailable(
+                f"ASR unavailable: {original}; start the service/tunnel and resume"
+            ) from original
+        config = json.loads(config_path.read_text())
+        if config.get("endpoint") != endpoint:
+            raise InferenceUnavailable(
+                f"ASR unavailable at the explicitly selected endpoint: {original}"
+            ) from original
+        log("reconnect_start", endpoint=endpoint, reason=str(original))
+        try:
+            connection = tunnel(
+                store.root, "start", config["host"], config["local_port"], config["remote_port"]
+            )
+            log("reconnect_complete", endpoint=endpoint)
+            return connection["health"]
+        except Exception as error:
+            raise InferenceUnavailable(
+                f"ASR reconnect failed: {error}; authorize SSH if prompted, then restart the backfill"
+            ) from error
 
 
 def work(
@@ -66,12 +98,13 @@ def work(
                         continue
                 break
             if health is None:
-                health = client.health()
+                health = ensure_ready(client, store, endpoint)
                 store.bind_profile(profile, health)
                 log("asr_ready", **health)
             for row in jobs:
                 if limit is not None and done + failed >= limit:
                     return {"completed": done, "failed": failed, "skipped": skipped}
+                store.bind_profile(profile, ensure_ready(client, store, endpoint))
                 job = dict(row)
                 stage = "download"
                 try:
@@ -116,6 +149,7 @@ def work(
                             "download_complete", video_id=job["video_id"], bytes=path.stat().st_size
                         )
                     stage = "asr"
+                    store.bind_profile(profile, ensure_ready(client, store, endpoint))
                     store.update(
                         job["id"],
                         state="active",
@@ -172,6 +206,12 @@ def work(
                         error=str(e),
                         retry_after_seconds=delay,
                     )
+                    if isinstance(e, InferenceUnavailable):
+                        log(
+                            "queue_paused",
+                            reason="ASR unavailable; audio retained, no further downloads",
+                        )
+                        return {"completed": done, "failed": failed, "skipped": skipped}
                     if kind == "rate_limit":
                         log("backoff", reason="YouTube rate limit or bot check; pausing the queue")
                         if not wait:

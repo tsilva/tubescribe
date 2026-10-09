@@ -50,8 +50,8 @@ elif args.action == "stop":
     if worker_pid is not None:
         if state.get("pid") != os.getpgid(worker_pid):
             sys.exit("Active worker is not owned by this backfill; stop it from its terminal")
-        # Signal the Python worker only; allow uv/caffeinate to reap it normally.
-        os.kill(worker_pid, signal.SIGTERM)
+        # Stop only this verified supervisor group; the worker preserves stage state.
+        os.killpg(state["pid"], signal.SIGTERM)
         print("Stop requested; current stage will be recoverable.")
     else:
         print("No active backfill worker.")

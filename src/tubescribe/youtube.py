@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -61,12 +63,27 @@ def run(args: list[str], timeout=900):
         "1",
         *args,
     ]
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if p.returncode:
-        raise YouTubeError(p.stderr[-4000:])
-    if p.stderr:
-        print(p.stderr.strip(), file=sys.stderr, flush=True)
-    return json.loads(p.stdout)
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException:
+        # Stop the downloader and its ffmpeg children before releasing the archive lock.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+        except ProcessLookupError:
+            process.wait()
+        raise
+    if process.returncode:
+        raise YouTubeError(stderr[-4000:])
+    if stderr:
+        print(stderr.strip(), file=sys.stderr, flush=True)
+    return json.loads(stdout)
 
 
 def resolve(url: str) -> dict:
@@ -159,8 +176,6 @@ def download(root: Path, video_id: str) -> tuple[Path, dict]:
     if not path.is_file() or path.stat().st_size == 0:
         raise YouTubeError("Downloader returned no complete audio file")
     with path.open("rb") as f:
-        import os
-
         os.fsync(f.fileno())
     return path, data
 

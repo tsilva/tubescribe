@@ -143,7 +143,7 @@ tail -f data/backfill.log
 scripts/backfill.py stop
 ```
 
-The worker starts in a separate process session and survives this chat/terminal finishing. On macOS, `caffeinate -i` prevents idle sleep for the worker's lifetime. It does not survive a reboot; run `start` again afterward. A network loss can exhaust bounded attempts; reconnect the tunnel, inspect failures, retry, and restart. A PID alone is not trusted for stopping: the script checks the live archive lock and process group before signaling the worker. Stop requests retain recoverable stage state; wait until `status` reports stopped before taking a backup.
+The worker starts in a separate process session and survives this chat/terminal finishing. On macOS, `caffeinate -i` prevents idle sleep for the worker's lifetime. It does not survive a reboot; run `start` again afterward. The worker checks ASR before each download and again before inference, reconnecting its recorded tunnel after a lost connection. If reconnection requires fresh SSH authorization or the service is unavailable, it stops the queue and retains audio. Authorize/reconnect, inspect failures, retry, and restart. A PID alone is not trusted for stopping: the script checks the live archive lock and process group before signaling its supervisor group. Download subprocesses and their ffmpeg children are stopped before the worker releases its lock. Stop requests retain recoverable stage state; wait until `status` reports stopped before taking a backup.
 
 ```bash
 scripts/tubescribe export /absolute/path/to/a/new/tubescribe-backup
@@ -157,7 +157,7 @@ Export holds the worker lock, uses SQLite's backup API, and copies the transcrip
 uv --config-file uv.toml run --locked python -m unittest discover -s tests -v
 ```
 
-Tests cover duplicate indexing, completed-job skips, independent stage state, inference failure with audio reuse, failed durable writes, exclusive workers, interrupted-stage recovery, bounded attempts/backoff, absent tabs vs bot checks, explicit upgrade profiles, and timestamp/schema validation. The real smoke run processes the latest three videos end to end, then reruns those IDs to check that no download or ASR runs again. Runtime quality/speed results are recorded separately in ignored `data/quality/`; channel history is complete only when its recorded jobs establish completion.
+Tests cover duplicate indexing, completed-job skips, independent stage state, inference failure with audio reuse, failed durable writes, exclusive workers, interrupted-stage recovery, bounded attempts/backoff, absent tabs vs bot checks, explicit upgrade profiles, RTX 4090 enforcement, tunnel reconnection, offline queue suspension, downloader process cleanup, and timestamp/schema validation. The real smoke run processes the latest three videos end to end, then reruns those IDs to check that no download or ASR runs again. Runtime quality/speed results are recorded separately in ignored `data/quality/`; channel history is complete only when its recorded jobs establish completion.
 
 ### Verified first run (9 October 2026)
 

@@ -2,12 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tubescribe.asr import Client, validate
 from tubescribe.storage import Store, worker_lock
-from tubescribe.worker import work
-from tubescribe.youtube import YouTubeError, discover
+from tubescribe.worker import InferenceUnavailable, ensure_ready, work
+from tubescribe.youtube import YouTubeError, discover, run
 
 CID = "UCabcdefghijklmnopqrstuv"
 VID = "abcdefghijk"
@@ -206,6 +206,67 @@ class Pipeline(unittest.TestCase):
     def test_explicit_new_profile_preserves_prior_job(self):
         self.store.index(CID, "upload", [self.video], "upgrade-v2")
         self.assertEqual(self.store.db.execute("SELECT count(*) FROM jobs").fetchone()[0], 2)
+
+    def configure_tunnel(self):
+        endpoint = "http://127.0.0.1:18766"
+        (self.store.root / "tunnel.json").write_text(
+            json.dumps(
+                {
+                    "host": "tubescribe-beast",
+                    "local_port": 18766,
+                    "remote_port": 18765,
+                    "endpoint": endpoint,
+                }
+            )
+        )
+        return endpoint
+
+    def test_lost_tunnel_reconnects_using_saved_configuration(self):
+        endpoint = self.configure_tunnel()
+        client = Mock()
+        client.health.side_effect = ConnectionError("connection refused")
+        with patch("tubescribe.worker.tunnel", return_value={"health": RESULT}) as reconnect:
+            self.assertEqual(ensure_ready(client, self.store, endpoint), RESULT)
+            reconnect.assert_called_once_with(
+                self.store.root, "start", "tubescribe-beast", 18766, 18765
+            )
+        with self.assertRaises(InferenceUnavailable):
+            ensure_ready(client, self.store, "http://127.0.0.1:9999")
+
+    def test_unavailable_service_stops_downloads_and_preserves_downloaded_audio(self):
+        self.configure_tunnel()
+        with (
+            patch("tubescribe.worker.Client.health", side_effect=ConnectionError("offline")),
+            patch("tubescribe.worker.tunnel", side_effect=RuntimeError("authorization required")),
+            patch("tubescribe.worker.download") as dl,
+        ):
+            with self.assertRaises(InferenceUnavailable):
+                self.run_work()
+            dl.assert_not_called()
+        with (
+            patch(
+                "tubescribe.worker.Client.health",
+                side_effect=[RESULT, RESULT, ConnectionError("offline")],
+            ),
+            patch("tubescribe.worker.tunnel", side_effect=RuntimeError("authorization required")),
+            patch("tubescribe.worker.download", side_effect=self.downloaded),
+            patch("tubescribe.worker.Client.transcribe") as asr,
+        ):
+            self.assertEqual(self.run_work()["failed"], 1)
+            asr.assert_not_called()
+        self.assertEqual(self.job()["download_state"], "complete")
+        self.assertTrue((self.store.root / self.job()["audio_path"]).is_file())
+
+    def test_downloader_interruption_terminates_process_group(self):
+        process = Mock(pid=12345)
+        process.communicate.side_effect = [KeyboardInterrupt(), ("", "")]
+        with (
+            patch("tubescribe.youtube.subprocess.Popen", return_value=process),
+            patch("tubescribe.youtube.os.killpg") as kill,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                run(["--dump-single-json"])
+            kill.assert_called_once_with(12345, 15)
 
 
 if __name__ == "__main__":
