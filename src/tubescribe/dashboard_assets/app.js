@@ -289,6 +289,7 @@ async function refresh() {
   } finally { refreshing = false; }
 }
 document.querySelectorAll("[data-view]").forEach((el) => el.addEventListener("click", () => setView(el.dataset.view)));
+document.querySelector(".brand").addEventListener("click", (event) => { event.preventDefault(); setView("overview"); });
 document.querySelectorAll("[data-open-view]").forEach((el) => el.addEventListener("click", () => setView(el.dataset.openView)));
 document.querySelectorAll("dialog .close").forEach((el) => el.addEventListener("click", () => el.closest("dialog").close()));
 $("file-preview").addEventListener("close", () => previewRequest++);

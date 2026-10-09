@@ -260,7 +260,12 @@ def main():
                     }
                 )
     except KeyboardInterrupt:
-        print("Interrupted; stage state preserved. Rerun work to resume.", file=sys.stderr)
+        message = (
+            "Dashboard stopped."
+            if args.command == "dashboard"
+            else "Interrupted; stage state preserved. Rerun work to resume."
+        )
+        print(message, file=sys.stderr)
         return 130
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr, flush=True)
