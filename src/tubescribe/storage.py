@@ -12,6 +12,9 @@ import time
 from datetime import UTC
 from pathlib import Path
 
+from .asr import validate
+from .subtitles import render_srt
+
 
 def now() -> str:
     from datetime import datetime
@@ -179,6 +182,9 @@ class Store:
                     asr_state="pending",
                     error="Saved transcript missing or corrupt; repair queued",
                 )
+            else:
+                # Subtitles are derived content: repair them without another download or ASR.
+                self._subtitle(r)
 
     def jobs(self, *, profile="turbo-v1", ids=None, channel=None, max_attempts=3):
         conditions = [
@@ -233,6 +239,7 @@ class Store:
         jp, tp = folder / "transcript.json", folder / "transcript.txt"
         atomic_write(self.root / jp, js)
         atomic_write(self.root / tp, txt)
+        atomic_write(self.root / folder / "transcript.srt", render_srt(result["segments"]))
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO transcripts VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -254,9 +261,44 @@ class Store:
                 "UPDATE jobs SET state='complete',asr_state='complete',completed_at=?,updated_at=?,error=NULL,error_kind=NULL,failed_stage=NULL WHERE id=?",
                 (now(), now(), job["id"]),
             )
-        # Never delete the retry source until both files and the SQLite commit are durable.
+        # Never delete the retry source until all formats and the SQLite commit are durable.
         if job.get("audio_path") and not keep_audio:
             (self.root / job["audio_path"]).unlink(missing_ok=True)
+
+    def _subtitle(self, transcript, destination=None):
+        source = self.root / transcript["json_path"]
+        raw = source.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != transcript["json_sha256"]:
+            raise ValueError(f"Saved JSON is corrupt: {source}")
+        result = validate(json.loads(raw))
+        path = (
+            destination / f"{result['video_id']}.{result['profile']}.srt"
+            if destination is not None
+            else source.with_suffix(".srt")
+        )
+        content = render_srt(result["segments"])
+        if not path.is_file() or path.read_bytes() != content:
+            atomic_write(path, content)
+        return str(path)
+
+    def subtitles(self, *, ids=None, profile=None, destination=None):
+        conditions = ["j.state='complete'"]
+        values = []
+        if ids:
+            conditions.append(f"j.video_id IN ({','.join('?' for _ in ids)})")
+            values.extend(ids)
+        if profile:
+            conditions.append("j.profile=?")
+            values.append(profile)
+        rows = self.db.execute(
+            f"SELECT t.*,j.video_id FROM transcripts t JOIN jobs j ON j.id=t.job_id WHERE {' AND '.join(conditions)} ORDER BY j.id",
+            values,
+        ).fetchall()
+        if ids and set(ids) != {r["video_id"] for r in rows}:
+            raise ValueError(
+                "One or more requested videos have no completed transcript in this scope"
+            )
+        return [self._subtitle(row, destination) for row in rows]
 
     def retry(self, ids=None):
         sql = "UPDATE jobs SET state='pending',next_retry=0,download_attempts=0,asr_attempts=0,error=NULL,error_kind=NULL WHERE state='failed'"

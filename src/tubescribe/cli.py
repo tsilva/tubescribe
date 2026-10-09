@@ -56,6 +56,12 @@ def main():
     c.add_argument("--video", action="append")
     c = sub.add_parser("export")
     c.add_argument("destination", type=Path)
+    c = sub.add_parser("subtitles", help="Generate/export SubRip (.srt) from saved transcripts")
+    c.add_argument(
+        "destination", type=Path, nargs="?", help="Optional directory for VIDEO.PROFILE.srt files"
+    )
+    c.add_argument("--video", action="append")
+    c.add_argument("--profile")
     sub.add_parser("health")
     c = sub.add_parser("tunnel")
     c.add_argument("action", choices=["start", "stop", "status"])
@@ -200,6 +206,14 @@ def main():
         elif args.command == "retry":
             with worker_lock(store.root):
                 out({"requeued": store.retry(args.video)})
+        elif args.command == "subtitles":
+            with worker_lock(store.root):
+                paths = store.subtitles(
+                    ids=args.video,
+                    profile=args.profile,
+                    destination=args.destination.resolve() if args.destination else None,
+                )
+                out({"format": "srt", "count": len(paths), "files": paths})
         elif args.command == "health":
             out(Client(endpoint()).health())
         elif args.command == "tunnel":
@@ -211,6 +225,7 @@ def main():
             # Consistent DB/files snapshot; no inference worker can delete/update files during export.
             with worker_lock(store.root):
                 dest.mkdir(parents=True, exist_ok=False)
+                store.subtitles()
                 with sqlite3.connect(dest / "archive.sqlite3") as target:
                     store.db.backup(target)
                 if (store.root / "transcripts").exists():
