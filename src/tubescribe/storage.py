@@ -13,7 +13,7 @@ from datetime import UTC
 from pathlib import Path
 
 from .asr import validate
-from .subtitles import render_srt
+from .subtitles import render_markdown, render_srt
 
 
 def now() -> str:
@@ -240,6 +240,7 @@ class Store:
         atomic_write(self.root / jp, js)
         atomic_write(self.root / tp, txt)
         atomic_write(self.root / folder / "transcript.srt", render_srt(result["segments"]))
+        atomic_write(self.root / folder / "transcript.md", render_markdown(result["segments"]))
         with self.db:
             self.db.execute(
                 "INSERT OR REPLACE INTO transcripts VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -279,7 +280,11 @@ class Store:
         content = render_srt(result["segments"])
         if not path.is_file() or path.read_bytes() != content:
             atomic_write(path, content)
-        return str(path)
+        markdown = path.with_suffix(".md")
+        content = render_markdown(result["segments"])
+        if not markdown.is_file() or markdown.read_bytes() != content:
+            atomic_write(markdown, content)
+        return [str(path), str(markdown)]
 
     def subtitles(self, *, ids=None, profile=None, destination=None):
         conditions = ["j.state='complete'"]
@@ -298,7 +303,7 @@ class Store:
             raise ValueError(
                 "One or more requested videos have no completed transcript in this scope"
             )
-        return [self._subtitle(row, destination) for row in rows]
+        return [path for row in rows for path in self._subtitle(row, destination)]
 
     def retry(self, ids=None):
         sql = "UPDATE jobs SET state='pending',next_retry=0,download_attempts=0,asr_attempts=0,error=NULL,error_kind=NULL WHERE state='failed'"

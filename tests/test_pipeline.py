@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from tubescribe.asr import Client, validate
 from tubescribe.storage import Store, worker_lock
-from tubescribe.subtitles import render_srt
+from tubescribe.subtitles import render_markdown, render_srt
 from tubescribe.worker import InferenceUnavailable, ensure_ready, work
 from tubescribe.youtube import YouTubeError, discover, run
 
@@ -96,30 +96,45 @@ class Pipeline(unittest.TestCase):
                 / self.store.db.execute("SELECT json_path FROM transcripts").fetchone()[0]
             )
             subtitle = source.with_suffix(".srt")
+            markdown = source.with_suffix(".md")
             expected = "1\n00:00:00,000 --> 00:00:03,000\nA real transcript.\n\n"
             self.assertEqual(subtitle.read_text(), expected)
+            self.assertEqual(markdown.read_text(), "**Speaker:** A real transcript.\n")
             for corrupt in (False, True):
                 if corrupt:
                     subtitle.write_text("broken subtitle")
+                    markdown.write_text("broken Markdown")
                 else:
                     subtitle.unlink()
+                    markdown.unlink()
                 self.assertEqual(self.run_work()["skipped"], 1)
                 self.assertEqual(subtitle.read_text(), expected)
+                self.assertEqual(markdown.read_text(), "**Speaker:** A real transcript.\n")
             self.assertEqual(asr.call_count, 1)
             self.assertEqual(dl.call_count, 1)
         destination = self.store.root / "exported-subtitles"
         files = self.store.subtitles(ids=[VID], destination=destination)
-        self.assertEqual(files, [str(destination / f"{VID}.turbo-v1.srt")])
+        self.assertEqual(
+            files,
+            [str(destination / f"{VID}.turbo-v1{s}") for s in (".srt", ".md")],
+        )
         self.assertEqual(Path(files[0]).read_text(), expected)
+        self.assertEqual(Path(files[1]).read_text(), "**Speaker:** A real transcript.\n")
         with self.assertRaises(ValueError):
             self.store.subtitles(ids=["nonexistent"])
 
+    def test_markdown_save_failure_retains_audio_before_completion(self):
+        self.assert_format_save_failure(".md")
+
     def test_subtitle_save_failure_retains_audio_before_completion(self):
+        self.assert_format_save_failure(".srt")
+
+    def assert_format_save_failure(self, suffix):
         from tubescribe.storage import atomic_write
 
         def write(path, content):
-            if path.suffix == ".srt":
-                raise OSError("disk full writing subtitle")
+            if path.suffix == suffix:
+                raise OSError(f"disk full writing {suffix}")
             atomic_write(path, content)
 
         with (
@@ -132,6 +147,22 @@ class Pipeline(unittest.TestCase):
         self.assertEqual(self.job()["failed_stage"], "save")
         self.assertTrue((self.store.root / self.job()["audio_path"]).is_file())
         self.assertEqual(self.store.db.execute("SELECT count(*) FROM transcripts").fetchone()[0], 0)
+
+    def test_markdown_groups_voice_turns_and_preserves_unknown_speech(self):
+        segments = [
+            {"text": " Olá!\nFirst cue.", "speaker_id": "a", "speaker_name": "Jordi Visser"},
+            {"text": "Second cue.", "speaker_id": "a", "speaker_name": "Jordi Visser"},
+            {"text": "Yes.", "speaker_id": "b", "speaker_name": "Marty Bent"},
+            {"text": "An unidentified voice.", "speaker_id": "UNKNOWN"},
+            {"text": "Back again.", "speaker_id": "a", "speaker_name": "Jordi Visser"},
+        ]
+        self.assertEqual(
+            render_markdown(segments).decode(),
+            "**Jordi Visser:** Olá! First cue. Second cue.\n\n"
+            "**Marty Bent:** Yes.\n\n"
+            "**UNKNOWN:** An unidentified voice.\n\n"
+            "**Jordi Visser:** Back again.\n",
+        )
 
     def test_asr_failure_retains_audio_and_retry_does_not_download(self):
         with (

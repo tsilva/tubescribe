@@ -56,9 +56,12 @@ def main():
     c.add_argument("--video", action="append")
     c = sub.add_parser("export")
     c.add_argument("destination", type=Path)
-    c = sub.add_parser("subtitles", help="Generate/export SubRip (.srt) from saved transcripts")
+    c = sub.add_parser("subtitles", help="Generate/export SRT and Markdown speaker turns")
     c.add_argument(
-        "destination", type=Path, nargs="?", help="Optional directory for VIDEO.PROFILE.srt files"
+        "destination",
+        type=Path,
+        nargs="?",
+        help="Optional directory for VIDEO.PROFILE.srt/.md files",
     )
     c.add_argument("--video", action="append")
     c.add_argument("--profile")
@@ -213,7 +216,7 @@ def main():
                     profile=args.profile,
                     destination=args.destination.resolve() if args.destination else None,
                 )
-                out({"format": "srt", "count": len(paths), "files": paths})
+                out({"formats": ["srt", "md"], "count": len(paths), "files": paths})
         elif args.command == "health":
             out(Client(endpoint()).health())
         elif args.command == "tunnel":

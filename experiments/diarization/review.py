@@ -5,7 +5,7 @@ import itertools
 import json
 from pathlib import Path
 
-from tubescribe.subtitles import render_srt, timestamp
+from tubescribe.subtitles import render_markdown, render_srt, timestamp
 
 
 def overlap(a, b):
@@ -156,6 +156,7 @@ def main():
             for cue in cues
         ]
         (root / f"{run['label']}.srt").write_bytes(render_srt(labelled))
+        (root / f"{run['label']}.md").write_bytes(render_markdown(cues))
         (root / f"{run['label']}.txt").write_text(
             "\n".join(f"[{timestamp(cue['start'])}] {cue['text']}" for cue in labelled) + "\n"
         )

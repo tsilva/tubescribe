@@ -113,18 +113,18 @@ scripts/tubescribe work --video VIDEO_ID --keep-audio # retain successful source
 scripts/tubescribe retry --video VIDEO_ID           # reset failed job attempt counters/backoff
 scripts/tubescribe retry                           # reset all failed jobs
 scripts/tubescribe work --wait                     # drain pending work and wait for bounded automatic retries
-scripts/tubescribe subtitles                       # add/repair transcript.srt beside all completed transcripts
+scripts/tubescribe subtitles                       # add/repair transcript.srt and transcript.md
 scripts/tubescribe subtitles --video hKBjZBiw62U   # one saved video
-scripts/tubescribe subtitles /absolute/path/to/subtitles --profile turbo-v1 # export VIDEO_ID.PROFILE.srt files
+scripts/tubescribe subtitles /absolute/path/to/subtitles --profile turbo-v1 # export VIDEO_ID.PROFILE.srt/.md files
 ```
 
 Jordi Visser's stable channel ID is **UCSLOw8JrFTBb3qF-p4v0v_w**. Discovery checks `/videos`, `/shorts`, and `/streams` independently. Absent tabs count as empty; failed tab requests remain visible. Active/upcoming livestreams and recordings still being prepared are excluded. Flat indexing does not always expose exact upload dates; `latest` resolves metadata before choosing and a download checks availability/channel identity again. `sync --limit N` limits each tab rather than the whole channel.
 
 Downloads prefer audio-only HLS (`bestaudio[protocol^=m3u8]/bestaudio`), because direct DASH audio returned HTTP 403 for two smoke-test videos. They use one fragment at a time, request/download sleeps, and two bounded yt-dlp network retries. Unavailable HLS fragments cause failure rather than a silently truncated transcript. Decoded duration is checked against video metadata. Stage attempts default to three total attempts, with exponential cooldowns starting at one minute. Rate limits/bot checks pause the entire worker for 30 minutes with `--wait`, or stop the current run without it. No cookies or authenticated YouTube account are required by default; inaccessible/private/member-only videos are recorded as failures when encountered. Discovery reflects currently accessible public listings and cannot enumerate hidden/private/deleted content.
 
-Each video/profile pair has a unique job. Download, ASR, and overall completion have independent states; discovery is tracked per channel/tab. Only one worker can hold the archive lock. After an interrupted worker releases the lock, the next worker reopens active stages and reuses any committed download. Complete jobs with intact transcript hashes are skipped without an inference request. Missing/corrupt saved JSON/text is queued for repair. JSON, readable text, and SubRip subtitles are atomically written and fsynced before SQLite completion commits; audio is removed **only after that commit** (unless `--keep-audio` is requested for a review). Failed inference or storage retains audio for retry.
+Each video/profile pair has a unique job. Download, ASR, and overall completion have independent states; discovery is tracked per channel/tab. Only one worker can hold the archive lock. After an interrupted worker releases the lock, the next worker reopens active stages and reuses any committed download. Complete jobs with intact transcript hashes are skipped without an inference request. Missing/corrupt saved JSON/text is queued for repair. JSON, readable text, SubRip subtitles, and Markdown turns are atomically written and fsynced before SQLite completion commits; audio is removed **only after that commit** (unless `--keep-audio` is requested for a review). Failed inference or storage retains audio for retry.
 
-**SubRip (`.srt`)** is the default subtitle format: plain UTF-8, numbered cues, `HH:MM:SS,mmm` timestamps, and one cue per ASR segment. No video title or metadata is inserted into subtitle cues; JSON retains full provenance. Existing archives gain SRT files through `subtitles` or on the next worker run, using saved JSON without downloading or transcribing again. Missing/corrupt SRT files are regenerated from that authoritative JSON. Stop an active backfill before `subtitles` or backup/export to obtain the archive lock, then restart it. Subtitle exports can reuse a destination directory; matching video/profile filenames are updated, while unrelated files remain untouched.
+**SubRip (`.srt`)** is the default subtitle format: plain UTF-8, numbered cues, `HH:MM:SS,mmm` timestamps, and one cue per ASR segment. No video title or metadata is inserted into subtitle cues; JSON retains full provenance. Existing archives gain SRT files through `subtitles` or on the next worker run, using saved JSON without downloading or transcribing again. Missing/corrupt SRT and Markdown files are regenerated from that authoritative JSON. Stop an active backfill before `subtitles` or backup/export to obtain the archive lock, then restart it. Subtitle exports can reuse a destination directory; matching video/profile filenames are updated, while unrelated files remain untouched. CLI output lists both formats and counts all generated files.
 
 The default archive directory is `data/` in this repository (the wrapper always changes to the repository root):
 
@@ -132,6 +132,7 @@ The default archive directory is `data/` in this repository (the wrapper always 
 - `data/transcripts/CHANNEL_ID/VIDEO_ID/PROFILE/transcript.json`: timestamped segments/words and complete ASR/video provenance.
 - `data/transcripts/CHANNEL_ID/VIDEO_ID/PROFILE/transcript.txt`: readable timestamped text.
 - `data/transcripts/CHANNEL_ID/VIDEO_ID/PROFILE/transcript.srt`: SubRip subtitles for video players/editors.
+- `data/transcripts/CHANNEL_ID/VIDEO_ID/PROFILE/transcript.md`: consecutive cues grouped into speaker turns, each prefixed with `**Speaker name:**`. Recorded names take precedence over anonymous speaker IDs; unlabelled ASR uses `Speaker`. The formatter does not infer names or run diarization. A monologue becomes one turn, with subtitle timestamps retained in SRT rather than repeated in Markdown.
 - `data/audio/VIDEO_ID.EXT`: temporary or retained retry audio; complete downloads use the original audio codec.
 - `data/smoke.log`, `data/backfill.log`: stage events with UTC timestamps, errors, duration, and inference speed.
 
@@ -155,7 +156,7 @@ The worker starts in a separate process session and survives this chat/terminal 
 scripts/tubescribe export /absolute/path/to/a/new/tubescribe-backup
 ```
 
-Export holds the worker lock, uses SQLite's backup API, and copies JSON, text, SRT transcripts plus retained retry audio into a **new** directory outside the live archive. It generates SRT from saved JSON for older completed transcripts before copying. Stop an active worker first. Restore by selecting the exported directory with `--data`, creating/reconnecting a tunnel, and resuming `work`. The export deliberately omits SSH control sockets and host-specific tunnel state. Copy the export to your normal backup storage; a local copy alone does not protect against disk loss.
+Export holds the worker lock, uses SQLite's backup API, and copies JSON, text, SRT, and Markdown transcripts plus retained retry audio into a **new** directory outside the live archive. It generates SRT and Markdown from saved JSON for older completed transcripts before copying. Stop an active worker first. Restore by selecting the exported directory with `--data`, creating/reconnecting a tunnel, and resuming `work`. The export deliberately omits SSH control sockets and host-specific tunnel state. Copy the export to your normal backup storage; a local copy alone does not protect against disk loss.
 
 ## Verification
 

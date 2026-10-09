@@ -1,6 +1,34 @@
-"""Plain UTF-8 SubRip subtitles derived from authoritative ASR segments."""
+"""SubRip subtitles and Markdown speaker turns derived from ASR segments."""
 
 import math
+
+
+def render_markdown(segments: list[dict]) -> bytes:
+    """Merge consecutive cues from the same voice without inventing speaker names."""
+    turns = []
+    for segment in segments:
+        text = " ".join(segment["text"].split())
+        if not text:
+            raise ValueError("Transcript cue is empty")
+        name = segment.get("speaker_name")
+        identity = segment.get("speaker_id") or segment.get("speaker") or name or "Speaker"
+        label = " ".join(str(name or identity).split())
+        if turns and turns[-1]["identity"] == identity:
+            turns[-1]["text"] += " " + text
+        else:
+            turns.append({"identity": identity, "label": label, "text": text})
+    if not turns:
+        raise ValueError("No transcript cues")
+
+    # Escape label markup so IDs such as speaker_0 remain readable literally.
+    def escape(label):
+        for char in ("\\", "*", "_", "[", "]"):
+            label = label.replace(char, "\\" + char)
+        return label
+
+    return ("\n\n".join(f"**{escape(t['label'])}:** {t['text']}" for t in turns) + "\n").encode(
+        "utf-8"
+    )
 
 
 def timestamp(seconds: float) -> str:
