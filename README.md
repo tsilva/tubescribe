@@ -1,6 +1,6 @@
 # TubeScribe
 
-A local personal YouTube transcript archive. This Mac owns channel discovery, the SQLite queue, downloaded audio, and durable transcripts. Beast-3 runs Whisper ASR over a loopback SSH tunnel. No paid transcript provider or web UI is needed.
+A local personal YouTube transcript archive. This Mac owns channel discovery, the SQLite queue, downloaded audio, and durable transcripts. Beast-3 runs Whisper ASR over a loopback SSH tunnel. A local admin dashboard monitors the archive and browses saved files; the CLI manages ingestion. No paid transcript provider is needed.
 
 ## Install
 
@@ -157,6 +157,24 @@ scripts/tubescribe export /absolute/path/to/a/new/tubescribe-backup
 ```
 
 Export holds the worker lock, uses SQLite's backup API, and copies JSON, text, SRT, and Markdown transcripts plus retained retry audio into a **new** directory outside the live archive. It generates SRT and Markdown from saved JSON for older completed transcripts before copying. Stop an active worker first. Restore by selecting the exported directory with `--data`, creating/reconnecting a tunnel, and resuming `work`. The export deliberately omits SSH control sockets and host-specific tunnel state. Copy the export to your normal backup storage; a local copy alone does not protect against disk loss.
+
+## Admin dashboard
+
+```bash
+scripts/tubescribe dashboard                       # start in the background; prints the URL
+scripts/tubescribe dashboard status                # current URL, PID, and health
+scripts/tubescribe dashboard stop                  # stop only the verified dashboard process
+scripts/tubescribe dashboard start --port 8877     # optional fixed port
+scripts/tubescribe dashboard serve --port auto     # run in this terminal; Ctrl-C stops it
+```
+
+The dashboard binds only to `127.0.0.1`. The default `--port auto` asks the OS for an available port; use the printed URL, or `dashboard status` to find it again. Starting an already running dashboard reuses it, even if a different port was requested. To change its port, stop it first. An unavailable fixed port reports a startup failure rather than replacing another server. The background process survives chat/terminal completion, but does not automatically restart after a reboot. State and logs live in `data/dashboard.json`, `data/dashboard.lock`, and `data/dashboard.log` (or the selected `--data` directory).
+
+Overview shows job completion, downloading/transcribing stages, worker liveness, registered channels, and the latest backfill events. Videos can be filtered by title/ID, channel, status, and profile; each row opens failure details, attempt counters, retry time, provenance, and saved outputs. Channels includes separate discovery results for uploads, Shorts, and livestreams. Files includes archive transcripts, exported subtitles, review artifacts, and retained audio, with text previews and downloads. Markdown previews display speaker turns. Previews are limited to 2 MiB; downloads contain the complete file.
+
+The dashboard reads SQLite in short transactions and does not acquire the worker's archive lock or run inference. It refreshes every five seconds while visible and keeps filters and open previews stable. `Queued` means pending work; failed jobs remain separately visible even when scheduled for a retry. Stage counts reflect recorded state; a stopped worker may leave a stage recorded as active until the next worker recovers it. The UI reports worker liveness separately. Completion counts are jobs, including distinct model profiles; detected videos are counted once across profiles. Backfill activity comes from `backfill.log`; foreground workers still update database status but may not append that log.
+
+This is a read-only local monitor. Use the CLI for adding channels, discovery, retries, and worker control. File access is restricted to recognized transcript/review outputs and audio inside the archive; it does not expose SQLite, SSH configuration, sockets, or arbitrary local files. No external frontend assets or JavaScript packages are required.
 
 ## Verification
 

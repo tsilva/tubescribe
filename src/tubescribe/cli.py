@@ -66,12 +66,24 @@ def main():
     c.add_argument("--video", action="append")
     c.add_argument("--profile")
     sub.add_parser("health")
+    c = sub.add_parser("dashboard", help="Local admin dashboard for monitoring and file browsing")
+    c.add_argument(
+        "action", nargs="?", default="start", choices=["start", "status", "stop", "serve"]
+    )
+    c.add_argument("--port", default="auto", help="Local port, or auto for an available port")
     c = sub.add_parser("tunnel")
     c.add_argument("action", choices=["start", "stop", "status"])
     c.add_argument("--host", default="tubescribe-beast")
     c.add_argument("--local-port", type=int, default=18766)
     c.add_argument("--remote-port", type=int, default=18765)
     args = p.parse_args()
+    if args.command == "dashboard":
+        try:
+            args.port = 0 if args.port == "auto" else int(args.port)
+            if not 0 <= args.port <= 65535:
+                raise ValueError()
+        except ValueError:
+            p.error("Dashboard port must be auto or an integer from 0 to 65535")
     if getattr(args, "profile", None) and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", args.profile):
         p.error("Profile must be a path-safe label of letters, numbers, underscores or hyphens")
     if (
@@ -91,7 +103,13 @@ def main():
         return "http://127.0.0.1:18766"
 
     try:
-        if args.command == "channels":
+        if args.command == "dashboard":
+            from .dashboard import dashboard
+
+            result = dashboard(store.root, args.action, args.port)
+            if result is not None:
+                out(result)
+        elif args.command == "channels":
             if args.action == "add":
                 channel = youtube.resolve(args.url)
                 store.channel(channel)
