@@ -50,6 +50,26 @@ def main():
     c.add_argument(
         "--keep-audio", action="store_true", help="Retain successful audio for quality review"
     )
+    c.add_argument("--postprocessing", choices=["video", "text", "off"], default="video")
+    c.add_argument(
+        "--bridge", help="Loopback AgentBridge URL (defaults to saved config or port 8082)"
+    )
+    c.add_argument("--video-cache", help="Read-only local or ssh://HOST/path video cache directory")
+    c = sub.add_parser("postprocess", help="Finish existing diarized transcripts without ASR")
+    c.add_argument("--video", action="append")
+    c.add_argument("--channel")
+    c.add_argument("--profile", default="turbo-v1")
+    c.add_argument("--limit", type=int)
+    c.add_argument("--max-attempts", type=int, default=3)
+    c.add_argument("--wait", action="store_true")
+    c.add_argument("--mode", choices=["video", "text"], default="video")
+    c.add_argument("--bridge")
+    c.add_argument("--video-cache")
+    c.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate selected outputs, preserving earlier bundles",
+    )
     c = sub.add_parser("status")
     c.add_argument("--failures", action="store_true")
     c = sub.add_parser("retry")
@@ -118,6 +138,28 @@ def main():
             from .diarization_tunnel import forward
 
             out(forward(store.root, args.action, args.local_port, args.remote_port))
+        elif args.command == "postprocess":
+            from .postprocessing_worker import run as postprocess
+
+            def stop_postprocessing(signum, frame):
+                raise KeyboardInterrupt()
+
+            signal.signal(signal.SIGTERM, stop_postprocessing)
+            result = postprocess(
+                store,
+                bridge=args.bridge,
+                ids=args.video,
+                channel=args.channel,
+                profile=args.profile,
+                limit=args.limit,
+                max_attempts=args.max_attempts,
+                wait=args.wait,
+                mode=args.mode,
+                video_cache=args.video_cache,
+                force=args.force,
+            )
+            out(result)
+            return int(result["failed"] > 0)
         elif args.command == "diarize":
             from .diarization_tunnel import endpoint as diarization_endpoint
             from .diarization_tunnel import ready
@@ -230,6 +272,9 @@ def main():
                 max_attempts=args.max_attempts,
                 wait=args.wait,
                 keep_audio=args.keep_audio,
+                postprocessing=args.postprocessing,
+                bridge=args.bridge,
+                video_cache=args.video_cache,
             )
             out(result)
             return int(result["failed"] > 0)
@@ -255,10 +300,19 @@ def main():
                         )
                     ],
                     "completed_jobs": store.db.execute(
-                        "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id WHERE j.state='complete' AND d.state='complete'"
+                        "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id JOIN postprocessings p ON p.job_id=j.id WHERE j.state='complete' AND d.state='complete' AND p.state='complete'"
                     ).fetchone()[0],
                     "awaiting_diarization": store.db.execute(
                         "SELECT COUNT(*) FROM jobs j LEFT JOIN diarizations d ON d.job_id=j.id WHERE j.state='complete' AND COALESCE(d.state,'pending')!='complete'"
+                    ).fetchone()[0],
+                    "postprocessing": [
+                        dict(r)
+                        for r in store.db.execute(
+                            "SELECT j.profile,p.state,p.stage,COUNT(*) AS count FROM postprocessings p JOIN jobs j ON j.id=p.job_id GROUP BY j.profile,p.state,p.stage"
+                        )
+                    ],
+                    "awaiting_postprocessing": store.db.execute(
+                        "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.state='complete' AND d.state='complete' AND COALESCE(p.state,'pending')!='complete'"
                     ).fetchone()[0],
                 }
             )
@@ -268,6 +322,14 @@ def main():
                         dict(r)
                         for r in store.db.execute(
                             "SELECT video_id,profile,failed_stage,error_kind,error,download_attempts,asr_attempts,next_retry,audio_path FROM jobs WHERE state='failed'"
+                        )
+                    ]
+                )
+                out(
+                    [
+                        dict(r)
+                        for r in store.db.execute(
+                            "SELECT j.video_id,j.profile,p.stage AS failed_stage,p.error,p.download_attempts,p.attempts,p.save_attempts,p.next_retry FROM postprocessings p JOIN jobs j ON j.id=p.job_id WHERE p.state='failed'"
                         )
                     ]
                 )

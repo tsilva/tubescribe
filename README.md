@@ -1,6 +1,6 @@
 # TubeScribe
 
-A local personal YouTube transcript archive. This Mac owns channel discovery, the SQLite queue, downloaded audio, and durable transcripts. Beast-3 runs Whisper ASR and Nemotron speaker diarization on its RTX 4090 over loopback SSH tunnels. A local dashboard lists channels and videos and previews saved transcripts; the CLI manages ingestion. No paid transcript provider is needed.
+A local personal YouTube transcript archive. This Mac owns channel discovery, the SQLite queue, cached media, and durable transcripts. Beast-3 runs Whisper ASR and Nemotron speaker diarization on its RTX 4090 over loopback SSH tunnels. AgentBridge/Codex produces cleaned Markdown with inspected video figures and evidence-backed speaker names as the final stage. A local dashboard lists channels and videos and opens the processed transcript when available; the CLI manages ingestion.
 
 ## Install
 
@@ -119,6 +119,8 @@ The user systemd unit is `tubescribe-diarization`, with lingering enabled. Insta
 
 Speaker IDs are anonymous and local to each video: **Speaker 1 is not a verified person name** and can refer to a different person in another video. A separately recorded `speaker_name` takes precedence in SRT/Markdown. Voice changes, background speech and overlap can produce extra labels. The model does not identify Jordi or guests. Full original ASR segments/word confidence remain in JSON alongside speaker-labelled cues.
 
+A detected voice can be absent from Whisper's words, such as a tablet speaking during a presentation. Enrichment preserves activity for such a voice as an explicit **Untranscribed speech** turn with timestamps in every published format. These annotations have `annotation: "untranscribed_speech"` and an empty `words` list in JSON; they are observations from diarization, not recognized dialogue. They occupy gaps outside existing subtitle cues, merge fragments separated by at most 0.1 seconds, and require at least 0.5 seconds of activity. `diarization_coverage` records voices with ASR words, voices without ASR words, and the annotated intervals. Fully overlapping activity or shorter detections remain in the model prediction and coverage metadata without replacing existing words. A completed enrichment means the prediction and formats were saved; untranscribed annotations still need speech recognition or human review. Most Jordi presentations are monologues, so one speaker label is expected.
+
 For already saved transcripts, stop the ASR backfill, wait for its worker to exit, then run `scripts/tubescribe diarize --wait`, or use the detached enrichment worker below. Deleted source audio is downloaded again for diarization, but ASR is reused. Diarization/download/save attempts have independent bounded counters (three by default) and checkpoints; interrupted connections pause the batch without consuming other videos' retry budgets. After enrichment, resume with `scripts/backfill.py start`; future videos include diarization automatically. An intentional model/settings upgrade requires a new profile, rather than silently relabelling completed work.
 
 ```bash
@@ -144,12 +146,18 @@ scripts/tubescribe status
 scripts/tubescribe status --failures
 scripts/tubescribe work --video hKBjZBiw62U --video LhuSxhCNa5g --video BkNzS8Ia-7k
 scripts/tubescribe work --limit 3
+scripts/tubescribe work --postprocessing text        # full speech cleanup without video inspection
+scripts/tubescribe work --postprocessing off         # explicitly stop after diarization
 scripts/tubescribe work --video VIDEO_ID --keep-audio # retain successful source for quality review
 scripts/tubescribe retry --video VIDEO_ID           # reset failed job attempt counters/backoff
 scripts/tubescribe retry                           # reset all failed jobs
 scripts/tubescribe work --wait                     # drain pending work and wait for bounded automatic retries
 scripts/tubescribe diarize --wait                  # enrich already saved ASR; no repeat ASR
 scripts/tubescribe diarize --video VIDEO_ID         # enrich one saved transcript
+scripts/tubescribe postprocess --video VIDEO_ID      # finish a saved diarized transcript; no ASR/diarization
+scripts/tubescribe postprocess --limit 3 --wait      # bounded final-stage batch/retries
+scripts/tubescribe postprocess --video VIDEO_ID --force # new model run; retain previous bundles
+scripts/backfill.py start --postprocess             # detached final-stage batch; no earlier service/tunnel startup
 scripts/tubescribe subtitles                       # add/repair transcript.srt and transcript.md
 scripts/tubescribe subtitles --video hKBjZBiw62U   # one saved video
 scripts/tubescribe subtitles /absolute/path/to/subtitles --profile turbo-v1 # export VIDEO_ID.PROFILE.srt/.md files
@@ -159,7 +167,7 @@ Jordi Visser's stable channel ID is **UCSLOw8JrFTBb3qF-p4v0v_w**. Discovery chec
 
 Downloads prefer audio-only HLS (`bestaudio[protocol^=m3u8]/bestaudio`), because direct DASH audio returned HTTP 403 for two smoke-test videos. Normal ingestion uses one fragment at a time; redownloading for saved-ASR enrichment uses two concurrent fragments. Both process only one video at a time, retain request/download sleeps, and use two bounded yt-dlp network retries. Unavailable HLS fragments cause failure rather than a silently truncated transcript. Decoded duration is checked against video metadata. Stage attempts default to three total attempts, with exponential cooldowns starting at one minute. Rate limits/bot checks pause the entire worker for 30 minutes with `--wait`, or stop the current run without it. No cookies or authenticated YouTube account are required by default; inaccessible/private/member-only videos are recorded as failures when encountered. Discovery reflects currently accessible public listings and cannot enumerate hidden/private/deleted content.
 
-Each video/profile pair has a unique job. Download, ASR, and diarization have independent states; discovery is tracked per channel/tab. `work` runs download → ASR → diarization → saved speaker-labelled formats. ASR commits first as a durable checkpoint; failed diarization resumes from that checkpoint without repeating ASR, even if ASR succeeded on its last allowed attempt. Only one worker can hold the archive lock. After an interrupted worker releases the lock, the next worker reopens active stages and reuses any committed download. Operator interruptions do not consume stage retry budgets. Jobs with intact transcripts and completed diarization are skipped without an inference request. Missing/corrupt saved JSON/text is repaired from valid ASR and diarization checkpoints when available. JSON, readable text, SubRip subtitles, and Markdown turns are atomically written and fsynced before SQLite completion commits; audio is removed **only after diarization completion commits** (unless `--keep-audio` is requested for a review). Failed inference or storage retains audio for retry. `status` reports ASR and diarization separately; `status --failures` and `retry` include both stages.
+Each video/profile pair has a unique job. Download, ASR, diarization, and postprocessing have independent states; discovery is tracked per channel/tab. `work` defaults to download → ASR → diarization → AgentBridge postprocessing. Raw speaker-labelled formats commit before the final step. Failed diarization resumes from ASR, and failed postprocessing resumes from the diarized source without either earlier inference call, even if an earlier stage succeeded on its last allowed attempt. Only one worker can hold the archive lock. Operator interruptions do not consume stage retry budgets. Jobs with intact transcripts, completed diarization, and a valid processed bundle are skipped. Missing/corrupt saved JSON/text is repaired from ASR and diarization checkpoints when available. Raw formats are atomically written and fsynced before SQLite commits; audio is removed **only after diarization completion commits** (unless `--keep-audio` is requested). A later postprocessing failure preserves those raw formats and the separate video cache. `status` reports all three inference stages; `status --failures` and `retry` include postprocessing. Overall completion requires the final bundle; old diarized videos appear as awaiting postprocessing until finished. `--postprocessing off` explicitly preserves the earlier ASR/diarization-only worker behavior.
 
 **SubRip (`.srt`)** is the default subtitle format: plain UTF-8, numbered cues and `HH:MM:SS,mmm` timestamps. Diarized cues are split at speaker changes and kept short for subtitles, with a speaker prefix; older ASR-only cues retain their original segment boundaries. No video title or metadata is inserted into subtitle cues; JSON retains full provenance. Existing archives gain SRT files through `subtitles` or on the next worker run, using saved JSON without downloading or transcribing again. Missing/corrupt SRT and Markdown files are regenerated from that authoritative JSON. Stop an active backfill before `subtitles` or backup/export to obtain the archive lock, then restart it. Subtitle exports can reuse a destination directory; matching video/profile filenames are updated, while unrelated files remain untouched. CLI output lists both formats and counts all generated files.
 
@@ -223,7 +231,7 @@ This is a read-only local monitor. Use the CLI for adding channels, discovery, r
 uv --config-file uv.toml run --locked python -m unittest discover -s tests -v
 ```
 
-Tests cover duplicate indexing, completed-job skips, independent ASR/diarization state, speaker-word assignment and unmatched speech, inference failure with audio reuse, checkpoint integrity, failed durable writes, repair without repeated inference, exclusive workers, interrupted-stage recovery, bounded attempts/backoff, absent tabs vs bot checks, explicit upgrade profiles, RTX 4090 enforcement, tunnel reconnection, offline batch suspension, downloader process cleanup, dashboard diarization state, and timestamp/schema validation. The real smoke run processes the latest three videos end to end, then reruns those IDs to check that no download or ASR runs again. Runtime quality/speed results are recorded separately in ignored `data/quality/`; channel history is complete only when its recorded jobs establish completion.
+Tests cover duplicate indexing, completed-job skips, independent ASR/diarization/postprocessing state, speaker-word assignment and unmatched speech, inference failure with media reuse, native image tool delivery, checkpoint integrity, failed durable writes, repair without repeated inference, exclusive workers, interrupted-stage recovery, bounded attempts/backoff, force limits, absent tabs vs bot checks, explicit upgrade profiles, RTX 4090 enforcement, tunnel reconnection, offline batch suspension, downloader process cleanup, dashboard state and figure downloads, and timestamp/schema validation. The initial ASR smoke run processed three videos and reran those IDs to check completed-job skips. Final-stage integration was separately verified on an existing diarized source. Runtime quality/speed results are recorded in ignored `data/quality/`; channel history is complete only when its recorded jobs establish completion.
 
 ### Verified first run (9 October 2026)
 
@@ -236,6 +244,198 @@ Initial full discovery indexed **113** accessible uploads. Use `status` for the 
 All **26** previously saved videos were enriched on beast-3's RTX 4090: **22.5 hours of audio in 98.9 seconds of remote processing**, approximately **820× real time**, including decoding but excluding downloads, tunnel uploads and local formatting. Original ASR segments and all **248,108** nonempty words/timestamps/confidence values were preserved; **26** unmatched words remain `UNKNOWN`. Output/checkpoint hashes and subtitle timestamps passed checks. A saved-ASR rerun returned `completed: 0, failed: 0, skipped: 26`. This verifies preservation and processing, rather than human-reference diarization accuracy. Runtime details and per-video results are in `data/diarization/archive-report.md` and `.json`.
 
 The integrated pipeline then recovered `Sopf31BOP4U` from its retained failed-ASR audio: **60.4 minutes** transcribed in **38.9 seconds**, followed automatically by **4.7 seconds** of diarization, all formats committed, and audio removed afterward. All 10,999 ASR words were preserved; its rerun skipped the completed job. Evidence is in `data/quality/pipeline-diarization.json` and its logs. The existing Bonsai and ASR services stayed running; the diarizer retained its model and returned unused GPU buffers after requests (868 MiB process VRAM observed after this request). Service restart and independent forward stop/start were also verified. Use the dashboard/CLI for current backfill progress.
+
+### Agent-assisted Markdown processing
+
+The shared [postprocessor](src/tubescribe/postprocessing.py) sends a completed,
+diarized SRT through caller-owned transcript and video tools to AgentBridge in one request,
+using `codex/gpt-6.1-sol` with high reasoning. It requires AgentBridge's experimental
+`POST /api/v1/agent/runs` endpoint, Codex CLI 0.159.2's native dynamic-tool protocol,
+FFmpeg/FFprobe when inspecting a cached video. The normal archive worker invokes it after
+diarization. The dedicated `postprocess` command never starts ASR or diarization and
+never rewrites raw transcripts. The [standalone pilot entrypoint](scripts/postprocess-pilot.py)
+uses the same implementation for comparisons outside the archive queue.
+
+AgentBridge selection is `--bridge`, then `TUBESCRIBE_AGENTBRIDGE`, then the optional
+`bridge` field in `data/postprocessing.json`, then `http://127.0.0.1:8082`. Use a loopback
+HTTP base URL for a build exposing `/api/v1/agent/runs`; an older installation without
+that endpoint pauses this stage. Connection errors and server failures pause the batch
+without exhausting every video's attempts. Neither worker automatically starts AgentBridge.
+The dedicated `postprocess` command stops on YouTube rate limits even with `--wait`;
+the retry remains queued with a 30-minute cooldown.
+
+Video mode reuses `data/videos/VIDEO_ID.mp4` (also `.webm`/`.mkv`) or downloads a stream
+at up to 720p with one concurrent fragment. The separate cache survives failures and
+completion for reuse. `--video-cache /path/to/cache` or
+`--video-cache ssh://HOST/absolute/cache/directory` selects a read-only existing cache;
+remote entries are `VIDEO_ID.mp4`, and only frames are transferred. Missing custom-cache
+entries fail rather than silently downloading elsewhere. Use `work --postprocessing text`
+or `postprocess --mode text` when video inspection is unnecessary; no figures are invented.
+
+The `postprocessings` SQLite table tracks download/model/save attempts independently,
+backoff, source hashes, output location and a hashed artifact manifest. Each model run
+has a fresh `transcripts/CHANNEL/VIDEO/PROFILE/postprocessing/RUN_ID/` directory; previous
+outputs are preserved. Files and directories are fsynced before the final SQLite commit.
+A persisted response is bound to original source hashes and instructions in
+`run-context.json`; packaging/storage retries validate and reuse it without video access,
+service readiness, or another model call. Corrupt response checkpoints are rejected.
+Invalid new model outputs are retried with a fresh response within the model attempt bound.
+An interruption before a response checkpoint exists requires a new agent turn; native
+agent turns are not resumed. Changed source content queues a new run. Missing/corrupt
+derived bundles can be rebuilt from valid response/frame checkpoints. `--force` explicitly
+regenerates completed results, including when changing between text and video modes.
+With `--force --limit N`, only the N attempted videos are reset; other completed results
+keep their completion pointers. A successful final model attempt can still retry packaging
+within its separate save budget.
+
+The dashboard keeps Channel → Videos and one Transcript action per row. Completed
+postprocessing opens the illustrated version, with downloads for Markdown, figures ZIP,
+and the original SRT. Earlier raw transcripts remain readable while this stage is pending.
+The generated preview escapes source text and executes no scripts. Archive export includes
+processed outputs and their checkpoints under `transcripts/`; it does not copy the video cache.
+
+Archive integration was verified on the full 22-minute `Domk77rYJhU` transcript: one native
+agent run took 188 seconds and produced six inspected figures plus an evidence-backed
+Jordi Visser speaker label. The normal worker rerun skipped it; all 145 existing raw
+transcript files retained their hashes. Evidence is in `data/quality/pipeline-integration.log`,
+`pipeline-integration-skip.log`, and `pipeline-evaluation/`.
+
+```bash
+uv run --frozen python scripts/postprocess-pilot.py \
+  --bridge http://127.0.0.1:PORT \
+  --transcript data/transcripts/CHANNEL_ID/VIDEO_ID/PROFILE/transcript.json \
+  --video /absolute/path/to/video.mp4 \
+  --output data/quality/postprocessing-pilot/VIDEO_ID/run-01
+```
+
+Input may be a transcript JSON with an adjacent SRT, or a standalone SRT.
+`--title` and `--source-url` override optional source metadata. Omit `--video` for
+transcript-only processing: no figures are invented, and visual references remain
+unresolved. Cached media supplied as video must contain a video stream, cover the transcript
+duration, and have a decodable end; finish downloads/copies before processing.
+`--video ssh://HOST/absolute/cache/path.mp4` inspects a caller-selected remote cache
+using batch-mode SSH and remote FFmpeg/FFprobe; only captured frames are transferred.
+It does not download or copy the full video. The host must already be accessible without
+interactive authentication, and both executables must be installed there.
+The script starts a transient authenticated loopback callback bound to that source.
+Codex receives the entire transcript by default as lossless compact cue records:
+speaker changes, cue IDs, start/end seconds, and JSON-escaped original text. This removes
+repeated SRT formatting without summarizing speech. `--input-format srt` supplies verbose
+normalized SRT instead for comparisons. Numeric body lines, multiline text, BOM/CRLF
+inputs, and metadata-provided names are supported; invalid cue times are rejected.
+Experimental
+`--defer-transcript` instead starts with a small timestamped visual-reference index
+built from excerpts, including introduction and other-voice cues. The index is
+incomplete; `get_full_transcript` delivers the complete selected format once, preferably after
+visual inspection and always before final writing. The caller rejects a deferred
+result that never loaded it. No extra model request builds the index. A full-video
+repeat on the 22-minute tutorial reduced uncached input 9.5%, but increased total
+tokens 19.4% and agent time 6.4% versus immediate compact input; its cleanup also
+removed more wording. Delayed loading remains opt-in.
+
+`video_screenshots` accepts up to eight timestamps per call. Preview returns one
+numbered contact sheet with 320×180 tiles; full requests return individual detail images. Identical
+views and numeric-equivalent crops are delivered once per run. Broad preview crops
+covering at least 65% of a frame reuse the whole-frame preview. Conservative
+low-resolution similarity suppresses redundant preview tiles across timestamps,
+comparing the entire frame without assuming where presenter overlays are placed.
+Similarity is compared within equivalent crop regions. This does not
+verify small chart-value changes: a requested full view still inspects that
+specific original timestamp. Crops affect inspection only; IDs export whole PNGs.
+An encoding failure does not mark previews as seen, so a retry still returns the image;
+captured frames from failed calls cannot be used as figures or identity evidence until issued.
+The agent batches selected detail views and starts speech-only videos with a representative
+preview batch, stopping when additional talking-head frames cannot supply identity evidence.
+`--legacy-visual-planning` retains the earlier batch guidance for comparisons. The smaller
+preview size showed mixed results; total usage also depends on how many follow-up views
+the model requests, so it is not a guaranteed token reduction.
+
+`video_search` scans one or two short windows (5–20 seconds on either side), samples
+locally every two seconds, and returns up to four visually distinct candidates per
+window. It does not identify charts semantically; Codex must inspect the candidates.
+Returned candidates share the remaining capture budget, including when it is nearly exhausted.
+Budgets scale with source duration, capped at 30 tool calls, 120 captured timestamps,
+24 full detail views, and 252 local search samples. Charts, diagrams, and software
+demonstration screens can all be selected. The figure target is roughly one per
+four minutes (at most 20), a ceiling rather than a quota: zero figures is valid
+for interviews or other speech-only material. Transcript-only mode allows two tool
+calls and no images. Each request permits 30 minutes. The output is the complete
+cleaned transcript with relevant figures, source links when available (plain
+timestamps otherwise), and every existing missing-speech annotation.
+
+Numeric speaker IDs are preserved; named labels declared in source metadata are normalized
+in memory and supplied as existing identity provenance, even when appearing only once.
+For a standalone named SRT without metadata, repeat `--speaker-label 'Alice'` for each
+known speaker prefix. Capitalization and repetition alone cannot distinguish a name
+from a heading such as `Key Point:`; ambiguous prefixes remain intact as speech under
+`UNKNOWN`. Unlabelled speech remains `UNKNOWN`,
+which may include different voices and is never named as one person.
+Speaker identification uses self-introductions, other speakers' introductions,
+and inspected presenter/name cards. It records confirmed, probable, or unknown
+identities with cue/frame evidence. Only confirmed names replace Markdown labels,
+retaining the original ID, for example `Jordi Visser (Speaker 1)`. Probable names
+remain suggestions in `speaker_names.json`; unidentified or device voices retain
+their numbered labels. Names of people mentioned in discussion, channel ownership,
+or face resemblance alone do not establish a speaker's identity. Original SRTs
+and diarization labels are unchanged.
+
+The script stores `request.json` without the callback token, `response.json`,
+`assets.json`, `tool-calls.json`, `searches.json` when used, and captured `figures/`.
+Successful runs produce `processed.md`, escaped `preview.html`, `report.json`
+(tokens, caller elapsed time, agent time excluding queueing, image deduplication,
+search samples, and the full-SRT tool
+position), `speaker_names.json`, `resources.json`, and `processed-with-figures.zip`.
+The package includes selected figures and any extra frames cited as identity
+evidence, so name assignments remain reviewable. Before publishing, it validates issued image IDs,
+declared contiguous source-cue coverage, ordered Markdown headings, and all supplied
+missing-speech/inaudibility annotations with their original speaker attribution;
+invented missing-speech annotations and reassigned existing names are rejected.
+It also rejects external image embeds, changed speaker-turn order, and gross summaries
+below 70% of source word count for sources of at least 150 words. This deliberately loose
+threshold detects obvious omissions; it does not establish semantic fidelity. Competing
+proper-name spellings and source contradictions remain unresolved unless explicit source
+evidence establishes a correction. Declared cue coverage is a structural check; human
+review is still needed to establish semantic fidelity and chart relevance. The script supports
+different transcript lengths, speaker counts, and
+video layouts. The standalone entrypoint uses a fresh output directory for every request;
+`--resume` can rebuild a saved response from its run context. Interrupted runs retain
+captured frames but do not resume the agent turn.
+
+[The offline evaluator](scripts/postprocess-evaluate.py) rechecks completed runs against
+the original source hashes, actual response and Markdown, speaker turns, annotations,
+issued image IDs, resource PNG hashes, and every packaged file. It produces an HTML
+index and `evaluation.json` without calling a model or restarting services. Optional
+`--notes /path/to/review-notes.md` includes human review notes verbatim. Failed runs
+remain in the report and cause a nonzero exit. Repeated inputs are deduplicated in the
+duration total. Comparisons require reports containing original SRT hashes and durations;
+use identical source scopes and fresh run directories for each model trial.
+
+```bash
+uv run --frozen python scripts/postprocess-evaluate.py \
+  --runs data/quality/postprocessing-pilot/VIDEO_ID/run-01 \
+         data/quality/postprocessing-pilot/VIDEO_ID/run-02 \
+  --compare data/quality/postprocessing-pilot/VIDEO_ID/run-01 \
+            data/quality/postprocessing-pilot/VIDEO_ID/run-02 \
+  --output data/quality/postprocessing-pilot/evaluation
+```
+
+The expanded local evaluation ran 15 new model trials across nine videos: five complete
+sources and four excerpts, totaling 301 minutes of distinct supplied content. All nine
+selected results passed the structural/resource audit; all 29 archived SRTs also passed
+lossless compact round trips. The set covers long monologues, an interview, a software
+tutorial, chart presentations, text-only input, remote video frames, unknown speakers,
+and missing-ASR annotations. Review inspected 44 selected figures and spot-checked
+numeric details and transcript passages. Most videos share one English-speaking presenter;
+this does not establish performance for other languages or complex multi-party speech.
+
+Two same-source baseline/final pairs (tutorial and interview) used 31% fewer combined
+total tokens, 7% fewer uncached input tokens, and 18% less combined agent time. A repeat
+of the physical-AI excerpt regressed 18% in total tokens and 2% in agent time. These
+single paired runs include multiple changes and model variance. Agent time excludes
+AgentBridge queueing, while caller time includes queueing and transport; cached tokens
+are included in total usage, so token reductions are not equivalent to billing savings.
+Artifacts, comparisons including regressions, and review notes are under ignored
+`data/quality/postprocessing-expanded/`; rerun the evaluator to refresh its index.
 
 ### Speaker diarization experiment
 

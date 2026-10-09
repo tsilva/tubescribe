@@ -63,6 +63,7 @@ function processingDetails(job) {
     `Download: ${human(job.download_state)}`,
     `ASR: ${human(job.asr_state)}`,
     `Speakers: ${human(job.diarization_state || "pending")}${job.speaker_count != null ? ` (${job.speaker_count})` : ""}`,
+    `Postprocessing: ${human(job.postprocessing_state || "pending")}${job.figures != null ? ` (${job.figures} figures)` : ""}`,
   ];
   details.append(node("div", stages.join(" · "), "stage-line"));
   const provenance = [job.profile, job.model, job.language].filter(Boolean);
@@ -92,16 +93,20 @@ function videoRow(jobs) {
     const status = node("div", undefined, "video-status");
     status.append(node("span", human(job.stage), `badge ${job.stage}`));
     if (jobs.length > 1) status.append(node("div", job.profile || "No profile", "muted"));
-    if (!archive.worker.running && ["downloading", "transcribing", "diarizing"].includes(job.stage)) {
+    if (!archive.worker.running && ["downloading", "transcribing", "diarizing", "postprocessing"].includes(job.stage)) {
       status.append(node("div", "Worker stopped", "muted"));
     }
     const action = node("div", undefined, "transcript-action");
     const files = transcriptFiles(job);
     if (files.length) {
-      const button = node("button", "Transcript", "transcript-button");
+      const button = node(job.processed_url ? "a" : "button", "Transcript", "transcript-button");
       button.dataset.job = String(job.job_id);
       button.setAttribute("aria-label", `Read transcript: ${video.title}${jobs.length > 1 ? ` (${job.profile})` : ""}`);
-      button.addEventListener("click", () => openTranscript(job, files));
+      if (job.processed_url) {
+        button.href = job.processed_url;
+        button.target = "_blank";
+        button.rel = "noopener noreferrer";
+      } else button.addEventListener("click", () => openTranscript(job, files));
       action.append(button);
     } else action.append(node("span", "No transcript yet", "muted"));
     run.append(status, processingDetails(job), action);

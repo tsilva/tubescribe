@@ -164,6 +164,62 @@ class SpeakerPipeline(unittest.TestCase):
             self.assertIn("Untranscribed speech", text)
             self.assertIn("00:00:01.000", text if suffix != ".srt" else text.replace(",", "."))
 
+    def test_missing_speaker_annotations_never_replace_overlapping_asr_words(self):
+        asr = {
+            **ASR,
+            "segments": [
+                {
+                    "start": 0,
+                    "end": 4,
+                    "text": "Long word",
+                    "words": [
+                        {"start": 0, "end": 4, "word": "Long word"},
+                    ],
+                }
+            ],
+        }
+        prediction = {
+            **PREDICTION,
+            "exclusive_turns": [
+                {"start": 0, "end": 1, "speaker": "Speaker 1"},
+                {"start": 1, "end": 2, "speaker": "Speaker 2"},
+                {"start": 2, "end": 4, "speaker": "Speaker 1"},
+            ],
+        }
+        result = assign_speakers(asr, prediction)
+        self.assertEqual([s["text"] for s in result["segments"]], ["Long word"])
+        self.assertEqual(
+            result["diarization_coverage"]["speakers_without_asr_words"], ["Speaker 2"]
+        )
+        self.assertEqual(result["diarization_coverage"]["untranscribed_speaker_turns"], [])
+
+    def test_missing_speaker_fragments_merge_and_replay_is_idempotent(self):
+        asr = {
+            **ASR,
+            "segments": [
+                {
+                    **ASR["segments"][0],
+                    "words": [
+                        ASR["segments"][0]["words"][0],
+                        ASR["segments"][0]["words"][2],
+                    ],
+                }
+            ],
+        }
+        prediction = {
+            **PREDICTION,
+            "exclusive_turns": [
+                {"start": 0, "end": 1, "speaker": "Speaker 1"},
+                {"start": 1, "end": 2, "speaker": "Speaker 2"},
+                {"start": 2.03, "end": 3, "speaker": "Speaker 2"},
+            ],
+        }
+        result = assign_speakers(asr, prediction)
+        annotations = [s for s in result["segments"] if s.get("annotation")]
+        self.assertEqual(len(annotations), 1)
+        self.assertEqual((annotations[0]["start"], annotations[0]["end"]), (1, 3))
+        self.assertEqual(assign_speakers(result, prediction)["segments"], result["segments"])
+
     def test_inference_failure_retains_audio_and_asr(self):
         self.client.diarize.side_effect = RuntimeError("GPU busy")
         with self.assertRaisesRegex(RuntimeError, "GPU busy"):

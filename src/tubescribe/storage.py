@@ -102,6 +102,14 @@ class Store:
             error TEXT, updated_at TEXT NOT NULL, completed_at TEXT,
             asr_path TEXT, asr_sha256 TEXT, prediction_path TEXT, prediction_sha256 TEXT,
             speaker_count INTEGER, processing_seconds REAL);
+          CREATE TABLE IF NOT EXISTS postprocessings (
+            job_id INTEGER PRIMARY KEY REFERENCES jobs(id), state TEXT NOT NULL DEFAULT 'pending',
+            stage TEXT, mode TEXT, source_path TEXT, source_sha256 TEXT, srt_sha256 TEXT,
+            output_dir TEXT, manifest_path TEXT, manifest_sha256 TEXT,
+            download_attempts INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+            save_attempts INTEGER NOT NULL DEFAULT 0, next_retry REAL NOT NULL DEFAULT 0,
+            error TEXT, updated_at TEXT NOT NULL, completed_at TEXT,
+            figures INTEGER, agent_seconds REAL, total_tokens INTEGER);
         """)
 
         if "save_attempts" not in {
@@ -187,6 +195,7 @@ class Store:
                 "UPDATE jobs SET state='pending', download_state=CASE WHEN download_state='active' THEN 'pending' ELSE download_state END, asr_state=CASE WHEN asr_state='active' THEN 'pending' ELSE asr_state END WHERE state='active'"
             )
             self.db.execute("UPDATE diarizations SET state='pending' WHERE state='active'")
+            self.db.execute("UPDATE postprocessings SET state='pending' WHERE state='active'")
         # Reopen completed jobs only if their authoritative content has vanished/corrupted.
         for r in self.db.execute(
             "SELECT j.id,t.* FROM jobs j JOIN transcripts t ON j.id=t.job_id WHERE j.state='complete'"
@@ -236,6 +245,9 @@ class Store:
             else:
                 # Subtitles are derived content: repair them without another download or ASR.
                 self._subtitle(r)
+        from .postprocessing_worker import recover
+
+        recover(self)
 
     def jobs(
         self,
@@ -245,7 +257,44 @@ class Store:
         channel=None,
         max_attempts=3,
         require_diarization=False,
+        require_postprocessing=False,
     ):
+        if require_postprocessing:
+            conditions = ["j.profile=?"]
+            args = [profile]
+            conditions.append("""(
+                (j.state IN ('pending','failed') AND j.next_retry<=? AND j.download_attempts<? AND j.asr_attempts<?)
+                OR (j.state='complete' AND COALESCE(d.state,'pending') IN ('pending','failed')
+                    AND COALESCE(d.next_retry,0)<=? AND COALESCE(d.download_attempts,0)<?
+                    AND COALESCE(d.attempts,0)<? AND COALESCE(d.save_attempts,0)<?)
+                OR (j.state='complete' AND d.state='complete' AND COALESCE(p.state,'pending') IN ('pending','failed')
+                    AND COALESCE(p.next_retry,0)<=? AND COALESCE(p.download_attempts,0)<?
+                    AND (p.stage='save' OR COALESCE(p.attempts,0)<?) AND COALESCE(p.save_attempts,0)<?))""")
+            args.extend(
+                [
+                    time.time(),
+                    max_attempts,
+                    max_attempts,
+                    time.time(),
+                    max_attempts,
+                    max_attempts,
+                    max_attempts,
+                    time.time(),
+                    max_attempts,
+                    max_attempts,
+                    max_attempts,
+                ]
+            )
+            if ids:
+                conditions.append(f"v.id IN ({','.join('?' for _ in ids)})")
+                args.extend(ids)
+            if channel:
+                conditions.append("v.channel_id=?")
+                args.append(channel)
+            return self.db.execute(
+                f"SELECT j.*,v.title,v.channel_id,v.url,v.kind,v.duration,v.published_at,d.state AS diarization_state FROM jobs j JOIN videos v ON j.video_id=v.id LEFT JOIN diarizations d ON d.job_id=j.id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE {' AND '.join(conditions)} ORDER BY COALESCE(v.published_at,'') DESC,j.id",
+                args,
+            ).fetchall()
         conditions = [
             "j.profile=?",
             "(j.state IN ('pending','failed') OR (j.state='complete' AND COALESCE(d.state,'pending') IN ('pending','failed')))"
@@ -392,6 +441,10 @@ class Store:
         with self.db:
             count = self.db.execute(sql, args).rowcount
             sql = "UPDATE diarizations SET state='pending',next_retry=0,download_attempts=0,attempts=0,save_attempts=0,error=NULL WHERE state='failed'"
+            if ids:
+                sql += f" AND job_id IN (SELECT id FROM jobs WHERE video_id IN ({','.join('?' for _ in ids)}))"
+            count += self.db.execute(sql, args).rowcount
+            sql = "UPDATE postprocessings SET state='pending',next_retry=0,download_attempts=0,attempts=0,save_attempts=0,error=NULL WHERE state='failed'"
             if ids:
                 sql += f" AND job_id IN (SELECT id FROM jobs WHERE video_id IN ({','.join('?' for _ in ids)}))"
             return count + self.db.execute(sql, args).rowcount

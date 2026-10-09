@@ -15,11 +15,23 @@ root = Path(os.environ.get("TUBESCRIBE_DATA", repo / "data")).resolve()
 root.mkdir(parents=True, exist_ok=True)
 p = argparse.ArgumentParser()
 p.add_argument("action", choices=["start", "status", "stop"])
-p.add_argument(
+stages = p.add_mutually_exclusive_group()
+stages.add_argument(
     "--diarize", action="store_true", help="Enrich saved ASR instead of importing new videos"
 )
+stages.add_argument(
+    "--postprocess",
+    action="store_true",
+    help="Finish saved diarized transcripts without ASR or diarization",
+)
 args = p.parse_args()
-name = "diarization-backfill" if args.diarize else "backfill"
+name = (
+    "postprocessing-backfill"
+    if args.postprocess
+    else "diarization-backfill"
+    if args.diarize
+    else "backfill"
+)
 state_file = root / f"{name}.json"
 log_file = root / f"{name}.log"
 state = json.loads(state_file.read_text()) if state_file.exists() else {}
@@ -62,18 +74,19 @@ elif args.action == "stop":
 else:
     if worker_pid is not None:
         sys.exit("An archive worker is already running.")
-    subprocess.run(
-        [str(repo / "scripts/tubescribe"), "--data", str(root), "tunnel", "start"], check=True
-    )
-    subprocess.run(
-        [str(repo / "scripts/tubescribe"), "--data", str(root), "diarization-tunnel", "start"],
-        check=True,
-    )
+    if not args.postprocess:
+        subprocess.run(
+            [str(repo / "scripts/tubescribe"), "--data", str(root), "tunnel", "start"], check=True
+        )
+        subprocess.run(
+            [str(repo / "scripts/tubescribe"), "--data", str(root), "diarization-tunnel", "start"],
+            check=True,
+        )
     command = [
         str(repo / "scripts/tubescribe"),
         "--data",
         str(root),
-        "diarize" if args.diarize else "work",
+        "postprocess" if args.postprocess else "diarize" if args.diarize else "work",
         "--wait",
     ]
     if sys.platform == "darwin":

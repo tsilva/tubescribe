@@ -74,7 +74,7 @@ class Pipeline(unittest.TestCase):
         return path, {"title": "Test", "channel_id": CID, "duration": 4, "timestamp": 1791536000}
 
     def run_work(self):
-        return work(self.store, "http://127.0.0.1:18766", ids=[VID])
+        return work(self.store, "http://127.0.0.1:18766", ids=[VID], postprocessing="off")
 
     def test_duplicate_discovery_and_completed_skip(self):
         self.store.index(CID, "short", [self.video, self.video], "turbo-v1")
@@ -348,7 +348,10 @@ class Pipeline(unittest.TestCase):
             patch("tubescribe.worker.time.sleep") as sleep,
         ):
             self.assertEqual(
-                work(self.store, "http://127.0.0.1:18766", ids=[VID], wait=True)["failed"], 1
+                work(
+                    self.store, "http://127.0.0.1:18766", ids=[VID], wait=True, postprocessing="off"
+                )["failed"],
+                1,
             )
             sleep.assert_not_called()
         self.assertTrue((self.store.root / self.job()["audio_path"]).exists())
@@ -360,7 +363,13 @@ class Pipeline(unittest.TestCase):
             patch("tubescribe.worker.download", side_effect=self.downloaded),
             patch("tubescribe.worker.Client.transcribe", return_value=RESULT),
         ):
-            work(self.store, "http://127.0.0.1:18766", ids=[VID], keep_audio=True)
+            work(
+                self.store,
+                "http://127.0.0.1:18766",
+                ids=[VID],
+                keep_audio=True,
+                postprocessing="off",
+            )
         self.assertTrue((self.store.root / self.job()["audio_path"]).exists())
         with self.assertRaises(ValueError):
             work(self.store, "http://127.0.0.1:18766", ids=["nonexistent"])

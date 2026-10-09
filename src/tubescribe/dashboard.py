@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -35,6 +36,9 @@ CONTENT_TYPES = {
     ".mp3": "audio/mpeg",
     ".webm": "audio/webm",
     ".wav": "audio/wav",
+    ".png": "image/png",
+    ".zip": "application/zip",
+    ".md": "text/markdown; charset=utf-8",
 }
 
 
@@ -57,7 +61,17 @@ def lock_status(root: Path, name: str) -> dict:
 def stage(job: dict) -> str:
     if job["state"] == "complete":
         if job.get("diarization_state") == "complete":
-            return "complete"
+            if job.get("postprocessing_state") == "complete":
+                return "complete"
+            if job.get("postprocessing_state") == "failed":
+                return "failed"
+            if job.get("postprocessing_state") == "active":
+                return (
+                    "downloading"
+                    if job.get("postprocessing_stage") == "download"
+                    else "postprocessing"
+                )
+            return "awaiting_postprocessing"
         if job.get("diarization_state") == "failed":
             return "failed"
         if job.get("diarization_state") == "active":
@@ -80,6 +94,8 @@ def allowed_file(root: Path, relative: str) -> Path:
         raise FileNotFoundError("File is outside the archive outputs")
     category = rel.parts[0]
     formats = AUDIO_FORMATS if category == "audio" else TEXT_FORMATS
+    if category == "transcripts" and "postprocessing" in rel.parts:
+        formats = formats | {".png", ".zip"}
     if category not in {"transcripts", "subtitles", "diarization", "quality", "audio"}:
         raise FileNotFoundError("Not an archive output")
     path = root / rel
@@ -137,7 +153,9 @@ def _events_in_file(path: Path) -> list[dict]:
 
 def recent_events(root: Path) -> list[dict]:
     return sorted(
-        _events_in_file(root / "backfill.log") + _events_in_file(root / "diarization-backfill.log"),
+        _events_in_file(root / "backfill.log")
+        + _events_in_file(root / "diarization-backfill.log")
+        + _events_in_file(root / "postprocessing-backfill.log"),
         key=lambda e: e.get("time", ""),
         reverse=True,
     )[:20]
@@ -168,9 +186,14 @@ def snapshot(root: Path) -> dict:
                        d.attempts AS diarization_attempts,d.speaker_count,
                        d.processing_seconds AS diarization_seconds,d.asr_path,
                        d.prediction_path,d.audio_path AS diarization_audio_path
+                       ,p.state AS postprocessing_state,p.stage AS postprocessing_stage,
+                       p.error AS postprocessing_error,p.next_retry AS postprocessing_next_retry,
+                       p.updated_at AS postprocessing_updated_at,p.attempts AS postprocessing_attempts,
+                       p.figures,p.agent_seconds,p.output_dir AS postprocessing_dir
                 FROM videos v LEFT JOIN jobs j ON j.video_id=v.id
                 LEFT JOIN transcripts t ON t.job_id=j.id
                 LEFT JOIN diarizations d ON d.job_id=j.id
+                LEFT JOIN postprocessings p ON p.job_id=j.id
                 ORDER BY COALESCE(v.published_at,'') DESC,v.discovered_at DESC,v.id,j.id
             """)
         ]
@@ -184,6 +207,8 @@ def snapshot(root: Path) -> dict:
             "transcribing",
             "diarizing",
             "awaiting_diarization",
+            "awaiting_postprocessing",
+            "postprocessing",
             "complete",
             "failed",
             "indexed",
@@ -198,6 +223,13 @@ def snapshot(root: Path) -> dict:
             job["error"] = job["diarization_error"] or job["error"]
             job["next_retry"] = job["diarization_next_retry"]
             job["failed_stage"] = job["diarization_stage"]
+        if job.get("postprocessing_state") in ("active", "failed") or job.get(
+            "postprocessing_error"
+        ):
+            job["updated_at"] = job["postprocessing_updated_at"]
+            job["error"] = job["postprocessing_error"] or job["error"]
+            job["next_retry"] = job["postprocessing_next_retry"]
+            job["failed_stage"] = "postprocessing " + (job["postprocessing_stage"] or "")
         counts[job["stage"]] += 1
         job["channel_title"] = names.get(job["channel_id"], job["channel_id"])
         paths = []
@@ -208,6 +240,13 @@ def snapshot(root: Path) -> dict:
             )
         if job["audio_path"]:
             paths.append(job["audio_path"])
+        if job.get("postprocessing_state") == "complete" and job.get("postprocessing_dir"):
+            directory = Path(job["postprocessing_dir"])
+            processed = (directory / "processed.md").as_posix()
+            if processed in by_path:
+                job["processed_path"] = processed
+                job["processed_url"] = f"/processed/{job['job_id']}/preview.html"
+                paths.extend([processed, (directory / "processed-with-figures.zip").as_posix()])
         for key in ("asr_path", "prediction_path", "diarization_audio_path"):
             if job.get(key):
                 paths.append(job[key])
@@ -251,7 +290,9 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             # Polling is quiet; errors are still returned visibly to the UI.
             pass
 
-        def send_headers(self, status, content_type, length, *, disposition=None):
+        def send_headers(
+            self, status, content_type, length, *, disposition=None, generated_html=False
+        ):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(length))
@@ -260,7 +301,9 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+                if generated_html
+                else "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
             )
             if disposition:
                 self.send_header("Content-Disposition", disposition)
@@ -298,6 +341,51 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                     )
                 elif url.path == "/api/snapshot":
                     self.send_json(snapshot(root))
+                elif match := re.fullmatch(
+                    r"/processed/(\d+)/(preview\.html|processed\.md|source\.srt|processed-with-figures\.zip|figures/frame_\d+\.png)",
+                    url.path,
+                ):
+                    with contextlib.closing(sqlite3.connect(root / "archive.sqlite3")) as db:
+                        row = db.execute(
+                            "SELECT p.output_dir,p.source_path,v.title FROM postprocessings p JOIN jobs j ON j.id=p.job_id JOIN videos v ON v.id=j.video_id WHERE p.job_id=? AND p.state='complete'",
+                            (int(match[1]),),
+                        ).fetchone()
+                    if not row:
+                        raise FileNotFoundError()
+                    filename = match[2]
+                    if filename == "preview.html":
+                        from .postprocessing import render_preview
+
+                        path = allowed_file(root, (Path(row[0]) / "processed.md").as_posix())
+                        data = (
+                            render_preview(path.read_text(), row[2])
+                            .replace(
+                                '<a href="processed.md" download>Download Markdown</a>',
+                                '<a href="processed.md" download>Download Markdown</a> · <a href="processed-with-figures.zip" download>Download with figures</a> · <a href="source.srt" download>Source SRT</a>',
+                            )
+                            .encode()
+                        )
+                        self.send_headers(
+                            200, CONTENT_TYPES[".html"], len(data), generated_html=True
+                        )
+                        self.wfile.write(data)
+                    else:
+                        relative = (
+                            Path(row[1]).with_suffix(".srt")
+                            if filename == "source.srt"
+                            else Path(row[0]) / filename
+                        )
+                        path = allowed_file(root, relative.as_posix())
+                        data = path.read_bytes()
+                        self.send_headers(
+                            200,
+                            CONTENT_TYPES.get(path.suffix, "text/plain; charset=utf-8"),
+                            len(data),
+                            disposition=f"attachment; filename*=UTF-8''{quote(path.name)}"
+                            if path.suffix == ".zip"
+                            else None,
+                        )
+                        self.wfile.write(data)
                 elif url.path in ("/api/file", "/api/preview"):
                     path = allowed_file(root, query.get("path", [""])[0])
                     if url.path == "/api/preview":

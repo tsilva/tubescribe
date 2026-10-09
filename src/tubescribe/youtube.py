@@ -1,4 +1,4 @@
-"""Public YouTube indexing and conservative audio-only downloads."""
+"""Public YouTube indexing and conservative audio/video downloads."""
 
 from __future__ import annotations
 
@@ -193,3 +193,39 @@ def details(video_id: str) -> dict:
             f"https://www.youtube.com/watch?v={video_id}",
         ]
     )
+
+
+def download_video(root: Path, video_id: str) -> tuple[Path, dict]:
+    """Cache a modest video stream for visual inspection, independently of ASR audio."""
+    if not ID.fullmatch(video_id):
+        raise ValueError("Invalid video ID")
+    metadata = details(video_id)
+    if metadata.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+        raise YouTubeError("Video is live or upcoming; wait for the completed recording")
+    folder = root / "videos"
+    folder.mkdir(parents=True, exist_ok=True)
+    result = run(
+        [
+            "--no-playlist",
+            "--dump-json",
+            "--no-simulate",
+            "--format",
+            "bestvideo[height<=720]/best[height<=720]",
+            "--concurrent-fragments",
+            "1",
+            "--abort-on-unavailable-fragments",
+            "--sleep-interval",
+            "3",
+            "--max-sleep-interval",
+            "7",
+            "-o",
+            str(folder / f"{video_id}.%(ext)s"),
+            f"https://www.youtube.com/watch?v={video_id}",
+        ]
+    )
+    if result.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+        raise YouTubeError("Recording has not finished")
+    path = Path(result.get("requested_downloads", [{}])[0].get("filepath") or result["_filename"])
+    if not path.is_file() or not path.stat().st_size:
+        raise YouTubeError("Downloader returned no complete video")
+    return path, result
