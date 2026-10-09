@@ -56,7 +56,13 @@ def lock_status(root: Path, name: str) -> dict:
 
 def stage(job: dict) -> str:
     if job["state"] == "complete":
-        return "complete"
+        if job.get("diarization_state") == "complete":
+            return "complete"
+        if job.get("diarization_state") == "failed":
+            return "failed"
+        if job.get("diarization_state") == "active":
+            return "downloading" if job.get("diarization_stage") == "download" else "diarizing"
+        return "awaiting_diarization"
     if job["state"] == "failed":
         return "failed"
     if job["asr_state"] == "active":
@@ -110,9 +116,9 @@ def output_files(root: Path) -> list[dict]:
     return files
 
 
-def recent_events(root: Path) -> list[dict]:
+def _events_in_file(path: Path) -> list[dict]:
     try:
-        with (root / "backfill.log").open("rb") as handle:
+        with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             handle.seek(max(0, handle.tell() - 131072))
             lines = handle.read().decode("utf-8", errors="replace").splitlines()
@@ -127,6 +133,14 @@ def recent_events(root: Path) -> list[dict]:
         if isinstance(event, dict) and event.get("event") != "asr_ready":
             events.append(event)
     return events[-20:][::-1]
+
+
+def recent_events(root: Path) -> list[dict]:
+    return sorted(
+        _events_in_file(root / "backfill.log") + _events_in_file(root / "diarization-backfill.log"),
+        key=lambda e: e.get("time", ""),
+        reverse=True,
+    )[:20]
 
 
 def snapshot(root: Path) -> dict:
@@ -148,9 +162,15 @@ def snapshot(root: Path) -> dict:
                        j.download_state,j.asr_state,j.download_attempts,j.asr_attempts,
                        j.next_retry,j.failed_stage,j.error_kind,j.error,j.audio_path,
                        j.updated_at,j.completed_at,t.json_path,t.text_path,t.model,t.revision,
-                       t.language,t.processing_seconds,t.saved_at
+                       t.language,t.processing_seconds,t.saved_at,
+                       d.state AS diarization_state,d.stage AS diarization_stage,
+                       d.error AS diarization_error,d.next_retry AS diarization_next_retry,d.updated_at AS diarization_updated_at,
+                       d.attempts AS diarization_attempts,d.speaker_count,
+                       d.processing_seconds AS diarization_seconds,d.asr_path,
+                       d.prediction_path,d.audio_path AS diarization_audio_path
                 FROM videos v LEFT JOIN jobs j ON j.video_id=v.id
                 LEFT JOIN transcripts t ON t.job_id=j.id
+                LEFT JOIN diarizations d ON d.job_id=j.id
                 ORDER BY COALESCE(v.published_at,'') DESC,v.discovered_at DESC,v.id,j.id
             """)
         ]
@@ -158,11 +178,26 @@ def snapshot(root: Path) -> dict:
     files = output_files(root)
     by_path = {f["path"]: f for f in files}
     counts = dict.fromkeys(
-        ("queued", "downloading", "transcribing", "complete", "failed", "indexed"), 0
+        (
+            "queued",
+            "downloading",
+            "transcribing",
+            "diarizing",
+            "awaiting_diarization",
+            "complete",
+            "failed",
+            "indexed",
+        ),
+        0,
     )
     names = {c["id"]: c["title"] for c in channels}
     for job in jobs:
         job["stage"] = stage(job)
+        if job.get("diarization_state") in ("active", "failed"):
+            job["updated_at"] = job["diarization_updated_at"]
+            job["error"] = job["diarization_error"] or job["error"]
+            job["next_retry"] = job["diarization_next_retry"]
+            job["failed_stage"] = job["diarization_stage"]
         counts[job["stage"]] += 1
         job["channel_title"] = names.get(job["channel_id"], job["channel_id"])
         paths = []
@@ -173,7 +208,10 @@ def snapshot(root: Path) -> dict:
             )
         if job["audio_path"]:
             paths.append(job["audio_path"])
-        job["files"] = [by_path[p] for p in paths if p in by_path]
+        for key in ("asr_path", "prediction_path", "diarization_audio_path"):
+            if job.get(key):
+                paths.append(job[key])
+        job["files"] = [by_path[p] for p in dict.fromkeys(paths) if p in by_path]
     for channel in channels:
         rows = [j for j in jobs if j["channel_id"] == channel["id"]]
         channel["videos"] = len({j["video_id"] for j in rows})
@@ -192,6 +230,8 @@ def snapshot(root: Path) -> dict:
             "videos": len({j["video_id"] for j in jobs}),
             "jobs": sum(j["job_id"] is not None for j in jobs),
             "files": len(files),
+            "asr_complete": sum(j["state"] == "complete" for j in jobs),
+            "diarization_complete": sum(j["diarization_state"] == "complete" for j in jobs),
         },
         "worker": lock_status(root, "worker.lock"),
         "channels": channels,

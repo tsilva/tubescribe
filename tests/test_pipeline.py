@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tubescribe.asr import Client, validate
+from tubescribe.diarization import MODEL, REVISION
 from tubescribe.storage import Store, worker_lock
 from tubescribe.subtitles import render_markdown, render_srt
 from tubescribe.worker import InferenceUnavailable, ensure_ready, work
@@ -25,6 +26,23 @@ RESULT = {
     "segments": [{"start": 0.0, "end": 3.0, "text": "A real transcript."}],
 }
 
+DIARIZATION = {
+    "model": MODEL,
+    "revision": REVISION,
+    "backend": "transformers",
+    "backend_version": "5.18.0",
+    "torch_version": "2.8.0+cu128",
+    "compute_type": "float32",
+    "options": {"threshold": 0.5},
+    "exclusive_policy": "highest",
+    "device": "cuda:0",
+    "gpu": "NVIDIA RTX 4090",
+    "duration": 4.0,
+    "processing_seconds": 0.1,
+    "speaker_count": 1,
+    "exclusive_turns": [{"start": 0.0, "end": 3.0, "speaker": "Speaker 1"}],
+}
+
 
 class Pipeline(unittest.TestCase):
     def setUp(self):
@@ -35,6 +53,12 @@ class Pipeline(unittest.TestCase):
         )
         self.video = {"id": VID, "title": "Test", "url": "https://www.youtube.com/watch?v=" + VID}
         self.store.index(CID, "upload", [self.video], "turbo-v1")
+        self.diarization = Mock()
+        self.diarization.health.return_value = DIARIZATION
+        self.diarization.diarize.return_value = DIARIZATION
+        patcher = patch("tubescribe.worker.ready_diarization", return_value=self.diarization)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self.store.db.close()
@@ -97,9 +121,9 @@ class Pipeline(unittest.TestCase):
             )
             subtitle = source.with_suffix(".srt")
             markdown = source.with_suffix(".md")
-            expected = "1\n00:00:00,000 --> 00:00:03,000\nA real transcript.\n\n"
+            expected = "1\n00:00:00,000 --> 00:00:03,000\nSpeaker 1: A real transcript.\n\n"
             self.assertEqual(subtitle.read_text(), expected)
-            self.assertEqual(markdown.read_text(), "**Speaker:** A real transcript.\n")
+            self.assertEqual(markdown.read_text(), "**Speaker 1:** A real transcript.\n")
             for corrupt in (False, True):
                 if corrupt:
                     subtitle.write_text("broken subtitle")
@@ -109,7 +133,7 @@ class Pipeline(unittest.TestCase):
                     markdown.unlink()
                 self.assertEqual(self.run_work()["skipped"], 1)
                 self.assertEqual(subtitle.read_text(), expected)
-                self.assertEqual(markdown.read_text(), "**Speaker:** A real transcript.\n")
+                self.assertEqual(markdown.read_text(), "**Speaker 1:** A real transcript.\n")
             self.assertEqual(asr.call_count, 1)
             self.assertEqual(dl.call_count, 1)
         destination = self.store.root / "exported-subtitles"
@@ -119,7 +143,7 @@ class Pipeline(unittest.TestCase):
             [str(destination / f"{VID}.turbo-v1{s}") for s in (".srt", ".md")],
         )
         self.assertEqual(Path(files[0]).read_text(), expected)
-        self.assertEqual(Path(files[1]).read_text(), "**Speaker:** A real transcript.\n")
+        self.assertEqual(Path(files[1]).read_text(), "**Speaker 1:** A real transcript.\n")
         with self.assertRaises(ValueError):
             self.store.subtitles(ids=["nonexistent"])
 
@@ -217,7 +241,48 @@ class Pipeline(unittest.TestCase):
         t = self.store.db.execute("SELECT json_path FROM transcripts").fetchone()[0]
         (self.store.root / t).unlink()
         self.store.recover()
+        self.assertEqual(self.job()["state"], "complete")
+        self.assertEqual(
+            self.store.db.execute("SELECT state FROM diarizations").fetchone()[0], "pending"
+        )
+        with (
+            patch("tubescribe.worker.Client.transcribe") as asr,
+            patch("tubescribe.worker.download") as dl,
+        ):
+            self.assertEqual(self.run_work()["completed"], 1)
+            asr.assert_not_called()
+            dl.assert_not_called()
+
+    def test_failed_diarization_retries_without_download_or_asr(self):
+        self.store.update(self.job()["id"], asr_attempts=2)
+        self.diarization.diarize.side_effect = RuntimeError("GPU busy")
+        with (
+            patch("tubescribe.worker.Client.health", return_value=RESULT),
+            patch("tubescribe.worker.Client.transcribe", return_value=RESULT) as asr,
+            patch("tubescribe.worker.download", side_effect=self.downloaded) as dl,
+        ):
+            self.assertEqual(self.run_work()["failed"], 1)
+            self.assertEqual(self.job()["asr_state"], "complete")
+            self.assertEqual(self.job()["asr_attempts"], 3)
+            self.assertTrue((self.store.root / self.job()["audio_path"]).is_file())
+            self.store.retry([VID])
+            self.diarization.diarize.side_effect = None
+            self.assertEqual(self.run_work()["completed"], 1)
+            self.assertEqual(asr.call_count, 1)
+            self.assertEqual(dl.call_count, 1)
+
+    def test_interrupted_last_asr_attempt_remains_retryable_with_retained_audio(self):
+        self.store.update(self.job()["id"], asr_attempts=2)
+        with (
+            patch("tubescribe.worker.Client.health", return_value=RESULT),
+            patch("tubescribe.worker.Client.transcribe", side_effect=KeyboardInterrupt),
+            patch("tubescribe.worker.download", side_effect=self.downloaded),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_work()
+        self.assertEqual(self.job()["asr_attempts"], 2)
         self.assertEqual(self.job()["state"], "pending")
+        self.assertTrue((self.store.root / self.job()["audio_path"]).exists())
 
     def test_bounded_attempts_and_backoff(self):
         self.store.update(self.job()["id"], state="failed", asr_attempts=3)
@@ -280,8 +345,12 @@ class Pipeline(unittest.TestCase):
                 "tubescribe.worker.Client.transcribe",
                 return_value={**RESULT, "revision": "changed"},
             ),
+            patch("tubescribe.worker.time.sleep") as sleep,
         ):
-            self.assertEqual(self.run_work()["failed"], 1)
+            self.assertEqual(
+                work(self.store, "http://127.0.0.1:18766", ids=[VID], wait=True)["failed"], 1
+            )
+            sleep.assert_not_called()
         self.assertTrue((self.store.root / self.job()["audio_path"]).exists())
         self.assertEqual(self.job()["state"], "failed")
 

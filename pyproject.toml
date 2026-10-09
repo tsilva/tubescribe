@@ -6,6 +6,11 @@ requires-python = ">=3.11,<3.14"
 dependencies = ["httpx>=0.28", "yt-dlp[default]>=2026.2.4"]
 
 [project.optional-dependencies]
+diarization = [
+    "torch==2.8.0; sys_platform == 'linux'",
+    "transformers==5.18.0",
+    "librosa>=0.11",
+]
 asr = [
     "faster-whisper>=1.2",
     "fastapi>=0.115",

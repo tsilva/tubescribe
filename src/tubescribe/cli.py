@@ -66,6 +66,17 @@ def main():
     c.add_argument("--video", action="append")
     c.add_argument("--profile")
     sub.add_parser("health")
+    c = sub.add_parser("diarize", help="Diarize saved ASR transcripts without rerunning ASR")
+    c.add_argument("--video", action="append")
+    c.add_argument("--profile", default="turbo-v1")
+    c.add_argument("--max-attempts", type=int, default=3)
+    c.add_argument("--wait", action="store_true")
+    c = sub.add_parser(
+        "diarization-tunnel", help="Forward diarization through the main SSH connection"
+    )
+    c.add_argument("action", choices=["start", "status", "stop"])
+    c.add_argument("--local-port", type=int, default=18768)
+    c.add_argument("--remote-port", type=int, default=18767)
     c = sub.add_parser("dashboard", help="Local admin dashboard for monitoring and file browsing")
     c.add_argument(
         "action", nargs="?", default="start", choices=["start", "status", "stop", "serve"]
@@ -103,7 +114,31 @@ def main():
         return "http://127.0.0.1:18766"
 
     try:
-        if args.command == "dashboard":
+        if args.command == "diarization-tunnel":
+            from .diarization_tunnel import forward
+
+            out(forward(store.root, args.action, args.local_port, args.remote_port))
+        elif args.command == "diarize":
+            from .diarization_tunnel import endpoint as diarization_endpoint
+            from .diarization_tunnel import ready
+            from .diarization_worker import run as diarize
+
+            def stop_diarization(signum, frame):
+                raise KeyboardInterrupt()
+
+            signal.signal(signal.SIGTERM, stop_diarization)
+            ready(store.root)
+            out(
+                diarize(
+                    store,
+                    diarization_endpoint(store.root),
+                    ids=args.video,
+                    profile=args.profile,
+                    max_attempts=args.max_attempts,
+                    wait=args.wait,
+                )
+            )
+        elif args.command == "dashboard":
             from .dashboard import dashboard
 
             result = dashboard(store.root, args.action, args.port)
@@ -213,6 +248,18 @@ def main():
                             "SELECT COUNT(*) AS count, SUM(duration) AS audio_seconds,SUM(processing_seconds) AS asr_seconds FROM transcripts"
                         ).fetchone()
                     ),
+                    "diarization": [
+                        dict(r)
+                        for r in store.db.execute(
+                            "SELECT j.profile,d.state,d.stage,COUNT(*) AS count FROM diarizations d JOIN jobs j ON j.id=d.job_id GROUP BY j.profile,d.state,d.stage"
+                        )
+                    ],
+                    "completed_jobs": store.db.execute(
+                        "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id WHERE j.state='complete' AND d.state='complete'"
+                    ).fetchone()[0],
+                    "awaiting_diarization": store.db.execute(
+                        "SELECT COUNT(*) FROM jobs j LEFT JOIN diarizations d ON d.job_id=j.id WHERE j.state='complete' AND COALESCE(d.state,'pending')!='complete'"
+                    ).fetchone()[0],
                 }
             )
             if args.failures:
@@ -220,7 +267,15 @@ def main():
                     [
                         dict(r)
                         for r in store.db.execute(
-                            "SELECT video_id,failed_stage,error_kind,error,download_attempts,asr_attempts,next_retry,audio_path FROM jobs WHERE state='failed'"
+                            "SELECT video_id,profile,failed_stage,error_kind,error,download_attempts,asr_attempts,next_retry,audio_path FROM jobs WHERE state='failed'"
+                        )
+                    ]
+                )
+                out(
+                    [
+                        dict(r)
+                        for r in store.db.execute(
+                            "SELECT j.video_id,j.profile,d.stage AS failed_stage,d.error,d.download_attempts,d.attempts AS diarization_attempts,d.save_attempts,d.next_retry,d.audio_path FROM diarizations d JOIN jobs j ON j.id=d.job_id WHERE d.state='failed'"
                         )
                     ]
                 )

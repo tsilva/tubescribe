@@ -155,7 +155,7 @@ def main():
             {**cue, "text": f"{cue['speaker_name'] or cue['speaker_id']}: {cue['text']}"}
             for cue in cues
         ]
-        (root / f"{run['label']}.srt").write_bytes(render_srt(labelled))
+        (root / f"{run['label']}.srt").write_bytes(render_srt(cues))
         (root / f"{run['label']}.md").write_bytes(render_markdown(cues))
         (root / f"{run['label']}.txt").write_text(
             "\n".join(f"[{timestamp(cue['start'])}] {cue['text']}" for cue in labelled) + "\n"

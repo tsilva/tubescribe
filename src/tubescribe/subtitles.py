@@ -52,6 +52,9 @@ def render_srt(segments: list[dict]) -> bytes:
         text = " ".join(segment["text"].split())
         if not text:
             raise ValueError("Subtitle cue is empty")
+        speaker = segment.get("speaker_name") or segment.get("speaker_id") or segment.get("speaker")
+        if speaker:
+            text = f"{speaker}: {text}"
         first, last = timestamp(start), timestamp(end)
         if first == last:
             last = timestamp((math.floor(start * 1000 + 0.5) + 1) / 1000)

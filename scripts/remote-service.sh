@@ -5,7 +5,9 @@ cd "$(dirname "$0")/.."
 host="${TUBESCRIBE_SSH_HOST:-tubescribe-beast}"
 port="${TUBESCRIBE_REMOTE_PORT:-18765}"
 ssh_opts=(-o BatchMode=yes)
-control="$(pwd)/${TUBESCRIBE_DATA:-data}/main-ssh.sock"
+archive_root="${TUBESCRIBE_DATA:-data}"
+[[ "$archive_root" = /* ]] || archive_root="$(pwd)/$archive_root"
+control="$archive_root/main-ssh.sock"
 if ssh -S "$control" -O check "$host" >/dev/null 2>&1; then
   ssh_opts+=(-S "$control")
 fi
@@ -57,6 +59,7 @@ else
   python3 - "$1" <<'PY'
 import socket, sys
 with socket.socket() as s:
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('127.0.0.1', int(sys.argv[1])))
 PY
   systemctl --user enable --now tubescribe-asr

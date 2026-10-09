@@ -51,6 +51,10 @@ class Dashboard(unittest.TestCase):
         )
         with self.store.db:
             self.store.db.execute(
+                "INSERT INTO diarizations(job_id,state,stage,updated_at,speaker_count) VALUES(?,'complete','complete','now',1)",
+                (saved["id"],),
+            )
+            self.store.db.execute(
                 "UPDATE jobs SET state='active',download_state='complete',asr_state='active' WHERE video_id='active'"
             )
             self.store.db.execute(
@@ -112,6 +116,23 @@ class Dashboard(unittest.TestCase):
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         (self.root / file["path"]).unlink()
         self.assertEqual(self.client.get(file["url"]).status_code, 404)
+
+    def test_asr_saved_but_diarization_incomplete_is_not_shown_as_complete(self):
+        with self.store.db:
+            self.store.db.execute(
+                "UPDATE diarizations SET state='active',stage='diarization' WHERE job_id=(SELECT id FROM jobs WHERE video_id='saved')"
+            )
+        result = snapshot(self.root)
+        self.assertEqual(result["summary"]["asr_complete"], 1)
+        self.assertEqual(result["summary"]["complete"], 0)
+        self.assertEqual(result["summary"]["diarizing"], 1)
+        with self.store.db:
+            self.store.db.execute(
+                "UPDATE diarizations SET state='failed',error='Model busy',updated_at='now' WHERE job_id=(SELECT id FROM jobs WHERE video_id='saved')"
+            )
+        saved = next(j for j in snapshot(self.root)["jobs"] if j["video_id"] == "saved")
+        self.assertEqual(saved["stage"], "failed")
+        self.assertEqual(saved["error"], "Model busy")
 
     def test_arbitrary_paths_symlinks_and_cross_origin_are_rejected(self):
         (self.root / "secret.json").write_text('"private config"')

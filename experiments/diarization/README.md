@@ -1,6 +1,6 @@
 # Speaker diarization trial
 
-This experiment tests speaker tagging on beast-3’s RTX 4090. NVIDIA Nemotron 3 completed the interview and monologue control; pyannote Community-1 remains an optional gated comparison. It does not enable diarization in the archive worker. The isolated project and committed lock preserve the seven-day age cutoff and bad-package constraints. Both runners verify CUDA/RTX 4090 and at least 2 GiB free VRAM, reuse their loaded model across sequential runs, record provenance and timings, and exit afterward.
+This experiment tests speaker tagging on beast-3’s RTX 4090. NVIDIA Nemotron 3 completed the interview and monologue control; pyannote Community-1 remains an optional gated comparison. Production now uses a separate resident Nemotron service and the archive worker includes diarization; see the [main README](../../README.md#remote-speaker-diarization). This trial stays independent. The isolated project and committed lock preserve the seven-day age cutoff and bad-package constraints. Both runners verify CUDA/RTX 4090 and at least 2 GiB free VRAM, reuse their loaded model across sequential runs, record provenance and timings, and exit afterward.
 
 The prepared remote environment is `~/.local/share/tubescribe/diarization-trial`. Transfer this directory’s source files and the repository’s `uv.toml` there. Supply mono 16 kHz PCM16 WAV files, including an optional single-speaker control.
 

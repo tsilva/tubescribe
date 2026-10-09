@@ -1,46 +1,27 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TubeScribe · Archive admin</title>
-  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TubeScribe · Channels and videos</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
 </head>
 <body>
-  <aside class="sidebar">
-    <a class="brand" href="#overview"><span class="brand-icon">T<span></span></span>TubeScribe</a>
-    <div class="workspace">PERSONAL ARCHIVE</div>
-    <nav aria-label="Main navigation">
-      <button data-view="overview" class="nav active"><span>◫</span>Overview</button>
-      <button data-view="videos" class="nav"><span>▷</span>Videos <small id="nav-videos">0</small></button>
-      <button data-view="channels" class="nav"><span>◎</span>Channels <small id="nav-channels">0</small></button>
-      <button data-view="files" class="nav"><span>▤</span>Files <small id="nav-files">0</small></button>
-    </nav>
-    <div class="sidebar-bottom"><span class="local-dot"></span>Local workspace<div id="root-label">Connecting to archive…</div></div>
-  </aside>
   <main>
-    <header class="topbar"><span>Archive / <strong id="breadcrumb">Overview</strong></span><div class="live"><span id="live-dot" class="local-dot"></span><span id="updated">Connecting…</span><button id="refresh" aria-label="Refresh dashboard">↻</button></div></header>
-    <div class="page">
-      <div class="page-heading"><div><div class="eyebrow">TUBESCRIBE ADMIN</div><h1 id="page-title">Archive overview</h1><p id="page-description">A live view of your channels, queue, and saved transcripts.</p></div><span class="readonly">Read-only monitor</span></div>
-      <div id="error" class="error hidden" role="alert"></div>
-      <section id="stats" class="stats" aria-label="Archive totals"></section>
-      <section id="overview-view" class="view">
-        <div class="overview-grid">
-          <section class="panel"><div class="panel-heading"><h2>Pipeline</h2><span id="worker-status" class="badge">Checking worker</span></div><div id="pipeline"></div><div id="active-work"></div><div id="model" class="model"></div></section>
-          <section class="panel"><div class="panel-heading"><h2>Registered channels</h2><button class="text-button" data-open-view="channels">View all ↗</button></div><div id="channel-summary"></div></section>
-        </div>
-        <section class="panel activity-panel"><div class="panel-heading"><h2>Recent activity</h2><span class="muted">Latest worker events</span></div><div id="events"></div></section>
-      </section>
-      <section id="videos-view" class="view hidden">
-        <section class="panel"><div class="toolbar"><input id="video-search" type="search" aria-label="Search videos" placeholder="Search title or video ID…"><select id="channel-filter" aria-label="Filter by channel"><option value="">All channels</option></select><select id="stage-filter" aria-label="Filter by status"><option value="">All statuses</option><option value="queued">Queued</option><option value="downloading">Downloading</option><option value="transcribing">Transcribing</option><option value="complete">Complete</option><option value="failed">Failed</option><option value="indexed">Indexed only</option></select><select id="profile-filter" aria-label="Filter by profile"><option value="">All profiles</option></select></div>
-          <div class="table-scroll"><table><thead><tr><th>Video</th><th>Status</th><th>Download / ASR</th><th>Duration</th><th>Outputs</th></tr></thead><tbody id="video-rows"></tbody></table></div><div class="table-footer"><span id="video-count"></span><div><button id="previous-page">← Previous</button><span id="page-number"></span><button id="next-page">Next →</button></div></div>
-        </section>
-      </section>
-      <section id="channels-view" class="view hidden"><div id="channel-cards" class="channel-grid"></div></section>
-      <section id="files-view" class="view hidden"><section class="panel"><div class="toolbar"><input id="file-search" type="search" aria-label="Search files" placeholder="Search output path…"><select id="format-filter" aria-label="Filter by format"><option value="">All formats</option><option value="md">Markdown</option><option value="srt">SubRip</option><option value="txt">Text</option><option value="json">JSON</option><option value="audio">Audio</option></select><span id="file-count" class="muted"></span></div><div class="table-scroll file-scroll"><table><thead><tr><th>Output file</th><th>Format</th><th>Size</th><th>Browse</th></tr></thead><tbody id="file-rows"></tbody></table></div></section></section>
-      <footer><span>Local index · SQLite</span><span>Refreshes every 5 seconds</span></footer>
-    </div>
+    <header class="page-heading">
+      <div><div class="brand">TubeScribe</div><h1>Channels &amp; videos</h1><p id="archive-summary">Connecting to archive…</p></div>
+      <div class="live"><span id="updated">Connecting…</span><button id="refresh">Refresh</button></div>
+    </header>
+    <div id="error" class="error hidden" role="alert"></div>
+    <div class="toolbar"><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search channels, video titles, or IDs…"><span id="result-count" class="muted" role="status"></span></div>
+    <div id="channels" aria-label="Channels and videos"><p class="empty">Loading channels…</p></div>
+    <footer><span>Read-only archive · <span id="root-label"></span></span><span>Updates every 5 seconds</span></footer>
   </main>
-  <dialog id="video-detail"><div class="dialog-heading"><div><div class="eyebrow">VIDEO DETAILS</div><h2 id="detail-title"></h2></div><button class="close" aria-label="Close video details">×</button></div><div id="detail-content"></div></dialog>
-  <dialog id="file-preview"><div class="dialog-heading"><div><div class="eyebrow">OUTPUT PREVIEW</div><h2 id="preview-title"></h2></div><button class="close" aria-label="Close file preview">×</button></div><div class="preview-actions"><span id="preview-path" class="muted"></span><a id="preview-download" class="button">Download file ↓</a></div><div id="preview-content"></div></dialog>
+  <dialog id="transcript-preview" aria-labelledby="preview-title">
+    <div class="dialog-heading"><h2 id="preview-title">Transcript</h2><button id="close-preview" aria-label="Close transcript">×</button></div>
+    <div class="preview-actions"><label>Format <select id="preview-format" aria-label="Transcript format"></select></label><a id="preview-download" class="button">Download</a></div>
+    <div id="preview-content"></div>
+  </dialog>
 </body>
 </html>

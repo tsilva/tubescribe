@@ -16,6 +16,10 @@ from .asr import validate
 from .subtitles import render_markdown, render_srt
 
 
+class ProfileChanged(RuntimeError):
+    """An existing archive profile cannot silently switch model/settings."""
+
+
 def now() -> str:
     from datetime import datetime
 
@@ -89,7 +93,24 @@ class Store:
             text_path TEXT NOT NULL, json_sha256 TEXT NOT NULL, text_sha256 TEXT NOT NULL,
             language TEXT NOT NULL, model TEXT NOT NULL, revision TEXT NOT NULL,
             processing_seconds REAL NOT NULL, duration REAL NOT NULL, saved_at TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS diarization_profiles (
+            profile TEXT PRIMARY KEY, identity TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS diarizations (
+            job_id INTEGER PRIMARY KEY REFERENCES jobs(id), state TEXT NOT NULL DEFAULT 'pending',
+            stage TEXT, audio_path TEXT, download_attempts INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0, save_attempts INTEGER NOT NULL DEFAULT 0, next_retry REAL NOT NULL DEFAULT 0,
+            error TEXT, updated_at TEXT NOT NULL, completed_at TEXT,
+            asr_path TEXT, asr_sha256 TEXT, prediction_path TEXT, prediction_sha256 TEXT,
+            speaker_count INTEGER, processing_seconds REAL);
         """)
+
+        if "save_attempts" not in {
+            r[1] for r in self.db.execute("PRAGMA table_info(diarizations)")
+        }:
+            self.db.execute(
+                "ALTER TABLE diarizations ADD COLUMN save_attempts INTEGER NOT NULL DEFAULT 0"
+            )
+            self.db.commit()
 
     def channel(self, channel: dict):
         with self.db:
@@ -155,7 +176,7 @@ class Store:
                 "SELECT identity FROM profiles WHERE name=?", (profile,)
             ).fetchone()
             if existing and existing[0] != identity:
-                raise RuntimeError(
+                raise ProfileChanged(
                     f"ASR model/settings changed for {profile}; use an explicit new --profile to upgrade"
                 )
             self.db.execute("INSERT OR IGNORE INTO profiles VALUES(?,?)", (profile, identity))
@@ -165,6 +186,7 @@ class Store:
             self.db.execute(
                 "UPDATE jobs SET state='pending', download_state=CASE WHEN download_state='active' THEN 'pending' ELSE download_state END, asr_state=CASE WHEN asr_state='active' THEN 'pending' ELSE asr_state END WHERE state='active'"
             )
+            self.db.execute("UPDATE diarizations SET state='pending' WHERE state='active'")
         # Reopen completed jobs only if their authoritative content has vanished/corrupted.
         for r in self.db.execute(
             "SELECT j.id,t.* FROM jobs j JOIN transcripts t ON j.id=t.job_id WHERE j.state='complete'"
@@ -176,25 +198,75 @@ class Store:
                 for k in ("json", "text")
             )
             if not valid:
+                checkpoint = self.db.execute(
+                    "SELECT * FROM diarizations WHERE job_id=?", (r["id"],)
+                ).fetchone()
+                recoverable = checkpoint and all(
+                    checkpoint[k + "_path"]
+                    and (self.root / checkpoint[k + "_path"]).is_file()
+                    and hashlib.sha256(
+                        (self.root / checkpoint[k + "_path"]).read_bytes()
+                    ).hexdigest()
+                    == checkpoint[k + "_sha256"]
+                    for k in ("asr", "prediction")
+                )
+                if recoverable:
+                    with self.db:
+                        self.db.execute(
+                            "UPDATE diarizations SET state='pending',stage='save',next_retry=0,save_attempts=0,error='Output repair queued from checkpoints' WHERE job_id=?",
+                            (r["id"],),
+                        )
+                    continue
                 self.update(
                     r["id"],
                     state="pending",
                     asr_state="pending",
+                    asr_attempts=0,
+                    next_retry=0,
                     error="Saved transcript missing or corrupt; repair queued",
                 )
+                if checkpoint:
+                    # An ASR rebuild must not inherit completion from unusable enrichment.
+                    # Leave the old files as evidence, but establish new hashes/checkpoints.
+                    with self.db:
+                        self.db.execute(
+                            "UPDATE diarizations SET state='pending',stage=NULL,asr_path=NULL,asr_sha256=NULL,prediction_path=NULL,prediction_sha256=NULL,download_attempts=0,attempts=0,save_attempts=0,next_retry=0,error='Unusable checkpoints; ASR repair queued' WHERE job_id=?",
+                            (r["id"],),
+                        )
             else:
                 # Subtitles are derived content: repair them without another download or ASR.
                 self._subtitle(r)
 
-    def jobs(self, *, profile="turbo-v1", ids=None, channel=None, max_attempts=3):
+    def jobs(
+        self,
+        *,
+        profile="turbo-v1",
+        ids=None,
+        channel=None,
+        max_attempts=3,
+        require_diarization=False,
+    ):
         conditions = [
             "j.profile=?",
-            "j.state IN ('pending','failed')",
+            "(j.state IN ('pending','failed') OR (j.state='complete' AND COALESCE(d.state,'pending') IN ('pending','failed')))"
+            if require_diarization
+            else "j.state IN ('pending','failed')",
             "j.next_retry<=?",
-            "j.download_attempts<?",
-            "j.asr_attempts<?",
+            "(j.asr_state='complete' OR (j.download_attempts<? AND j.asr_attempts<?))"
+            if require_diarization
+            else "(j.download_attempts<? AND j.asr_attempts<?)",
         ]
         args = [profile, time.time(), max_attempts, max_attempts]
+        if require_diarization:
+            conditions.extend(
+                [
+                    "COALESCE(d.next_retry,0)<=?",
+                    "COALESCE(d.download_attempts,0)<?",
+                    "COALESCE(d.attempts,0)<?",
+                    "COALESCE(d.save_attempts,0)<?",
+                ]
+            )
+            args.extend([time.time(), max_attempts, max_attempts, max_attempts])
         if ids:
             conditions.append(f"v.id IN ({','.join('?' for _ in ids)})")
             args.extend(ids)
@@ -202,7 +274,7 @@ class Store:
             conditions.append("v.channel_id=?")
             args.append(channel)
         return self.db.execute(
-            f"SELECT j.*,v.title,v.channel_id,v.url,v.kind,v.duration,v.published_at FROM jobs j JOIN videos v ON j.video_id=v.id WHERE {' AND '.join(conditions)} ORDER BY COALESCE(v.published_at,'') DESC,j.id",
+            f"SELECT j.*,v.title,v.channel_id,v.url,v.kind,v.duration,v.published_at FROM jobs j JOIN videos v ON j.video_id=v.id LEFT JOIN diarizations d ON d.job_id=j.id WHERE {' AND '.join(conditions)} ORDER BY COALESCE(v.published_at,'') DESC,j.id",
             args,
         ).fetchall()
 
@@ -232,7 +304,13 @@ class Store:
             "",
         ]
         lines += [
-            f"[{timestamp(s['start'])} --> {timestamp(s['end'])}] {s['text'].strip()}"
+            f"[{timestamp(s['start'])} --> {timestamp(s['end'])}] "
+            + (
+                f"{s.get('speaker_name') or s.get('speaker_id')}: "
+                if s.get("speaker_name") or s.get("speaker_id")
+                else ""
+            )
+            + s["text"].strip()
             for s in result["segments"]
         ]
         txt = ("\n".join(lines) + "\n").encode()
@@ -312,4 +390,8 @@ class Store:
             sql += f" AND video_id IN ({','.join('?' for _ in ids)})"
             args = ids
         with self.db:
-            return self.db.execute(sql, args).rowcount
+            count = self.db.execute(sql, args).rowcount
+            sql = "UPDATE diarizations SET state='pending',next_retry=0,download_attempts=0,attempts=0,save_attempts=0,error=NULL WHERE state='failed'"
+            if ids:
+                sql += f" AND job_id IN (SELECT id FROM jobs WHERE video_id IN ({','.join('?' for _ in ids)}))"
+            return count + self.db.execute(sql, args).rowcount

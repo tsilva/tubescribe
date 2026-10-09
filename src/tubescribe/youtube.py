@@ -141,9 +141,11 @@ def discover(channel_id: str, kind: str, limit=None) -> list[dict]:
     return videos
 
 
-def download(root: Path, video_id: str) -> tuple[Path, dict]:
+def download(root: Path, video_id: str, *, concurrent_fragments=1) -> tuple[Path, dict]:
     if not ID.fullmatch(video_id):
         raise ValueError("Invalid video ID")
+    if concurrent_fragments not in (1, 2):
+        raise ValueError("Audio downloads are limited to one or two concurrent fragments")
     metadata = details(video_id)
     if metadata.get("live_status") in ("is_live", "is_upcoming", "post_live"):
         raise YouTubeError("Video is live or upcoming; wait for the completed recording")
@@ -157,7 +159,7 @@ def download(root: Path, video_id: str) -> tuple[Path, dict]:
             "--format",
             "bestaudio[protocol^=m3u8]/bestaudio",
             "--concurrent-fragments",
-            "1",
+            str(concurrent_fragments),
             "--abort-on-unavailable-fragments",
             "--sleep-interval",
             "3",

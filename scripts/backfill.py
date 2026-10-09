@@ -13,11 +13,15 @@ from pathlib import Path
 repo = Path(__file__).resolve().parent.parent
 root = Path(os.environ.get("TUBESCRIBE_DATA", repo / "data")).resolve()
 root.mkdir(parents=True, exist_ok=True)
-state_file = root / "backfill.json"
-log_file = root / "backfill.log"
 p = argparse.ArgumentParser()
 p.add_argument("action", choices=["start", "status", "stop"])
+p.add_argument(
+    "--diarize", action="store_true", help="Enrich saved ASR instead of importing new videos"
+)
 args = p.parse_args()
+name = "diarization-backfill" if args.diarize else "backfill"
+state_file = root / f"{name}.json"
+log_file = root / f"{name}.log"
 state = json.loads(state_file.read_text()) if state_file.exists() else {}
 worker_pid = None
 try:
@@ -61,7 +65,17 @@ else:
     subprocess.run(
         [str(repo / "scripts/tubescribe"), "--data", str(root), "tunnel", "start"], check=True
     )
-    command = [str(repo / "scripts/tubescribe"), "--data", str(root), "work", "--wait"]
+    subprocess.run(
+        [str(repo / "scripts/tubescribe"), "--data", str(root), "diarization-tunnel", "start"],
+        check=True,
+    )
+    command = [
+        str(repo / "scripts/tubescribe"),
+        "--data",
+        str(root),
+        "diarize" if args.diarize else "work",
+        "--wait",
+    ]
     if sys.platform == "darwin":
         command = ["/usr/bin/caffeinate", "-i", *command]
     with log_file.open("ab") as output:
