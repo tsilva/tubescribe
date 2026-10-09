@@ -170,3 +170,7 @@ Tests cover duplicate indexing, completed-job skips, independent stage state, in
 The latest three Jordi Visser videos (`hKBjZBiw62U`, `LhuSxhCNa5g`, `BkNzS8Ia-7k`) completed with **167.8 minutes of audio in 112.7 seconds of ASR**, approximately **89.3× real time** on beast-3's RTX 4090. A rerun reported `completed: 0, failed: 0, skipped: 3`. Seven source audio clips independently checked with Whisper large-v3 on the RTX 4090 had **97.7% normalized word agreement**, which is cross-model agreement rather than human-reference accuracy. Timestamp/content inspection passed. Full results and source excerpts are in `data/quality/report.md` and `report.json`. Downloading and tunnel upload add wall-clock time.
 
 Initial full discovery indexed **113** accessible uploads. Use `status` for the live completion count; the smoke test alone does not establish a complete channel archive.
+
+### Speaker diarization experiment
+
+An isolated [diarization trial](experiments/diarization/README.md) tests pyannote Community-1 on beast-3's RTX 4090 against a Jordi/Marty interview. This is an optional experiment; archive workers currently save ASR without speaker labels. The trial requires accepting the gated model's terms and authenticating Hugging Face on beast-3. It records automatic and known-two-speaker results, reference-guided name mappings, approximate publisher-label agreement, and speaker-labelled SRT under ignored `data/diarization/`.
