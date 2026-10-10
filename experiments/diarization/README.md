@@ -51,4 +51,5 @@ and has open Torch security alerts. Do not restore or run it until that stack
 passes a fresh security review. The available torchaudio 2.11 requires Torch
 2.11, which still lacks the future-callback fix and constrains setuptools below
 its patched release. Forcing torchaudio onto Torch 2.13 would break the supported
-binary pairing. The independent production environment uses patched Torch 2.13.
+binary pairing. The independent production dependency lock uses patched Torch 2.13; updating
+the lock does not upgrade an already running service.
