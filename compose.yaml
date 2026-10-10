@@ -1,0 +1,64 @@
+# Local deployment rehearsal. Supply a token and terminate public TLS at a proxy.
+x-runtime: &runtime
+  build:
+    context: .
+    target: runtime
+  init: true
+  stop_grace_period: 45s
+  environment: &environment
+    TUBESCRIBE_DATABASE: /state/archive.sqlite3
+    TUBESCRIBE_OBJECTS: /objects
+    TUBESCRIBE_DISPATCH: queue
+    TUBESCRIBE_ACCESS_TOKEN: ${TUBESCRIBE_ACCESS_TOKEN:?Set a random archive access token of at least 32 characters}
+    TUBESCRIBE_PUBLIC_ORIGIN: ${TUBESCRIBE_PUBLIC_ORIGIN:-https://tubescribe.local}
+  volumes:
+    - state:/state
+    - objects:/objects
+  tmpfs:
+    - /scratch:uid=10001,gid=10001
+services:
+  web:
+    <<: *runtime
+    environment:
+      <<: *environment
+      TUBESCRIBE_BIND: 0.0.0.0
+    command: [dashboard, serve, --port, '8080']
+    ports: ['127.0.0.1:8080:8080']
+  worker:
+    <<: *runtime
+    environment:
+      <<: *environment
+      TUBESCRIBE_ENDPOINT: ${TUBESCRIBE_ENDPOINT:?Set the HTTPS ASR endpoint}
+      TUBESCRIBE_DIARIZATION_ENDPOINT: ${TUBESCRIBE_DIARIZATION_ENDPOINT:?Set the HTTPS diarization endpoint}
+      TUBESCRIBE_AGENTBRIDGE: ${TUBESCRIBE_AGENTBRIDGE:?Set the HTTPS durable gateway endpoint}
+      TUBESCRIBE_REMOTE_INFERENCE: '1'
+      TUBESCRIBE_INFERENCE_TOKEN: ${TUBESCRIBE_INFERENCE_TOKEN:-${TUBESCRIBE_ACCESS_TOKEN}}
+      TUBESCRIBE_AGENT_PROTOCOL: durable
+    command: [queue, serve]
+  asr:
+    profiles: [gpu]
+    build:
+      context: .
+      target: gpu
+    init: true
+    gpus: all
+    environment:
+      TUBESCRIBE_ACCESS_TOKEN: ${TUBESCRIBE_ACCESS_TOKEN}
+    command: [tubescribe.server:create_app, --factory, --host, 0.0.0.0, --port, '18765']
+    volumes: ['models:/home/tubescribe/.cache/tubescribe/models']
+  diarization:
+    profiles: [gpu]
+    build:
+      context: .
+      target: gpu
+    init: true
+    gpus: all
+    environment:
+      TUBESCRIBE_ACCESS_TOKEN: ${TUBESCRIBE_ACCESS_TOKEN}
+    entrypoint: [python, -m, tubescribe.diarization_server]
+    command: [--host, 0.0.0.0, --port, '18767']
+    volumes: ['models:/home/tubescribe/.cache/tubescribe/models']
+volumes:
+  state:
+  objects:
+  models:

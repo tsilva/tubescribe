@@ -175,6 +175,9 @@ Each video/profile pair has a unique job. Download, ASR, diarization, postproces
 The default archive directory is `data/` in this repository (the wrapper always changes to the repository root):
 
 - `data/archive.sqlite3`: channels, discovery state, videos, jobs, ASR/diarization profiles, independent diarization state, transcript index and hashes.
+New transcript versions insert `sources/UUID/` below `PROFILE/`; the database records
+exact object keys. The following flat paths describe legacy archives, which remain readable:
+
 - `data/transcripts/CHANNEL_ID/VIDEO_ID/PROFILE/transcript.json`: timestamped segments/words and complete ASR/video provenance.
 - `data/transcripts/CHANNEL_ID/VIDEO_ID/PROFILE/transcript.txt`: readable timestamped text.
 - `data/transcripts/CHANNEL_ID/VIDEO_ID/PROFILE/transcript.srt`: SubRip subtitles for video players/editors.
@@ -204,9 +207,9 @@ The worker starts in a separate process session and survives this chat/terminal 
 scripts/tubescribe export /absolute/path/to/a/new/tubescribe-backup
 ```
 
-Export holds the archive lease, uses SQLite's backup API, and copies JSON, text, SRT, and Markdown transcripts, original ASR/diarization checkpoints and retained retry audio into a **new** directory outside the live archive. It generates SRT and Markdown from saved JSON for older completed transcripts before copying. Stop an active worker first. Restore by selecting the exported directory with `--data`, creating/reconnecting both forwards, and resuming `work`. The export deliberately omits SSH control sockets and host-specific tunnel state. Copy the export to your normal backup storage; a local copy alone does not protect against disk loss.
+Export holds the archive lease, uses SQLite's backup API, and copies JSON, text, SRT, and Markdown transcripts, original ASR/diarization checkpoints and retained retry audio into a **new** directory outside the live archive. It generates SRT and Markdown from saved JSON for older completed transcripts before copying. Stop an active worker and wait for queued/active gateway runs before export. Restore by selecting the exported directory with `--data`, creating/reconnecting both forwards, and resuming `work`. The export deliberately omits SSH control sockets and host-specific tunnel state. Copy the export to your normal backup storage; a local copy alone does not protect against disk loss.
 
-## Admin dashboard
+## Library dashboard
 
 ```bash
 scripts/tubescribe dashboard                       # start in the background; prints the URL
@@ -216,15 +219,71 @@ scripts/tubescribe dashboard start --port 8877     # optional fixed port
 scripts/tubescribe dashboard serve --port auto     # run in this terminal; Ctrl-C stops it
 ```
 
-The dashboard binds only to `127.0.0.1`. The default `--port auto` asks the OS for an available port; use the printed URL, or `dashboard status` to find it again. Starting an already running dashboard reuses it, even if a different port was requested. To change its port, stop it first. An unavailable fixed port reports a startup failure rather than replacing another server. The background process survives chat/terminal completion, but does not automatically restart after a reboot. State and logs live in `data/dashboard.json`, `data/dashboard.lock`, and `data/dashboard.log` (or the selected `--data` directory).
+The dashboard defaults to `127.0.0.1`; protected non-loopback binding is described below. The default `--port auto` asks the OS for an available port; use the printed URL, or `dashboard status` to find it again. Starting an already running dashboard reuses it, even if a different port was requested. To change its port, stop it first. An unavailable fixed port reports a startup failure rather than replacing another server. The background process survives chat/terminal completion, but does not automatically restart after a reboot. State and logs live in `data/dashboard.json`, `data/dashboard.lock`, and `data/dashboard.log` (or the selected `--data` directory).
 
-The dashboard is a single channel → videos page. Each channel lists its videos newest first, with title, source link, publish date, duration, status, download/ASR/speaker progress, model/profile, processing times, and any failure or retry details directly in the row. A video appears once; multiple model profiles are shown together within that video’s row. Search matches channel names/IDs and video titles/IDs. Empty channels and discovery errors remain visible. There are no separate overview, files, or video-details views.
+The dashboard is a channel → videos library with a summary reading pane. Each video appears once, with its title, publish date, duration, current status, and available **Summary**, **Transcript**, and **YouTube** actions in the row. Select a title or **Summary** to read without leaving the library. The pane offers the full summary, transcript, source video, and SRT timestamps; narrower screens open it as a full-screen reader with **Back to library**. Images are real saved transcript screenshots, preferring a figure used in the summary. Videos without figures use a text-only row. No external thumbnails or frontend CDN calls are required.
 
-A completed pipeline has a **Summary** button in its row. The summary links to the illustrated full transcript. Until a summary is available, each saved transcript has a **Transcript** button, including ASR transcripts that are still awaiting speaker diarization. It opens a preview with Markdown, text, SRT, or JSON format selection and download. Markdown previews display speaker turns. Previews are limited to 2 MiB; downloads contain the complete file.
+Processing stages, model/profile, timings, failures, and retry details are available under **Processing details**. For multiple transcript profiles, the main row prefers a saved summary, then a processed transcript, then a raw transcript. All profiles remain accessible in the details and the reader’s **Transcript version** selector. A completed version does not hide the state of unfinished versions in those details. Search matches channel names/IDs and video titles/IDs, and temporarily expands matching channels. Channels can be collapsed; empty channels and discovery errors remain visible.
 
-The dashboard reads SQLite in short transactions. Its monitoring endpoints do not acquire the worker's archive lock or run inference. It refreshes every five seconds while visible, preserves search and open previews, and only rebuilds the video list when its data changes. `Awaiting diarization` means ASR is saved but speakers are pending. Final completion requires saved ASR, diarization, a processed bundle, and its summary. `Awaiting summary` and `Summarizing` distinguish the final step; summary failures appear directly in the row. Status reflects recorded state; a stopped worker may leave a stage recorded as active until the next worker recovers it. Worker liveness is shown in the header and beside any interrupted active stage.
+The pane displays the existing summary, preserving links to its saved figures. Until a summary is available, it shows an excerpt of the saved transcript. Loading, unavailable documents, and videos still awaiting processing have explicit states. The **Transcript** link opens a stable page with Markdown, text, SRT, and JSON downloads, including raw ASR transcripts awaiting diarization. Reading only fetches published documents and never starts inference. The pane caches up to eight documents, cancels obsolete requests on selection changes, and preserves selection, reader scroll, and expanded details during unchanged live updates. Source HTML is rebuilt from an allowlist of text elements and same-origin links/images; it cannot add scripts, forms, external media, or inline event handlers. The legacy format preview remains available for older archive snapshots, limited to 2 MiB; downloads contain the complete file.
 
-The processed transcript header links to available artifact workflows. Open **One-page summary**, then **Build artifact** to launch a background worker; its status page refreshes until completion. This same-origin form is the dashboard's only write action, and repeated clicks share one worker. Use the CLI for adding channels, discovery, retries, and other worker control. File access is restricted to recognized transcript/review/artifact outputs and audio inside the archive; it does not expose SQLite, SSH configuration, sockets, or arbitrary local files. No external frontend assets or JavaScript packages are required.
+The dashboard reads SQLite in short transactions. Its monitoring endpoints do not acquire the worker's archive lock or run inference. It refreshes every five seconds while visible, preserves search and open previews, and only rebuilds the video list when its data changes. `Awaiting diarization` means ASR is saved but speakers are pending. Final completion requires saved ASR, diarization, a processed bundle, and its summary. `Awaiting summary` and `Summarizing` distinguish the final step; summary failures appear directly in the row. Status reflects recorded state; a stopped worker may leave a stage recorded as active until the next worker recovers it. Worker liveness is shown in the header and beside any interrupted active stage. The browser’s local date and time format is used for labels.
+
+The processed transcript header links to available artifact workflows. Open **One-page summary**, then **Build artifact** to launch a background worker; its status page refreshes until completion. Artifact creation is the dashboard's only write operation: the same-origin form and its REST JSON equivalent share one queued/active submission for repeated requests. Use the CLI for adding channels, discovery, retries, and other worker control. File access is restricted to recognized transcript/review/artifact outputs and audio inside the archive; it does not expose SQLite, SSH configuration, sockets, or arbitrary local files. No external frontend assets or JavaScript packages are required.
+
+## Resource URLs and NotebookLM sources
+
+Dashboard links use the YouTube video ID and explicit transcript profile, independent
+of SQLite job IDs, object directories, serving hostname, or publication UUIDs.
+Regenerating a processed transcript or summary keeps its URL while serving the current
+completed publication. Select the full transcript page as the source for downstream
+work; the summary is a separate source when that narrower coverage is useful.
+
+| Resource | Route |
+| --- | --- |
+| Video and available profiles | `/videos/VIDEO_ID` |
+| Full transcript HTML | `/videos/VIDEO_ID/transcripts/PROFILE/` |
+| Processed Markdown | `/videos/VIDEO_ID/transcripts/PROFILE/processed.md` |
+| Original transcript formats | `/videos/VIDEO_ID/transcripts/PROFILE/transcript.json` (`.txt`, `.md` also available) |
+| SRT download / viewer | `/videos/VIDEO_ID/transcripts/PROFILE/source.srt` / `subtitles/` |
+| Processed transcript ZIP | `/videos/VIDEO_ID/transcripts/PROFILE/processed-with-figures.zip` |
+| Transcript screenshot | `/videos/VIDEO_ID/transcripts/PROFILE/figures/IMAGE_ID.png` |
+| Summary or other workflow | `/videos/VIDEO_ID/transcripts/PROFILE/artifacts/WORKFLOW/` |
+| Artifact Markdown / screenshot | Append `artifact.md` or `figures/IMAGE_ID.png` to the workflow route. |
+
+HTML is rendered on the server with all source text in the response; published sources
+require no JavaScript. Transcript pages fall back to saved raw Markdown before processing
+finishes. Unavailable processed formats return 404. Profile names are URL-encoded; they
+are always explicit so multiple model profiles cannot silently share a source URL.
+HTML and HTTP `Link` headers identify the canonical source. Missing trailing slashes on
+canonical document URLs return 308 so relative screenshot/download links remain valid.
+`HEAD` returns the same headers and content length as `GET` without a body.
+
+Send `Accept: application/json` to a video, transcript, or workflow URL for metadata,
+states, and delivery links. `/api/videos/VIDEO_ID`, `/api/videos/VIDEO_ID/transcripts`, and
+`/api/videos/VIDEO_ID/transcripts/PROFILE/` provide explicit JSON equivalents; workflow
+metadata is also available below that transcript's `artifacts/WORKFLOW/`. Responses use
+`Vary: Accept` and `Cache-Control: no-store`. They expose delivery URLs rather than storage
+keys or transient worker directories. Legacy `/processed/JOB_ID/preview.html`,
+`/transcripts/JOB_ID/srt`, `/artifacts/JOB_ID/WORKFLOW/`, and file-preview endpoints remain
+available for existing bookmarks/exports, with canonical links in document responses.
+
+Artifact creation uses **POST to the workflow resource itself**, without a `/run` action
+suffix. The browser form returns 303 to the workflow page. REST callers can POST
+`{"token":"INSTANCE_FROM_API_HEALTH"}` as `application/json` and receive 202 with a
+submission ID and canonical `Location`. The instance token is a CSRF nonce, not the
+archive access credential; configured bearer/cookie authentication and host/origin
+checks still apply. GET/HEAD never run inference. Legacy workflow form POSTs remain
+compatible.
+
+[NotebookLM's web-source importer](https://support.google.com/notebooklm/answer/16215270?co=GENIE.Platform%3DDesktop&hl=en)
+imports the text of the supplied HTML page, excluding images and linked/nested pages.
+Supply each full transcript or summary URL separately. Screenshot URLs remain available
+for integrations that inspect images; a future PDF/image export can carry visual material
+into NotebookLM separately. URL imports still require a source Google can reach. Localhost
+and authenticated private pages are not made publicly accessible by this route change.
+For now, downloadable Markdown is the manual-upload option; public sharing/access policy
+and an actual NotebookLM import are future integration steps.
 
 ## Artifact workflows
 
@@ -285,49 +344,201 @@ custom workflow definitions alongside the transcript archive.
 
 ## Local runtime and future cloud adapters
 
-The runtime remains local. No cloud infrastructure, credentials, service migration, or
-new dependency is required. Existing completed bundles and checkpoints stay readable.
+The default remains the local archive with loopback inference. The runtime now also
+supports separate web, queue worker, durable agent gateway, ASR, and diarization roles.
+No cloud account or new Python dependency is needed. Existing archives migrate in place
+and completed outputs remain readable.
 
 | Module | Responsibility |
 | --- | --- |
-| `src/tubescribe/pipeline.py` | Stage dependencies, completion, retry eligibility, dashboard status, and shared final-stage execution with typed inputs/results. |
-| `src/tubescribe/repository.py` | SQLite schema/migrations, indexed jobs, stage records, scoped selection, and fenced state updates. Inference workers use these methods rather than executing SQL. `Store` coordinates archive content and recovery. |
-| `src/tubescribe/blobs.py` | Storage keys and SHA-256 references, durable writes, verified bundle publication. Local filesystem and in-memory adapters exercise the same interface. |
-| `src/tubescribe/submission.py` | Durable, deduplicated requests shared by CLI and dashboard. CLI executes inline; dashboard dispatches a local process with the saved submission ID. |
-| `src/tubescribe/execution.py` | Atomic archive/job claims, ownership expiry, heartbeat renewal, and conditional state commits. |
-| `src/tubescribe/inference.py` | AgentBridge transport, callback lifecycle/authentication, timeouts, endpoint policy, and hardware policy. Domain screenshot/transcript tools supply functions rather than HTTP handling. |
-| `src/tubescribe/publication.py` | Logical transcript/figure references resolved into dashboard URLs or portable export links. |
+| `src/tubescribe/pipeline.py` | Stage dependencies, completion, retry eligibility, and shared final-stage execution. |
+| `src/tubescribe/repository.py` | SQLite job records, claims, read models, submissions, attempts, events, and fenced commits. `Store` composes this adapter rather than inheriting it. |
+| `src/tubescribe/migrations.py` | Numbered, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–4. |
+| `src/tubescribe/blobs.py` | Confined object keys, hashes, metadata, streamed file transfer, and verified bundle publication. Local, separate-volume, and in-memory adapters share the interface. |
+| `src/tubescribe/storage.py` | Durable checkpoint writes, scratch materialization, fresh publication versions, and recovery. |
+| `src/tubescribe/submission.py` | Deduplicated durable requests, recorded results, and local process or independent queue dispatch. |
+| `src/tubescribe/execution.py` | Expiring archive/job leases, heartbeats, fenced commits, and attempt instrumentation. |
+| `src/tubescribe/inference.py` | Transport, authentication, endpoint/hardware policies, and callback lifecycle. |
+| `src/tubescribe/agent_gateway.py` | Reconnectable agent requests and gateway-owned transcript, screenshot, and figure tools beside AgentBridge. |
+| `src/tubescribe/config.py` | Validated runtime locations, role options, binding, and authentication configuration. |
+| `src/tubescribe/maintenance.py` | Interrupted-work reconciliation, completed-video cleanup, and explicit orphan retention. |
+| `src/tubescribe/publication.py` | Logical transcript/figure references resolved into serving URLs or portable links. |
 
-SQLite gains `claims` and `submissions` tables automatically. Claims last **90 seconds**
-and renew every **30 seconds** during long inference calls and queue waits. A crashed
-worker's claims expire; recovery resets interrupted stage state only when no live job
-claim owns it. Stale owners cannot renew/release replacement claims or commit stage
-state. The archive claim preserves concurrency of **one worker**; per-video claims
-cover all stages and separate stage invocations. `worker.lock` is now a PID display
-file, while the dashboard and backfill script read the archive claim for liveness.
-Submissions survive dashboard restarts and duplicate clicks share one queued/active
-request. Failed process launches are recorded; abandoned requests can be resubmitted
-once their launch grace period and any ownership lease have expired.
-All four worker commands handle `SIGTERM` as an orderly interruption, returning the
-active stage's attempt budget, retaining checkpoints, and releasing their leases.
+### Durable data and scratch
 
-ASR and diarization clients accept an HTTP transport, headers, endpoint policy, and
-hardware policy; the worker accepts an ASR client and diarization factory. The ASR app
-factory and Nemotron engine accept the same hardware policy while retaining CUDA execution. Model stages
-accept an AgentBridge runner. Defaults still require loopback HTTP and RTX 4090 CUDA.
-An explicit HTTPS endpoint policy and hardware policy can support a separately configured
-runtime later. `RemoteTools` is a transport seam for a separately hosted tool executor;
-the current AgentBridge server still requires local callbacks, so cloud use also needs
-corresponding server support. File/media extraction remains local scratch work.
-A future cloud migration must supply shared database/claims, object storage with staging,
-a durable worker dispatcher, and compatible remote inference/tool adapters.
+By default, `--data` remains both the archive and scratch directory. Set
+`TUBESCRIBE_DATABASE` and `TUBESCRIBE_OBJECTS` to persistent locations to make each
+process's `--data` disposable scratch. Web, worker, and gateway can then use different
+scratch directories with the same database and object volume. `DirectoryObjects`
+exposes keys, bytes, metadata, and verified copies, without a filesystem-path API.
+Workers hydrate inputs only as needed; response checkpoints, frame ledgers, captured
+PNGs, and inference outputs are persisted before their state pointers advance.
+Video and retry-audio transfers stream through files, and listings/existence checks use
+metadata. Retry audio is hashed and saved before its download pointer advances; replacement
+workers reuse it for ASR/diarization and delete it after completion unless `--keep-audio`
+was requested.
 
-New canonical artifact Markdown keeps `transcript:JOB_ID` and `figure:IMAGE_ID` links
-with a `references.json` map. The dashboard resolves these at delivery time; downloaded
-Markdown has usable links. Standalone previews and `read.md` use relative archive paths.
-Export resolves both new and legacy bundles, regenerates manifests only in the exported
-copy, and clears copied live claims/PIDs. Completed live bundles are not rewritten.
-Changing the serving hostname therefore does not require another model call.
+New raw/diarized transcript versions live below
+`transcripts/CHANNEL/VIDEO/PROFILE/sources/UUID/`. Processed and workflow bundles have
+fresh publication UUIDs; verified content and manifests are durable before the database
+commits a completion pointer. Packaging retries never modify an already published
+bundle. Legacy flat transcript paths continue to work. Cached videos are removed from
+worker scratch and durable objects after processed Markdown publication; YouTube URLs,
+SRT, illustrated Markdown, screenshots, checkpoints, and summaries remain available.
+
+Canonical artifact Markdown uses `transcript:JOB_ID` and `figure:IMAGE_ID` with a
+`references.json` map. Delivery resolves these into usable links without a model call.
+Export reads durable objects, resolves legacy and current bundles in the exported copy,
+and clears copied claims/PIDs. The default backup/restore procedure above still works;
+when restoring a separate-volume configuration, point the database and objects settings
+at the restored archive rather than the original deployment.
+
+### Independent queue worker
+
+`TUBESCRIBE_DISPATCH=process` preserves inline CLI execution and dashboard-spawned workers.
+With `queue`, background submissions are recorded and a separate consumer launches the
+stage commands. Explicit CLI stage commands still execute inline; use `queue submit`
+when the caller should only enqueue work. The web process can exit before the worker starts. Pending submissions do not
+expire merely because they have waited; identical video selections are normalized and
+share one queued/active request. Completed delivery returns its recorded result.
+
+```bash
+export TUBESCRIBE_DATABASE=/absolute/durable/archive.sqlite3
+export TUBESCRIBE_OBJECTS=/absolute/durable/objects
+export TUBESCRIBE_DISPATCH=queue
+# These processes can have separate, empty scratch directories:
+scripts/tubescribe --data /absolute/scratch/web dashboard serve --port auto
+scripts/tubescribe --data /absolute/scratch/worker queue serve
+scripts/tubescribe --data /absolute/scratch/operator queue status
+# Drain the currently queued requests and exit:
+scripts/tubescribe --data /absolute/scratch/worker queue once
+```
+
+Submit a saved request with `queue submit --request /absolute/request.json`, for example:
+
+```json
+{"command":"work","options":{"profile":"turbo-v1","video":["LhuSxhCNa5g"],"limit":1}}
+```
+
+Claims last **90 seconds** and renew every **30 seconds**. The archive lease deliberately
+keeps one pipeline worker active. Per-video leases fence all stages. A replacement
+consumer requeues expired active work after the launch grace period and lease expiry;
+replayed execution reuses published stages and response checkpoints. `worker.lock` is
+only a PID display file. SIGTERM retains recoverable checkpoints and releases ownership;
+SIGKILL recovery waits for lease expiry. Run the consumer under a service supervisor
+when reboot recovery is required.
+
+### Durable agent gateway
+
+The default AgentBridge protocol is still synchronous. For durable execution, run
+TubeScribe's gateway **on the same host as AgentBridge**, sharing the database and object
+store with workers. The gateway owns loopback tool callbacks and has its own scratch;
+a disappearing worker does not remove screenshot tools or interrupt the agent run.
+AgentBridge itself does not need changes.
+
+```bash
+export TUBESCRIBE_ACCESS_TOKEN=REPLACE_WITH_A_RANDOM_SECRET_OF_AT_LEAST_32_CHARACTERS
+scripts/tubescribe --data /absolute/scratch/gateway agent serve \
+  --upstream http://127.0.0.1:8082 --port 8083
+# Worker environment; keep the gateway's upstream protocol independent:
+export TUBESCRIBE_AGENT_PROTOCOL=durable
+export TUBESCRIBE_AGENTBRIDGE=http://127.0.0.1:8083
+scripts/tubescribe --data /absolute/scratch/worker queue serve
+```
+
+The authenticated `/api/v1/durable/runs/SHA256_ID` supports POST submission, GET status/result,
+and DELETE cancellation. The ID derives from a persisted run key; reusing it with
+changed input is rejected. Gateway results are saved under `agent-results/ID.json`
+before completion is committed. Worker retries reconnect to that run instead of
+spending another model attempt, and polling backs off to three seconds.
+`agent status --run-id ID` and `agent cancel --run-id ID` operate on the shared ledger.
+The default gateway capacity is one run; it is independently configurable up to eight.
+
+If the **gateway itself** dies during the synchronous upstream call without a saved
+result, its run becomes `uncertain`. It never silently repeats an expensive call whose
+outcome is unknown. Inspect the ledger before explicitly forcing a fresh stage run.
+Queued cancellation prevents execution; cancellation after execution starts prevents
+result delivery/publication but cannot abort the current synchronous AgentBridge request.
+The source model remains `codex/gpt-6.1-sol` with high reasoning for both Markdown and
+summary generation. Models still inspect only the bounded, relevant figures requested
+through their tools.
+
+### Configuration, access, and inference roles
+
+| Setting | Default / meaning |
+| --- | --- |
+| `TUBESCRIBE_DATA` / `--data` | `data`; process scratch and legacy archive root. |
+| `TUBESCRIBE_DATABASE` | `DATA/archive.sqlite3`; durable SQLite location. |
+| `TUBESCRIBE_OBJECTS` | Unset; otherwise a separate durable object directory. |
+| `TUBESCRIBE_DISPATCH` | `process` or `queue`. |
+| `TUBESCRIBE_WORKER_POLL` | `3`; positive finite consumer polling seconds. |
+| `TUBESCRIBE_AGENT_PROTOCOL` | `sync` or `durable`. |
+| `TUBESCRIBE_AGENTBRIDGE` | Explicit AgentBridge or durable gateway URL; existing loopback discovery remains available. |
+| `TUBESCRIBE_AGENT_CONCURRENCY` | `1`; gateway capacity, integer 1–8. |
+| `TUBESCRIBE_BIND` | `127.0.0.1`; service bind address. |
+| `TUBESCRIBE_PUBLIC_ORIGIN` | HTTPS origin required for non-loopback runtime binding. |
+| `TUBESCRIBE_ACCESS_TOKEN` | Optional on local web/inference services, required on the gateway; at least 32 characters when configured. |
+| `TUBESCRIBE_ENDPOINT` | Explicit ASR URL; existing SSH tunnel default otherwise. |
+| `TUBESCRIBE_DIARIZATION_ENDPOINT` | Explicit diarization URL; existing SSH tunnel default otherwise. |
+| `TUBESCRIBE_REMOTE_INFERENCE` | `1` explicitly enables HTTPS inference clients instead of loopback HTTP. |
+| `TUBESCRIBE_INFERENCE_TOKEN` | Bearer credential for ASR/diarization and synchronous AgentBridge clients. Durable gateway clients use the archive access token. |
+| `TUBESCRIBE_GPU` | `RTX 4090`; another configured GPU name or an empty value disables the model-name check while retaining CUDA. |
+
+Configured web authentication protects every route, including files. API clients send
+`Authorization: Bearer TOKEN`. A trusted HTTPS proxy can authenticate a user and inject
+that header, or provision a `tubescribe_access` cookie with Secure, HttpOnly, SameSite=Strict
+and Path=/. There is no login screen or multi-user account system. Host/origin checks
+still apply. Keep direct service ports private and terminate HTTPS at your proxy.
+ASR and diarization accept bearer authentication and injected transport/hardware policy;
+CPU orchestration does not load model weights. Screenshot extraction remains FFmpeg work
+in gateway/worker scratch.
+
+### Containers and deployment rehearsal
+
+`Dockerfile` has separate `runtime` (web, worker, gateway) and `gpu` (ASR/diarization)
+targets, non-root execution, digest-pinned base/uv/Node images, and frozen Python installs.
+The GPU target includes locked inference extras and requires the NVIDIA container runtime.
+OS packages are installed from the base distribution's repositories. The uv setup follows
+its [Docker integration guidance](https://docs.astral.sh/uv/guides/integration/docker/).
+
+`compose.yaml` separates web and worker scratch with tmpfs and retains database/objects
+in volumes. Supply the access token and **HTTPS** ASR, diarization, and durable gateway
+URLs before `docker compose up --build web worker`; host loopback services are not reachable
+as container loopback. A local AgentBridge gateway must be exposed through your configured
+HTTPS proxy. Optional `gpu` profile services run model servers; their private ports still
+need an explicit TLS/authenticated routing configuration to be used by remote clients.
+
+Compose configuration was validated. Image building could not run on the development
+Mac because Docker Desktop reported it could not start; CPU/GPU container execution is
+therefore **not yet verified**. No cloud infrastructure was provisioned.
+
+### Operations and reconciliation
+
+`attempts` records per-stage start/end, elapsed time, request correlation, publication
+key, errors, and available inference/token metrics. `runtime_events` retains submission,
+queue-delay, state-transition, agent-result, and reconciliation events independent of
+scratch logs; the dashboard merges these with legacy logs. Generated model reports record
+prompt/schema fingerprints for provenance. These are an operational ledger, not yet an
+external metrics/alerting system.
+
+```bash
+scripts/tubescribe reconcile                         # recover expired work; report orphan bundles
+scripts/tubescribe reconcile --purge --retention-days 7
+```
+
+Reconciliation acquires the archive lease, requeues abandoned submissions, marks abandoned
+attempts interrupted, repairs derived bundles from checkpoints, and removes completed
+video caches. Orphan deletion is opt-in: only unreferenced processed/artifact directories
+first recorded at least the retention period ago are eligible. Published current pointers
+are retained; purge refuses to run while agent requests are queued or active. Raw transcript versions and response checkpoints are retained; this is not
+a complete archive-history or event-log retention policy.
+
+The adapters prepare a migration without deploying it: SQLite/WAL is still for processes
+on one host with a local volume, **not a database on a network filesystem**. A real multi-host
+service still needs a shared database/claims adapter, an S3-compatible object adapter,
+service supervision/TLS, and deployment-specific credentials. The separate-volume and
+in-memory storage tests exercise those boundaries without implying actual S3/PostgreSQL
+support or multi-tenant isolation.
 
 ## Verification
 
@@ -336,6 +547,20 @@ uv --config-file uv.toml run --locked python -m unittest discover -s tests -v
 ```
 
 Tests cover duplicate indexing, completed-job skips, independent ASR/diarization/postprocessing state, speaker-word assignment and unmatched speech, inference failure with media reuse, native image tool delivery, checkpoint integrity, failed durable writes, repair without repeated inference, exclusive workers, interrupted-stage recovery, bounded attempts/backoff, force limits, absent tabs vs bot checks, explicit upgrade profiles, RTX 4090 enforcement, tunnel reconnection, offline batch suspension, downloader process cleanup, dashboard state and figure downloads, and timestamp/schema validation. The initial ASR smoke run processed three videos and reran those IDs to check completed-job skips. Final-stage integration was separately verified on an existing diarized source. Runtime quality/speed results are recorded in ignored `data/quality/`; channel history is complete only when its recorded jobs establish completion.
+
+### Cloud preparation rehearsal (10 October 2026)
+
+The **164-test** suite includes separate CLI processes and empty scratch directories,
+queue delivery after the web exits, duplicate delivery with saved-result replay, real
+SIGKILL during packaging, checkpoint rehydration without repeated model execution,
+publication before a failed database commit, shared ownership across scratch directories,
+repeatable migrations, protected routes, lost agent responses, gateway-owned FFmpeg
+screenshot callbacks, uncertain gateway recovery after delayed lease expiry, custom workflow delivery, and completed
+video deletion when worker scratch has disappeared, and diarization retry with durable
+audio after worker replacement. In-memory objects also exercise full
+processed-transcript recovery and summary generation without a filesystem-path API.
+Model responses in this rehearsal are synthetic: it validates runtime failure boundaries,
+not transcription accuracy, GPU/container performance, or model token savings.
 
 ### Verified full pipeline (10 October 2026)
 
@@ -395,19 +620,21 @@ A persisted response is bound to original source hashes and instructions in
 `run-context.json`; packaging/storage retries validate and reuse it without video access,
 service readiness, or another model call. Corrupt response checkpoints are rejected.
 Invalid new model outputs are retried with a fresh response within the model attempt bound.
-An interruption before a response checkpoint exists requires a new agent turn; native
-agent turns are not resumed. Changed source content queues a new run. Missing/corrupt
+With the default synchronous protocol, interruption before a response checkpoint exists
+requires a new agent turn. The optional durable gateway reconnects callers to an existing
+run and its tools; gateway loss without a saved response instead requires operator review. Changed source content queues a new run. Missing/corrupt
 derived bundles can be rebuilt from valid response/frame checkpoints. `--force` explicitly
 regenerates completed results, including when changing between text and video modes.
 With `--force --limit N`, only the N attempted videos are reset; other completed results
 keep their completion pointers. A successful final model attempt can still retry packaging
 within its separate save budget.
 
-The dashboard keeps Channel → Videos and one artifact action per row. Completed
-pipelines open the summary, which links to the illustrated version, with downloads for Markdown, figures ZIP,
+The dashboard keeps Channel → Videos with summary and transcript actions in each row. Completed
+pipelines expose the summary in the reading pane, with a full-page link to the illustrated version and downloads for Markdown, figures ZIP,
 and the original SRT. View SRT opens a simple cue-by-cue reader; clicking a start timestamp
-opens the original YouTube video at that second. The reader also links to YouTube and the
-SRT download. Earlier raw transcripts remain readable while this stage is pending, with
+opens the original YouTube video at that second. The reader's compact icon toolbar links to
+YouTube, the SRT download, and the processed transcript when available; each icon has a
+tooltip and an accessible name. Earlier raw transcripts remain readable while this stage is pending, with
 the same View SRT action. The original YouTube URL stays in the video record and transcript
 JSON even after local media cleanup.
 The generated preview escapes source text and executes no scripts. Archive export includes

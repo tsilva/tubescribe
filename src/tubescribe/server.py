@@ -12,11 +12,12 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from .inference import HardwarePolicy
+from .inference import client_options
 from .storage import now
 
 
-def create_app(*, hardware=HardwarePolicy()):
+def create_app(*, hardware=None):
+    hardware = hardware or client_options()["hardware"]
     from fastapi import FastAPI, HTTPException, UploadFile
     from faster_whisper import WhisperModel
     from faster_whisper.utils import download_model
@@ -95,6 +96,19 @@ def create_app(*, hardware=HardwarePolicy()):
         yield
 
     app = FastAPI(lifespan=lifespan)
+    token = os.environ.get("TUBESCRIBE_ACCESS_TOKEN")
+    if token:
+        if len(token) < 32:
+            raise ValueError("Access token must contain at least 32 characters")
+        import hmac
+
+        from fastapi.responses import JSONResponse
+
+        @app.middleware("http")
+        async def authenticate(request, call_next):
+            if not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + token):
+                return JSONResponse({"error": "Authentication required"}, status_code=401)
+            return await call_next(request)
 
     @app.get("/health")
     async def health():

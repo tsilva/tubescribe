@@ -20,83 +20,17 @@ def now():
 
 
 class JobRepository:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, database=None):
+        from .config import bind_database, database_path
+        from .migrations import migrate
+
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.root / "archive.sqlite3", timeout=30)
+        self.database = bind_database(self.root, database or database_path(self.root))
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(self.database, timeout=30)
         self.db.row_factory = sqlite3.Row
-        from .execution import SCHEMA
-
-        self.db.executescript(SCHEMA)
-        self.db.executescript("""
-          PRAGMA journal_mode=WAL;
-          PRAGMA synchronous=FULL;
-          PRAGMA foreign_keys=ON;
-          CREATE TABLE IF NOT EXISTS channels (
-            id TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
-            added_at TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS discovery (
-            channel_id TEXT REFERENCES channels(id), kind TEXT, state TEXT,
-            indexed_count INTEGER DEFAULT 0, updated_at TEXT, error TEXT,
-            PRIMARY KEY(channel_id,kind));
-          CREATE TABLE IF NOT EXISTS videos (
-            id TEXT PRIMARY KEY, channel_id TEXT NOT NULL REFERENCES channels(id),
-            title TEXT NOT NULL, url TEXT NOT NULL, kind TEXT NOT NULL,
-            duration REAL, published_at TEXT, discovered_at TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, identity TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY, video_id TEXT NOT NULL REFERENCES videos(id),
-            profile TEXT NOT NULL, download_state TEXT NOT NULL DEFAULT 'pending',
-            asr_state TEXT NOT NULL DEFAULT 'pending', state TEXT NOT NULL DEFAULT 'pending',
-            audio_path TEXT, download_attempts INTEGER NOT NULL DEFAULT 0,
-            asr_attempts INTEGER NOT NULL DEFAULT 0, next_retry REAL NOT NULL DEFAULT 0,
-            failed_stage TEXT, error_kind TEXT, error TEXT, updated_at TEXT NOT NULL,
-            completed_at TEXT, UNIQUE(video_id,profile));
-          CREATE TABLE IF NOT EXISTS transcripts (
-            job_id INTEGER PRIMARY KEY REFERENCES jobs(id), json_path TEXT NOT NULL,
-            text_path TEXT NOT NULL, json_sha256 TEXT NOT NULL, text_sha256 TEXT NOT NULL,
-            language TEXT NOT NULL, model TEXT NOT NULL, revision TEXT NOT NULL,
-            processing_seconds REAL NOT NULL, duration REAL NOT NULL, saved_at TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS diarization_profiles (
-            profile TEXT PRIMARY KEY, identity TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS diarizations (
-            job_id INTEGER PRIMARY KEY REFERENCES jobs(id), state TEXT NOT NULL DEFAULT 'pending',
-            stage TEXT, audio_path TEXT, download_attempts INTEGER NOT NULL DEFAULT 0,
-            attempts INTEGER NOT NULL DEFAULT 0, save_attempts INTEGER NOT NULL DEFAULT 0, next_retry REAL NOT NULL DEFAULT 0,
-            error TEXT, updated_at TEXT NOT NULL, completed_at TEXT,
-            asr_path TEXT, asr_sha256 TEXT, prediction_path TEXT, prediction_sha256 TEXT,
-            speaker_count INTEGER, processing_seconds REAL);
-          CREATE TABLE IF NOT EXISTS postprocessings (
-            job_id INTEGER PRIMARY KEY REFERENCES jobs(id), state TEXT NOT NULL DEFAULT 'pending',
-            stage TEXT, mode TEXT, source_path TEXT, source_sha256 TEXT, srt_sha256 TEXT,
-            output_dir TEXT, manifest_path TEXT, manifest_sha256 TEXT,
-            download_attempts INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
-            save_attempts INTEGER NOT NULL DEFAULT 0, next_retry REAL NOT NULL DEFAULT 0,
-            error TEXT, updated_at TEXT NOT NULL, completed_at TEXT,
-            figures INTEGER, agent_seconds REAL, total_tokens INTEGER);
-          CREATE TABLE IF NOT EXISTS artifacts (
-            job_id INTEGER NOT NULL REFERENCES jobs(id), workflow TEXT NOT NULL,
-            state TEXT NOT NULL DEFAULT 'pending', stage TEXT,
-            source_path TEXT, input_sha256 TEXT, workflow_sha256 TEXT,
-            output_dir TEXT, response_sha256 TEXT, manifest_sha256 TEXT,
-            attempts INTEGER NOT NULL DEFAULT 0, save_attempts INTEGER NOT NULL DEFAULT 0,
-            error TEXT, updated_at TEXT NOT NULL, completed_at TEXT,
-            PRIMARY KEY(job_id,workflow));
-        """)
-
-        if "save_attempts" not in {
-            r[1] for r in self.db.execute("PRAGMA table_info(diarizations)")
-        }:
-            self.db.execute(
-                "ALTER TABLE diarizations ADD COLUMN save_attempts INTEGER NOT NULL DEFAULT 0"
-            )
-            self.db.commit()
-        if "run_pid" not in {r[1] for r in self.db.execute("PRAGMA table_info(artifacts)")}:
-            self.db.execute("ALTER TABLE artifacts ADD COLUMN run_pid INTEGER")
-            self.db.commit()
-        if "next_retry" not in {r[1] for r in self.db.execute("PRAGMA table_info(artifacts)")}:
-            self.db.execute("ALTER TABLE artifacts ADD COLUMN next_retry REAL NOT NULL DEFAULT 0")
-            self.db.commit()
+        migrate(self.db)
 
     def channel(self, channel: dict):
         with self.db:
@@ -274,6 +208,19 @@ class JobRepository:
                 (*values.values(), job_id, *([workflow] if workflow is not None else [])),
             )
 
+        if "state" in values or "stage" in values:
+            self.record_event(
+                None,
+                "stage_transition",
+                {
+                    "job_id": job_id,
+                    "stage": stage_name,
+                    "workflow": workflow,
+                    "state": values.get("state"),
+                    "step": values.get("stage"),
+                },
+            )
+
     def transcript(self, job_id):
         return self.db.execute("SELECT * FROM transcripts WHERE job_id=?", (job_id,)).fetchone()
 
@@ -406,3 +353,390 @@ class JobRepository:
         }
         jobs = [r for r in self.pipeline_jobs(**scope) if plans[completed_stage].complete(r)]
         return sorted(jobs, key=lambda r: r["id"]) if order == "id" else jobs
+
+    def submission(self, identifier):
+        row = self.db.execute(
+            "SELECT s.*,r.result FROM submissions s LEFT JOIN submission_results r ON r.id=s.id WHERE s.id=?",
+            (identifier,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def enqueue(self, request, dedupe):
+        import uuid
+
+        stamp = time.time()
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute(
+                "SELECT * FROM submissions WHERE dedupe=? AND state IN ('queued','active')",
+                (dedupe,),
+            ).fetchone()
+            if row:
+                owned = self.db.execute(
+                    "SELECT 1 FROM claims WHERE resource=? AND expires>?",
+                    ("submission:" + row["id"], stamp),
+                ).fetchone()
+                # A queued request remains durable until consumed, regardless of age.
+                if (
+                    row["state"] == "queued"
+                    and row["pid"] is None
+                    or owned
+                    or row["updated"] > stamp - 90
+                ):
+                    return row["id"], False
+                self.db.execute(
+                    "UPDATE submissions SET state='interrupted',updated=? WHERE id=?",
+                    (stamp, row["id"]),
+                )
+            identifier = uuid.uuid4().hex
+            self.db.execute(
+                "INSERT INTO submissions(id,dedupe,request,state,pid,error,created,updated) VALUES(?,?,?,?,?,?,?,?)",
+                (identifier, dedupe, request, "queued", None, None, stamp, stamp),
+            )
+        self.record_event(identifier, "submission_queued", {})
+        return identifier, True
+
+    def update_submission(self, identifier, **values):
+        if not set(values) <= {"state", "pid", "error", "result"}:
+            raise ValueError("Unknown submission field")
+        with self.db:
+            from .execution import assert_owned
+
+            assert_owned(self.db, self.root)
+            if "result" in values:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO submission_results VALUES(?,?)",
+                    (identifier, values.pop("result")),
+                )
+            values["updated"] = time.time()
+            self.db.execute(
+                "UPDATE submissions SET " + ",".join(k + "=?" for k in values) + " WHERE id=?",
+                (*values.values(), identifier),
+            )
+
+        self.record_event(identifier, "submission_" + values.get("state", "dispatched"), {})
+
+    def submission_records(self):
+        return [
+            dict(r)
+            for r in self.db.execute(
+                "SELECT id,state,pid,error,created,updated FROM submissions ORDER BY created DESC LIMIT 100"
+            )
+        ]
+
+    def queued_submissions(self):
+        return [
+            dict(r)
+            for r in self.db.execute(
+                "SELECT * FROM submissions WHERE state='queued' AND pid IS NULL ORDER BY created"
+            )
+        ]
+
+    def reclaim_submissions(self):
+        stamp = time.time()
+        with self.db:
+            result = self.db.execute(
+                "UPDATE submissions SET state='queued',pid=NULL,updated=? WHERE state IN ('active','queued') AND (state='active' OR pid IS NOT NULL) AND updated<? AND NOT EXISTS (SELECT 1 FROM claims WHERE resource='submission:' || submissions.id AND expires>?)",
+                (stamp, stamp - 90, stamp),
+            )
+        return result.rowcount
+
+    def owned(self, resource):
+        return (
+            self.db.execute(
+                "SELECT 1 FROM claims WHERE resource=? AND expires>?", (resource, time.time())
+            ).fetchone()
+            is not None
+        )
+
+    def pending_agent_runs(self):
+        return self.db.execute(
+            "SELECT COUNT(*) FROM agent_runs WHERE state IN ('queued','active')"
+        ).fetchone()[0]
+
+    def record_event(self, run_id, event, data):
+        from .execution import CURRENT_SUBMISSION
+
+        run_id = run_id or CURRENT_SUBMISSION.get()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO runtime_events(run_id,event,created,data) VALUES(?,?,?,?)",
+                (run_id, event, time.time(), json.dumps(data, default=str)),
+            )
+
+    def begin_attempt(self, job_id, stage, workflow=None, run_id=None):
+        import uuid
+
+        from .execution import CURRENT_SUBMISSION
+
+        run_id = run_id or CURRENT_SUBMISSION.get()
+        identifier = uuid.uuid4().hex
+        with self.db:
+            self.db.execute(
+                "INSERT INTO attempts(id,job_id,stage,workflow,run_id,state,started) VALUES(?,?,?,?,?,?,?)",
+                (identifier, job_id, stage, workflow, run_id, "active", time.time()),
+            )
+        return identifier
+
+    def finish_attempt(self, identifier, state, *, metrics=None, error=None, run_id=None):
+        stamp = time.time()
+        with self.db:
+            self.db.execute(
+                "UPDATE attempts SET state=?,finished=?,elapsed=?-started,metrics=?,error=?,run_id=COALESCE(run_id,?) WHERE id=?",
+                (state, stamp, stamp, json.dumps(metrics or {}), error, run_id, identifier),
+            )
+
+    def reconcile_attempts(self):
+        with self.db:
+            result = self.db.execute(
+                "UPDATE attempts SET state='interrupted',finished=?,error='Owner expired' WHERE state='active' AND job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM claims WHERE resource='job:' || attempts.job_id AND expires>?)",
+                (time.time(), time.time()),
+            )
+        return result.rowcount
+
+    def transcript_records(self, *, ids=None, profile=None):
+        conditions = ["j.state='complete'"]
+        values = []
+        if ids:
+            conditions.append("j.video_id IN (" + ",".join("?" for _ in ids) + ")")
+            values.extend(ids)
+        if profile:
+            conditions.append("j.profile=?")
+            values.append(profile)
+        return self.db.execute(
+            "SELECT j.id,t.*,j.video_id FROM jobs j JOIN transcripts t ON j.id=t.job_id WHERE "
+            + " AND ".join(conditions)
+            + " ORDER BY j.id",
+            values,
+        ).fetchall()
+
+    def commit_transcript(self, record):
+        from .execution import assert_owned
+
+        with self.db:
+            assert_owned(self.db, self.root)
+            self.db.execute(
+                "INSERT OR REPLACE INTO transcripts VALUES(" + ",".join("?" for _ in record) + ")",
+                record,
+            )
+            self.db.execute(
+                "UPDATE jobs SET state='complete',asr_state='complete',completed_at=?,updated_at=?,error=NULL,error_kind=NULL,failed_stage=NULL WHERE id=?",
+                (now(), now(), record[0]),
+            )
+
+
+class SQLiteClaims:
+    """Database-backed atomic ownership; independent of worker scratch paths."""
+
+    def __init__(self, root):
+        from .config import database_path
+        from .migrations import CLAIMS
+
+        self.db = sqlite3.connect(database_path(root), timeout=30)
+        self.db.executescript(CLAIMS)
+
+    def acquire(self, resource, owner, *, ttl=90, clock=None):
+        stamp = time.time() if clock is None else clock
+        with self.db:
+            r = self.db.execute(
+                "INSERT INTO claims VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE claims.expires<=? OR claims.owner=?",
+                (resource, owner, stamp + ttl, stamp, owner),
+            )
+        return r.rowcount == 1
+
+    def renew(self, resource, owner, *, ttl=90, clock=None):
+        stamp = time.time() if clock is None else clock
+        with self.db:
+            return (
+                self.db.execute(
+                    "UPDATE claims SET expires=? WHERE resource=? AND owner=? AND expires>?",
+                    (stamp + ttl, resource, owner, stamp),
+                ).rowcount
+                == 1
+            )
+
+    def release(self, resource, owner):
+        with self.db:
+            self.db.execute("DELETE FROM claims WHERE resource=? AND owner=?", (resource, owner))
+
+    @staticmethod
+    def fence(db, resource, owner):
+        return (
+            db.execute(
+                "UPDATE claims SET owner=owner WHERE resource=? AND owner=? AND expires>?",
+                (resource, owner, time.time()),
+            ).rowcount
+            == 1
+        )
+
+    def close(self):
+        self.db.close()
+
+
+class ArchiveViews:
+    """Read models for HTTP delivery, keeping SQL and connections out of handlers."""
+
+    def __init__(self, root):
+        from .config import database_path
+
+        self.database = database_path(root)
+
+    def _one(self, query, values):
+        from contextlib import closing
+
+        with closing(
+            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
+        ) as db:
+            return db.execute(query, values).fetchone()
+
+    def owned(self, resource):
+        try:
+            return (
+                self._one(
+                    "SELECT 1 FROM claims WHERE resource=? AND expires>?", (resource, time.time())
+                )
+                is not None
+            )
+        except sqlite3.OperationalError:
+            return False
+
+    def events(self):
+        from contextlib import closing
+        from datetime import UTC, datetime
+
+        try:
+            with closing(
+                sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
+            ) as db:
+                return [
+                    {
+                        **json.loads(data),
+                        "event": event,
+                        "run_id": run_id,
+                        "time": datetime.fromtimestamp(stamp, UTC).isoformat(),
+                    }
+                    for run_id, event, stamp, data in db.execute(
+                        "SELECT run_id,event,created,data FROM runtime_events ORDER BY id DESC LIMIT 20"
+                    )
+                ]
+        except sqlite3.OperationalError:
+            return []
+
+    def resource_transcript(self, *, video_id=None, profile=None, job_id=None):
+        from contextlib import closing
+
+        with closing(
+            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
+        ) as db:
+            db.row_factory = sqlite3.Row
+            condition, values = (
+                ("j.id=?", (job_id,))
+                if job_id is not None
+                else ("j.video_id=? AND j.profile=?", (video_id, profile))
+            )
+            row = db.execute(
+                "SELECT j.id AS job_id,j.video_id,j.profile,j.asr_state,v.title,v.url,t.json_path,d.state AS diarization_state,p.state AS postprocessing_state FROM jobs j JOIN videos v ON v.id=j.video_id LEFT JOIN transcripts t ON t.job_id=j.id LEFT JOIN diarizations d ON d.job_id=j.id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE "
+                + condition,
+                values,
+            ).fetchone()
+            return dict(row) if row else None
+
+    def resource_video(self, video_id):
+        row = self._one(
+            "SELECT id,channel_id,title,url,kind,duration,published_at FROM videos WHERE id=?",
+            (video_id,),
+        )
+        return (
+            dict(zip(("id", "channel_id", "title", "url", "kind", "duration", "published_at"), row))
+            if row
+            else None
+        )
+
+    def resource_profiles(self, video_id):
+        from contextlib import closing
+
+        with closing(
+            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
+        ) as db:
+            return [
+                {"profile": r[0]}
+                for r in db.execute(
+                    "SELECT profile FROM jobs WHERE video_id=? ORDER BY profile", (video_id,)
+                )
+            ]
+
+    def resource_artifacts(self, job_id):
+        from contextlib import closing
+
+        with closing(
+            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
+        ) as db:
+            return [
+                {"workflow": r[0], "state": r[1]}
+                for r in db.execute(
+                    "SELECT workflow,state FROM artifacts WHERE job_id=? ORDER BY workflow",
+                    (job_id,),
+                )
+            ]
+
+    def artifact(self, job_id, workflow):
+        return self._one(
+            "SELECT v.title,p.state,a.state,a.output_dir,a.error,a.run_pid FROM jobs j JOIN videos v ON v.id=j.video_id JOIN postprocessings p ON p.job_id=j.id LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow=? WHERE j.id=?",
+            (workflow, job_id),
+        )
+
+    def srt(self, job_id):
+        return self._one(
+            "SELECT t.json_path,v.title,v.id,p.state FROM transcripts t JOIN jobs j ON j.id=t.job_id JOIN videos v ON v.id=j.video_id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.id=?",
+            (job_id,),
+        )
+
+    def processed(self, job_id):
+        return self._one(
+            "SELECT p.output_dir,p.source_path,v.title FROM postprocessings p JOIN jobs j ON j.id=p.job_id JOIN videos v ON v.id=j.video_id WHERE p.job_id=? AND p.state='complete'",
+            (job_id,),
+        )
+
+    def snapshot(self):
+        import contextlib
+
+        with contextlib.closing(
+            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
+        ) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN")
+            channels = [dict(r) for r in db.execute("SELECT * FROM channels ORDER BY title")]
+            discovery = [dict(r) for r in db.execute("SELECT * FROM discovery")]
+            profiles = [dict(r) for r in db.execute("SELECT * FROM profiles")]
+            jobs = [
+                dict(r)
+                for r in db.execute("""
+                    SELECT v.id AS video_id,v.channel_id,v.title,v.url,v.kind,v.duration,
+                           v.published_at,v.discovered_at,j.id AS job_id,j.profile,j.state,
+                           j.download_state,j.asr_state,j.download_attempts,j.asr_attempts,
+                           j.next_retry,j.failed_stage,j.error_kind,j.error,j.audio_path,
+                           j.updated_at,j.completed_at,t.json_path,t.text_path,t.model,t.revision,
+                           t.language,t.processing_seconds,t.saved_at,
+                           d.state AS diarization_state,d.stage AS diarization_stage,
+                           d.error AS diarization_error,d.next_retry AS diarization_next_retry,d.updated_at AS diarization_updated_at,
+                           d.attempts AS diarization_attempts,d.speaker_count,
+                           d.processing_seconds AS diarization_seconds,d.asr_path,
+                           d.prediction_path,d.audio_path AS diarization_audio_path
+                           ,p.state AS postprocessing_state,p.stage AS postprocessing_stage,
+                           p.error AS postprocessing_error,p.next_retry AS postprocessing_next_retry,
+                           p.updated_at AS postprocessing_updated_at,p.attempts AS postprocessing_attempts,
+                           p.figures,p.agent_seconds,p.output_dir AS postprocessing_dir,
+                           a.state AS summary_state,a.stage AS summary_stage,a.error AS summary_error,
+                           a.next_retry AS summary_next_retry,a.updated_at AS summary_updated_at,
+                           a.attempts AS summary_attempts,a.output_dir AS summary_dir
+                    FROM videos v LEFT JOIN jobs j ON j.video_id=v.id
+                    LEFT JOIN transcripts t ON t.job_id=j.id
+                    LEFT JOIN diarizations d ON d.job_id=j.id
+                    LEFT JOIN postprocessings p ON p.job_id=j.id
+                    LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary'
+                    ORDER BY COALESCE(v.published_at,'') DESC,v.discovered_at DESC,v.id,j.id
+                """)
+            ]
+            db.rollback()
+
+        return channels, discovery, profiles, jobs

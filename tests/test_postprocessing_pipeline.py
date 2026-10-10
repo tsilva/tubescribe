@@ -210,7 +210,10 @@ class FinalStage(unittest.TestCase):
         self.assertEqual(self.summary_payload["model"], "codex/gpt-6.1-sol")
         job = snapshot(self.store.root)["jobs"][0]
         self.assertEqual(job["stage"], "complete")
-        self.assertEqual(job["summary_url"], f"/artifacts/{job['job_id']}/summary/")
+        self.assertEqual(
+            job["summary_url"],
+            f"/videos/{job['video_id']}/transcripts/{job['profile']}/artifacts/summary/",
+        )
         self.assertEqual(
             work(self.store, "http://127.0.0.1:1", ids=[VID], bridge="http://127.0.0.1:1")[
                 "skipped"
@@ -268,7 +271,7 @@ class FinalStage(unittest.TestCase):
                 raise OSError("disk busy")
             atomic_write(path, content)
 
-        with patch("tubescribe.postprocessing_worker.atomic_write", side_effect=fail_manifest):
+        with patch("tubescribe.storage.atomic_write", side_effect=fail_manifest):
             self.assertEqual(self.full()["failed"], 1)
         self.assertEqual(self.row()["stage"], "save")
         self.assertEqual(self.requests, 1)
@@ -574,9 +577,9 @@ class FinalStage(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("figures/frame_0001000.png", response.text)
             self.assertIn("Source SRT", response.text)
-            self.assertIn(f"/transcripts/{job['job_id']}/srt", response.text)
+            self.assertIn(job["srt_url"], response.text)
             self.assertIn("script-src 'none'", response.headers["content-security-policy"])
-            prefix = f"/processed/{job['job_id']}/"
+            prefix = job["processed_url"]
             image = httpx.get(base + prefix + "figures/frame_0001000.png", trust_env=False)
             self.assertEqual(image.headers["content-type"], "image/png")
             self.assertTrue(image.content.startswith(b"\x89PNG"))

@@ -23,8 +23,8 @@ def update(store, job_id, **values):
 
 
 def read_checkpoint(store, row, field):
-    path = store.root / row[field + "_path"]
-    raw = path.read_bytes()
+    path = store.materialize(row[field + "_path"])
+    raw = store.read_key(row[field + "_path"])
     if hashlib.sha256(raw).hexdigest() != row[field + "_sha256"]:
         raise ValueError(f"Corrupt {field} checkpoint: {path}")
     return json.loads(raw)
@@ -38,7 +38,7 @@ def initialize(store, job):
     row = store.ensure_stage("diarization", job["id"])
     if not row["asr_path"]:
         transcript = store.transcript(job["id"])
-        source = store.root / transcript["json_path"]
+        source = store.materialize(transcript["json_path"], transcript["json_sha256"])
         raw = source.read_bytes()
         if hashlib.sha256(raw).hexdigest() != transcript["json_sha256"]:
             raise ValueError(f"Saved ASR is corrupt: {source}")
@@ -99,8 +99,8 @@ def enrich_one(store, job, client, *, keep_audio=False):
             )
         if prediction is None:
             for relative in (row["audio_path"], job.get("audio_path")):
-                if relative and (store.root / relative).is_file():
-                    path = store.root / relative
+                path = store.cached_media(relative)
+                if path is not None:
                     break
             if path is None:
                 update(
@@ -115,9 +115,7 @@ def enrich_one(store, job, client, *, keep_audio=False):
                 path, metadata = download(store.root, job["video_id"], concurrent_fragments=2)
                 if metadata.get("channel_id") != job["channel_id"]:
                     raise ValueError("Downloaded audio channel identity differs")
-            update(
-                store, job["id"], audio_path=str(path.relative_to(store.root)), download_attempts=0
-            )
+            update(store, job["id"], audio_path=store.persist_media(path), download_attempts=0)
             # A long YouTube download can outlive the SSH connection checked before it.
             # Reconnect the configured endpoint before sending retained source audio.
             try:
@@ -177,9 +175,9 @@ def enrich_one(store, job, client, *, keep_audio=False):
         if not keep_audio:
             relative = row["audio_path"] or job.get("audio_path")
             if path:
-                path.unlink(missing_ok=True)
+                store.remove_media(path.relative_to(store.root).as_posix())
             elif relative:
-                (store.root / relative).unlink(missing_ok=True)
+                store.remove_media(relative)
         log(
             "diarization_complete",
             video_id=job["video_id"],
@@ -243,7 +241,9 @@ def enrich_one(store, job, client, *, keep_audio=False):
 
 def run(store, endpoint, *, ids=None, profile="turbo-v1", max_attempts=3, wait=False):
     completed = failed = skipped = 0
-    client = Client(endpoint)
+    from .inference import client_options
+
+    client = Client(endpoint, **client_options())
     with worker_lock(store.root):
         store.recover()
         client.health()

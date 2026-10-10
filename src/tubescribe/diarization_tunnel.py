@@ -11,6 +11,10 @@ from .tunnel import tunnel
 
 
 def endpoint(root):
+    import os
+
+    if os.environ.get("TUBESCRIBE_DIARIZATION_ENDPOINT"):
+        return os.environ["TUBESCRIBE_DIARIZATION_ENDPOINT"]
     state = root / "diarization-tunnel.json"
     return json.loads(state.read_text())["endpoint"] if state.exists() else "http://127.0.0.1:18768"
 
@@ -66,10 +70,16 @@ def forward(root: Path, action="start", local_port=18768, remote_port=18767):
 
 
 def ready(root):
-    client = Client(endpoint(root))
+    import os
+
+    from .inference import client_options
+
+    client = Client(endpoint(root), **client_options())
     try:
         client.health()
     except Exception:
+        if os.environ.get("TUBESCRIBE_DIARIZATION_ENDPOINT"):
+            raise
         forward(root)
-        client = Client(endpoint(root))
+        client = Client(endpoint(root), **client_options())
     return client

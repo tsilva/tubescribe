@@ -12,8 +12,9 @@ import httpx
 
 from . import postprocessing as engine
 from .execution import job_stage
-from .inference import PostprocessingUnavailable, ready
-from .storage import atomic_write, now, worker_lock
+from .inference import PostprocessingUnavailable
+from .inference import ready_bridge as ready
+from .storage import now, worker_lock
 from .youtube import YouTubeError, download_video
 
 COUNTERS = {"download": "download_attempts", "process": "attempts", "save": "save_attempts"}
@@ -52,6 +53,21 @@ def archive_path(store, relative):
     path = (store.root / relative).resolve()
     if not path.is_relative_to(store.root / "transcripts"):
         raise ValueError("Postprocessing artifact is outside archive transcripts")
+    if hasattr(store, "materialize_prefix"):
+        if Path(relative).suffix:
+            store.materialize(relative)
+            if Path(relative).name == "transcript.json":
+                store.materialize(Path(relative).with_suffix(".srt").as_posix())
+        else:
+            store.materialize_prefix(relative)
+    else:
+        from .storage import Store
+
+        archive = Store(store.root)
+        try:
+            archive.materialize_prefix(relative)
+        finally:
+            archive.db.close()
     return path
 
 
@@ -61,11 +77,15 @@ def cleanup_video(store, video_id):
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         return
     try:
+        removed = []
+        for suffix in (".mp4", ".webm", ".mkv"):
+            key = "videos/" + video_id + suffix
+            if not store.local_blobs and store.exists(key):
+                store.remove_media(key)
         if not directory.exists():
             return
         if not directory.resolve().is_relative_to(store.root):
             raise ValueError("Video cache points outside the archive")
-        removed = []
         for suffix in (".mp4", ".webm", ".mkv"):
             path = directory / (video_id + suffix)
             try:
@@ -143,6 +163,8 @@ def cached_video(store, job, cache):
     directory = Path(cache).expanduser().resolve() if cache else store.root / "videos"
     for suffix in (".mp4", ".webm", ".mkv"):
         path = directory / (job["video_id"] + suffix)
+        if not cache and not store.local_blobs and store.exists("videos/" + path.name):
+            path = store.materialize("videos/" + path.name)
         if path.is_file():
             engine.validate_cached_video(str(path))
             return str(path)
@@ -179,9 +201,10 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             and (output / "run-context.json").exists()
         )
         video = None
+        journal = output and (output / "agent-run.json").is_file()
         if not checkpoint:
             stage = "process"
-            if agent_runner is None:
+            if agent_runner is None and not store.config.agent_gateway:
                 ready(bridge)
             if mode == "video":
                 stage = "download"
@@ -195,7 +218,8 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
                 )
                 video = cached_video(store, job, video_cache)
                 update(store, job["id"], download_attempts=0)
-            output = source.parent / "postprocessing" / uuid.uuid4().hex
+            if not journal:
+                output = source.parent / "postprocessing" / uuid.uuid4().hex
         elif mode == "video":
             # Recovery uses persisted frames; no video access or service readiness needed.
             video = "checkpoint-video"
@@ -214,7 +238,7 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             **(
                 {"save_attempts": row["save_attempts"] + 1}
                 if checkpoint
-                else {"attempts": row["attempts"] + 1}
+                else {"attempts": row["attempts"] + (0 if journal else 1)}
             ),
         )
         log("postprocessing_start", video_id=job["video_id"], resume=bool(checkpoint), mode=mode)
@@ -224,6 +248,42 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             stage = "save"
             update(store, job["id"], stage=stage, save_attempts=row["save_attempts"] + 1)
 
+        if agent_runner is None:
+            from .inference import configured_runner
+
+            agent_runner = configured_runner(
+                store, bridge, output.relative_to(store.root).as_posix()
+            )
+        remote_context = None
+        if store.config.agent_gateway:
+            from .postprocessing import budgets_for, load_source
+
+            metadata = load_source(source, None, None, ())
+            video_key = None
+            if mode == "video":
+                if video == "checkpoint-video":
+                    video_key = None
+                elif str(video).startswith("ssh://"):
+                    raise ValueError(
+                        "Durable gateway requires an archive video object; SSH video caches are local-only"
+                    )
+                else:
+                    path = Path(video)
+                    video_key = "videos/" + path.name
+                    store.blobs.put_file(video_key, path)
+            remote_context = {
+                "kind": "postprocessing",
+                "transcript_key": row["source_path"] or source.relative_to(store.root).as_posix(),
+                "transcript_sha256": current[0],
+                "srt_key": source.with_suffix(".srt").relative_to(store.root).as_posix(),
+                "srt_sha256": current[1],
+                "output_key": output.relative_to(store.root).as_posix(),
+                "video_key": video_key,
+                "video_sha256": digest(Path(video)) if video_key else None,
+                "duration": metadata["duration"],
+                "budgets": budgets_for(metadata["duration"], mode == "video"),
+                "compact": True,
+            }
         report = engine.process(
             bridge=bridge,
             transcript=source,
@@ -232,15 +292,12 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             resume=bool(checkpoint),
             on_response=saving_response,
             agent_runner=agent_runner,
+            tool_context=remote_context,
         )
         stage = "save"
         update(store, job["id"], stage=stage, save_attempts=row["save_attempts"] + 1)
-        from .blobs import publish_bundle
-
+        output, publication = store.publish(output)
         manifest = output / "manifest.json"
-        publish_bundle(
-            store.blobs, output, str(output.relative_to(store.root)), writer=atomic_write
-        )
         update(
             store,
             job["id"],
@@ -248,6 +305,7 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             stage="complete",
             completed_at=now(),
             next_retry=0,
+            output_dir=output.relative_to(store.root).as_posix(),
             manifest_path=str(manifest.relative_to(store.root)),
             manifest_sha256=digest(manifest),
             error=None,

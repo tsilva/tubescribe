@@ -82,7 +82,9 @@ def work(
         scope = {"profile": profile, "ids": ids, "channel": channel}
         skipped = store.completed(plan, **scope)
         log("skip_completed", count=skipped)
-        client = asr_client or Client(endpoint)
+        from .inference import client_options
+
+        client = asr_client or Client(endpoint, **client_options())
         health = None
         while True:
             jobs = store.jobs(
@@ -158,7 +160,7 @@ def work(
                             done += int(completed)
                             continue
                         store.bind_profile(profile, ensure_ready(client, store, endpoint))
-                        path = store.root / job["audio_path"] if job["audio_path"] else None
+                        path = store.cached_media(job["audio_path"])
                         if not path or not path.is_file():
                             store.update(
                                 job["id"],
@@ -175,7 +177,7 @@ def work(
                             job["title"] = metadata.get("title") or job["title"]
                             job["duration"] = metadata.get("duration")
                             store.update_video(job, metadata)
-                            job["audio_path"] = str(path.relative_to(store.root))
+                            job["audio_path"] = store.persist_media(path)
                             store.update(
                                 job["id"],
                                 audio_path=job["audio_path"],
@@ -196,7 +198,26 @@ def work(
                             asr_attempts=job["asr_attempts"] + 1,
                         )
                         log("asr_start", video_id=job["video_id"])
-                        result = client.transcribe(path)
+                        attempt = store.begin_attempt(job["id"], "asr")
+                        try:
+                            result = client.transcribe(path)
+                        except BaseException as error:
+                            store.finish_attempt(
+                                attempt,
+                                "interrupted"
+                                if isinstance(error, (KeyboardInterrupt, SystemExit))
+                                else "failed",
+                                error=str(error),
+                            )
+                            raise
+                        store.finish_attempt(
+                            attempt,
+                            "complete",
+                            metrics={
+                                "processing_seconds": result["processing_seconds"],
+                                "duration": result["duration"],
+                            },
+                        )
                         # Recheck each result: a remote deployment may change mid-import.
                         store.bind_profile(profile, result)
                         expected = job.get("duration")

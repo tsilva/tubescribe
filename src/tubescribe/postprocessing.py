@@ -1339,6 +1339,7 @@ def process(
     resume=False,
     on_response=None,
     agent_runner=None,
+    tool_context=None,
 ):
     """Generate or recover one validated Markdown bundle; caller owns queue/state."""
     args = SimpleNamespace(
@@ -1390,6 +1391,16 @@ def process(
             or context["signature"] != signature
         ):
             raise ValueError("Postprocessing checkpoint source or instructions changed")
+        if "response_sha256" not in context:
+            result = json.loads((args.output / "response.json").read_text())
+            context.update(
+                response_sha256=hashlib.sha256(
+                    (args.output / "response.json").read_bytes()
+                ).hexdigest(),
+                transcript_reads=1,
+                elapsed_seconds=result.get("elapsed_seconds", 0),
+            )
+            write_json(context_path, context)
         response_path = args.output / "response.json"
         if hashlib.sha256(response_path.read_bytes()).hexdigest() != context["response_sha256"]:
             raise ValueError("Postprocessing response checkpoint is corrupt")
@@ -1424,7 +1435,7 @@ def process(
             checkpoint_hash,
             srt_hash,
         )
-    if (args.output / "request.json").exists():
+    if (args.output / "request.json").exists() and not (args.output / "agent-run.json").exists():
         raise ValueError("Output already contains a run; choose a fresh output directory")
     args.output.mkdir(parents=True, exist_ok=True)
     if args.video:
@@ -1452,6 +1463,8 @@ def process(
         "max_tool_calls": budgets["tool_calls"],
         "timeout_seconds": 1800,
     }
+    if tool_context:
+        payload["tool_context"] = tool_context
     # Persist reproducible inputs without the transient callback credential.
     write_json(
         args.output / "request.json", {k: v for k, v in payload.items() if k != "tool_executor"}
@@ -1462,6 +1475,16 @@ def process(
     result = (agent_runner or AgentRunner(args.bridge)).run(
         payload, LocalTools(lambda token: make_handler(screenshots, token, transcript))
     )
+    if result.get("tool_state"):
+        state = result["tool_state"]
+        screenshots = SimpleNamespace(
+            **state,
+            issued_assets={
+                k: v
+                for k, v in state["assets"].items()
+                if any(k in c["image_ids"] for c in state["calls"])
+            },
+        )
     write_json(args.output / "response.json", result)
     context.update(
         response_sha256=hashlib.sha256((args.output / "response.json").read_bytes()).hexdigest(),
@@ -1528,6 +1551,8 @@ def finish_run(
     atomic_write(args.output / "preview.html", render_preview(markdown, source["title"]).encode())
     report = {
         **checks,
+        "schema_version": 1,
+        "prompt_sha256": hashlib.sha256(payload["instructions"].encode()).hexdigest(),
         "model": "codex/gpt-6.1-sol",
         "reasoning_effort": "high",
         "source": str(args.transcript.resolve()),

@@ -182,7 +182,7 @@ class Runtime(unittest.TestCase):
         dispatcher = Dispatcher(self.store, process=process)
         previous = dispatcher.submit(request)
         with self.store.db:
-            self.store.db.execute("UPDATE submissions SET updated=0")
+            self.store.db.execute("UPDATE submissions SET updated=0,state='active',pid=321")
         process.start.side_effect = OSError("cannot spawn")
         with self.assertRaises(OSError):
             dispatcher.submit(request, background=True)

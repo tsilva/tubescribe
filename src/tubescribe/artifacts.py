@@ -8,11 +8,12 @@ import os
 import re
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 
 from .execution import job_stage
-from .inference import AgentRunner, LocalTools
+from .inference import LocalTools
 from .postprocessing import render_preview
 from .postprocessing_worker import archive_path, bridge_endpoint, digest, log, ready
 from .storage import atomic_write, now, worker_lock
@@ -91,9 +92,18 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def workflow(root, name):
+def workflow(root, name, *, store=None):
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name):
         raise ValueError("Workflow must be a lowercase path-safe name")
+    if name != "summary":
+        from .storage import Store
+
+        archive = store or Store(root)
+        try:
+            archive.materialize("workflows/" + name + ".json")
+        finally:
+            if store is None:
+                archive.db.close()
     value = (
         SUMMARY
         if name == "summary"
@@ -113,16 +123,34 @@ def workflow(root, name):
 
 
 def workflows(root):
-    return [
-        workflow(root, name)
-        for name in sorted({"summary", *(p.stem for p in (root / "workflows").glob("*.json"))})
-    ]
+    from .storage import Store
+
+    archive = Store(root)
+    try:
+        keys = archive.blobs.keys("workflows/")
+    finally:
+        archive.db.close()
+    names = {"summary", *(Path(k).stem for k in keys if Path(k).suffix == ".json")}
+    return [workflow(root, name) for name in sorted(names)]
 
 
 def artifact_path(store, relative):
     path = (store.root / relative).resolve()
     if not path.is_relative_to(store.root / "artifacts"):
         raise ValueError("Artifact path is outside the archive artifacts")
+    if hasattr(store, "materialize_prefix"):
+        if Path(relative).suffix:
+            store.materialize(relative)
+        else:
+            store.materialize_prefix(relative)
+    else:
+        from .storage import Store
+
+        archive = Store(store.root)
+        try:
+            archive.materialize_prefix(relative)
+        finally:
+            archive.db.close()
     return path
 
 
@@ -131,7 +159,7 @@ def update(store, job_id, name, **values):
 
 
 def inputs(store, job_id, name):
-    definition = workflow(store.root, name)
+    definition = workflow(store.root, name, store=store)
     row = store.artifact_source(job_id)
     if not row:
         raise ValueError("Artifact workflows require a completed processed transcript")
@@ -366,30 +394,45 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
     if row["state"] == "complete" and complete_valid(store, row):
         return False
     output = artifact_path(store, row["output_dir"]) if row["output_dir"] else None
+    if (
+        output is not None
+        and (output / "response.json").is_file()
+        and row["response_sha256"] is None
+    ):
+        validate(
+            json.loads((output / "response.json").read_text()), markdown, resources, definition
+        )
+        update(store, job_id, name, response_sha256=digest(output / "response.json"), stage="save")
+        row = store.stage_row("artifact", job_id, workflow=name)
     checkpoint = (
         output is not None
         and (output / "response.json").exists()
         and row["response_sha256"] is not None
     )
+    journal = output is not None and (output / "agent-run.json").is_file()
     stage = "save" if checkpoint else "model"
     if row["save_attempts" if checkpoint else "attempts"] >= max_attempts:
         raise ValueError("Artifact attempt budget exhausted; use --force for a new run")
     try:
         if not checkpoint:
             bridge = bridge or bridge_endpoint(store.root)
-            if agent_runner is None:
+            if agent_runner is None and not store.config.agent_gateway:
                 ready(bridge)
             output = (
-                store.root
-                / "artifacts"
-                / source["channel_id"]
-                / source["video_id"]
-                / source["profile"]
-                / name
-                / uuid.uuid4().hex
+                output
+                if journal
+                else (
+                    store.root
+                    / "artifacts"
+                    / source["channel_id"]
+                    / source["video_id"]
+                    / source["profile"]
+                    / name
+                    / uuid.uuid4().hex
+                )
             )
             output = artifact_path(store, str(output.relative_to(store.root)))
-            output.mkdir(parents=True)
+            output.mkdir(parents=True, exist_ok=bool(journal))
             update(
                 store,
                 job_id,
@@ -397,7 +440,7 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
                 state="active",
                 stage="model",
                 run_pid=os.getpid(),
-                attempts=row["attempts"] + 1,
+                attempts=row["attempts"] + (0 if journal else 1),
                 output_dir=str(output.relative_to(store.root)),
                 error=None,
             )
@@ -445,9 +488,23 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
                 ).encode(),
             )
             log("artifact_start", video_id=source["video_id"], workflow=name)
-            result = (agent_runner or AgentRunner(bridge)).run(
+            if agent_runner is None:
+                from .inference import configured_runner
+
+                agent_runner = configured_runner(
+                    store, bridge, output.relative_to(store.root).as_posix()
+                )
+            if store.config.agent_gateway:
+                payload["tool_context"] = {
+                    "kind": "artifact",
+                    "source_key": source["output_dir"],
+                    "resources": resources,
+                }
+            result = agent_runner.run(
                 payload, LocalTools(lambda token: figure_handler(figures, token))
             )
+            if result.get("tool_state"):
+                figures.calls = result["tool_state"]["calls"]
             validate(result, markdown, resources, definition)
             atomic_write(output / "response.json", json.dumps(result, ensure_ascii=False).encode())
             atomic_write(output / "inspection.json", json.dumps(figures.calls).encode())
@@ -512,6 +569,10 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             "agent_seconds": result.get("elapsed_seconds"),
             "usage": result.get("usage"),
             "created_at": now(),
+            "schema_version": 1,
+            "prompt_sha256": fingerprint(
+                {"common": COMMON, "workflow": definition["instructions"]}
+            ),
         }
         atomic_write(
             output / "report.json", json.dumps(report, ensure_ascii=False, indent=2).encode()
@@ -519,18 +580,15 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
         # Check the input once more before publishing a pointer to the durable bundle.
         if inputs(store, job_id, name)[-2:] != (input_hash, definition_hash):
             raise ValueError("Artifact source or workflow changed during generation")
-        from .blobs import publish_bundle
-
-        publish_bundle(
-            store.blobs, output, str(output.relative_to(store.root)), writer=atomic_write
-        )
+        output, publication = store.publish(output)
         update(
             store,
             job_id,
             name,
             state="complete",
             stage="complete",
-            manifest_sha256=digest(output / "manifest.json"),
+            output_dir=output.relative_to(store.root).as_posix(),
+            manifest_sha256=publication.sha256,
             error=None,
             completed_at=now(),
             run_pid=None,
@@ -630,7 +688,7 @@ def run(
 
 
 def run_locked(store, *, name, ids, profile, limit, bridge, force, max_attempts):
-    workflow(store.root, name)
+    workflow(store.root, name, store=store)
     jobs = store.stage_inputs("postprocessing", profile=profile, ids=ids, order="id")
     if ids and set(ids) != {r["video_id"] for r in jobs}:
         raise ValueError("Requested videos must have completed postprocessing in this profile")

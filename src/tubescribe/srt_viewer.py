@@ -22,7 +22,9 @@ def render_srt(srt, *, title, video_id, download_url, processed_url=None):
             f'<p class="srt-text">{escape(cue["body"])}</p></li>'
         )
     processed = (
-        f'<a class="button" href="{escape(processed_url, quote=True)}">Processed transcript</a>'
+        f'<a class="button" href="{escape(processed_url, quote=True)}" '
+        'aria-label="Processed transcript" title="Processed transcript">'
+        '<img src="/icons/document-text.svg" alt="" width="22" height="22"></a>'
         if processed_url
         else ""
     )
@@ -35,8 +37,11 @@ def render_srt(srt, *, title, video_id, download_url, processed_url=None):
         f"<h1>{escape(title)}</h1><p>{len(cues)} cues · Click a timestamp to play on YouTube.</p>"
         '</div></header><nav class="srt-actions" aria-label="Transcript actions">'
         f'<a class="button" href="{escape(youtube, quote=True)}" target="_blank" '
-        'rel="noopener noreferrer">Open on YouTube</a>'
-        f'<a class="button" href="{escape(download_url, quote=True)}" download>Download SRT</a>'
+        'rel="noopener noreferrer" aria-label="Open on YouTube" title="Open on YouTube">'
+        '<img src="/icons/arrow-top-right-on-square.svg" alt="" width="22" height="22"></a>'
+        f'<a class="button" href="{escape(download_url, quote=True)}" download '
+        'aria-label="Download SRT" title="Download SRT">'
+        '<img src="/icons/arrow-down-tray.svg" alt="" width="22" height="22"></a>'
         f'{processed}</nav><ol class="srt-cues" aria-label="Transcript cues">'
         + "".join(rows)
         + "</ol></main></body></html>"

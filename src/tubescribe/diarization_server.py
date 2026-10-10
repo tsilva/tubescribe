@@ -15,8 +15,19 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=18767)
+    parser.add_argument("--host")
     args = parser.parse_args()
-    model = Nemotron()
+    import hmac
+    import os
+
+    from .config import RuntimeConfig
+    from .inference import client_options
+
+    config = RuntimeConfig.load(Path(os.environ.get("TUBESCRIBE_DATA", "data")))
+    host = args.host or config.host
+    if host not in {"127.0.0.1", "localhost", "::1"} and not config.access_token:
+        raise ValueError("Public inference binding requires an access token")
+    model = Nemotron(hardware=client_options()["hardware"])
     gate = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -31,7 +42,17 @@ def main():
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
+        def authorized(self):
+            if config.access_token and not hmac.compare_digest(
+                self.headers.get("Authorization", ""), "Bearer " + config.access_token
+            ):
+                self.reply(401, {"error": "Authentication required"})
+                return False
+            return True
+
         def do_GET(self):
+            if not self.authorized():
+                return
             if self.path == "/health":
                 self.reply(
                     200,
@@ -47,6 +68,8 @@ def main():
                 self.reply(404, {"error": "Not found"})
 
         def do_POST(self):
+            if not self.authorized():
+                return
             if self.path != "/diarize":
                 self.reply(404, {"error": "Not found"})
                 return
@@ -83,7 +106,7 @@ def main():
                 finally:
                     gate.release()
 
-    with ThreadingHTTPServer(("127.0.0.1", args.port), Handler) as server:
+    with ThreadingHTTPServer((host, args.port), Handler) as server:
 
         def shutdown(signum, frame):
             # shutdown must run outside serve_forever's thread. server_close then

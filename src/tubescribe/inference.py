@@ -44,10 +44,13 @@ class PostprocessingUnavailable(RuntimeError):
     pass
 
 
-def ready(endpoint):
+def ready(endpoint, *, policy=None, headers=None, transport=None):
     try:
-        endpoint = EndpointPolicy().check(endpoint)
-        response = httpx.get(endpoint + "/openapi.json", timeout=10, trust_env=False)
+        endpoint = (policy or EndpointPolicy()).check(endpoint)
+        with httpx.Client(
+            headers=headers, transport=transport, timeout=10, trust_env=False
+        ) as client:
+            response = client.get(endpoint + "/openapi.json")
         response.raise_for_status()
         if "/api/v1/agent/runs" not in response.json().get("paths", {}):
             raise ValueError("Native external-tool agent runs are unavailable")
@@ -115,7 +118,10 @@ def tool_handler(handlers, token):
     import hmac
     import json
     import subprocess
+    from contextvars import copy_context
     from http.server import BaseHTTPRequestHandler
+
+    context = copy_context()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -137,7 +143,7 @@ def tool_handler(handlers, token):
                 arguments = request.get("arguments")
                 if not isinstance(arguments, dict):
                     raise ValueError("Tool arguments must be an object")
-                result = handlers[request["tool"]](arguments)
+                result = context.copy().run(handlers[request["tool"]], arguments)
             except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
                 result = {
                     "success": False,
@@ -160,3 +166,37 @@ def health_request(endpoint, *, headers=None, transport=None):
         timeout=10, trust_env=False, headers=headers or {}, transport=transport
     ) as client:
         return client.get(endpoint + "/health")
+
+
+def configured_runner(store, endpoint, run_key):
+    """Runtime selection preserves the synchronous local bridge by default."""
+    import os
+
+    if store.config.agent_gateway:
+        from .agent_gateway import DurableAgentRunner
+
+        return DurableAgentRunner(endpoint, store=store, run_key=run_key)
+    remote = os.environ.get("TUBESCRIBE_REMOTE_INFERENCE") == "1"
+    headers = (
+        {"Authorization": "Bearer " + os.environ["TUBESCRIBE_INFERENCE_TOKEN"]}
+        if os.environ.get("TUBESCRIBE_INFERENCE_TOKEN")
+        else None
+    )
+    return AgentRunner(endpoint, policy=EndpointPolicy(local=not remote), headers=headers)
+
+
+def client_options():
+    import os
+
+    return {
+        "policy": EndpointPolicy(local=os.environ.get("TUBESCRIBE_REMOTE_INFERENCE") != "1"),
+        "hardware": HardwarePolicy(gpu=os.environ.get("TUBESCRIBE_GPU", "RTX 4090") or None),
+        "headers": {"Authorization": "Bearer " + os.environ["TUBESCRIBE_INFERENCE_TOKEN"]}
+        if os.environ.get("TUBESCRIBE_INFERENCE_TOKEN")
+        else None,
+    }
+
+
+def ready_bridge(endpoint):
+    options = client_options()
+    return ready(endpoint, policy=options["policy"], headers=options["headers"])

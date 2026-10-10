@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import signal
 import sqlite3
 import sys
@@ -13,7 +12,7 @@ from pathlib import Path
 
 from . import youtube
 from .asr import Client
-from .storage import Store, worker_lock
+from .storage import Store, atomic_write, worker_lock
 from .submission import execute_cli
 from .tunnel import tunnel
 from .worker import work
@@ -29,6 +28,17 @@ def main():
     p.add_argument("--endpoint", default=os.environ.get("TUBESCRIBE_ENDPOINT"))
     p.add_argument("--submission", help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="command", required=True)
+    c = sub.add_parser("queue", help="Durable worker queue")
+    c.add_argument("action", choices=["serve", "once", "submit", "status"])
+    c.add_argument("--request", type=Path, help="JSON JobRequest for submit")
+    c = sub.add_parser("reconcile", help="Repair expired work and report orphaned bundles")
+    c.add_argument("--purge", action="store_true")
+    c.add_argument("--retention-days", type=int, default=7)
+    c = sub.add_parser("agent", help="Durable gateway beside a synchronous AgentBridge")
+    c.add_argument("action", choices=["serve", "status", "cancel"])
+    c.add_argument("--upstream", default="http://127.0.0.1:8082")
+    c.add_argument("--port", type=int, default=8083)
+    c.add_argument("--run-id")
     c = sub.add_parser("channels")
     cs = c.add_subparsers(dest="action", required=True)
     cs.add_parser("list")
@@ -146,7 +156,7 @@ def main():
     def stop_worker(signum, frame):
         raise KeyboardInterrupt()
 
-    if args.command in {"work", "diarize", "postprocess", "artifacts"}:
+    if args.command in {"work", "diarize", "postprocess", "artifacts", "queue", "agent"}:
         signal.signal(signal.SIGTERM, stop_worker)
 
     def endpoint():
@@ -158,7 +168,58 @@ def main():
         return "http://127.0.0.1:18766"
 
     try:
-        if args.command == "diarization-tunnel":
+        if args.command == "queue":
+            from .submission import Dispatcher, JobRequest, consume
+
+            if args.action == "submit":
+                if not args.request:
+                    raise ValueError("queue submit requires --request")
+                request = JobRequest(**json.loads(args.request.read_text()))
+                out({"submission": Dispatcher(store).submit(request)})
+            elif args.action == "status":
+                out(store.submission_records())
+            else:
+                out(consume(store, once=args.action == "once"))
+        elif args.command == "reconcile":
+            from .maintenance import reconcile
+
+            out(reconcile(store, retention_days=args.retention_days, purge=args.purge))
+        elif args.command == "agent":
+            from .agent_gateway import Runs, make_gateway
+
+            if args.action == "serve":
+                server = make_gateway(store.root, args.upstream, port=args.port)
+                try:
+                    out(
+                        {
+                            "url": f"http://{store.config.host}:{server.server_port}",
+                            "protocol": "durable-v1",
+                        }
+                    )
+                    server.serve_forever()
+                finally:
+                    server.server_close()
+            else:
+                if not args.run_id:
+                    raise ValueError("agent status/cancel requires --run-id")
+                with __import__("contextlib").closing(Runs(store.root)) as runs:
+                    row = runs.get(args.run_id)
+                    if not row:
+                        raise ValueError("Run not found")
+                    if args.action == "cancel":
+                        runs.update(
+                            args.run_id,
+                            cancelled=1,
+                            state="cancelled" if row["state"] == "queued" else row["state"],
+                        )
+                        row = runs.get(args.run_id)
+                    out(
+                        {
+                            k: row[k]
+                            for k in ["id", "state", "error", "cancelled", "created", "updated"]
+                        }
+                    )
+        elif args.command == "diarization-tunnel":
             from .diarization_tunnel import forward
 
             out(forward(store.root, args.action, args.local_port, args.remote_port))
@@ -427,6 +488,8 @@ def main():
                 raise ValueError("Export outside the live archive directory")
             # Consistent DB/files snapshot; no inference worker can delete/update files during export.
             with worker_lock(store.root):
+                if store.pending_agent_runs():
+                    raise ValueError("Wait for queued/active gateway runs before export")
                 dest.mkdir(parents=True, exist_ok=False)
                 store.subtitles()
                 with sqlite3.connect(dest / "archive.sqlite3") as target:
@@ -435,14 +498,15 @@ def main():
                     target.execute(
                         "UPDATE submissions SET state='interrupted',pid=NULL WHERE state IN ('queued','active')"
                     )
-                if (store.root / "transcripts").exists():
-                    shutil.copytree(store.root / "transcripts", dest / "transcripts")
-                if (store.root / "audio").exists():
-                    shutil.copytree(store.root / "audio", dest / "audio")
-                if (store.root / "artifacts").exists():
-                    shutil.copytree(store.root / "artifacts", dest / "artifacts")
-                if (store.root / "workflows").exists():
-                    shutil.copytree(store.root / "workflows", dest / "workflows")
+                for key in store.blobs.keys():
+                    if key.split("/")[0] in {
+                        "transcripts",
+                        "audio",
+                        "artifacts",
+                        "workflows",
+                        "agent-results",
+                    }:
+                        atomic_write(dest / key, store.read_key(key))
                 from .publication import export_publications
 
                 export_publications(dest)

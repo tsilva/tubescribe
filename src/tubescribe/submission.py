@@ -6,10 +6,9 @@ import os
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import dataclass
 
-from .execution import assert_owned, lease, submission_gate
+from .execution import lease, submission_gate
 
 
 @dataclass(frozen=True)
@@ -33,7 +32,7 @@ class JobRequest:
             "postprocessing": "video",
         }
         return {
-            k: v
+            k: sorted(set(v)) if k == "video" and isinstance(v, list) else v
             for k, v in self.options.items()
             if v is not None
             and v is not False
@@ -49,6 +48,7 @@ class JobRequest:
 class LocalProcess:
     def __init__(self, *, spawn=None):
         self.spawn = spawn or subprocess.Popen
+        self.children = {}
 
     def start(self, root, request, submission):
         command = [
@@ -78,9 +78,11 @@ class LocalProcess:
         folder = root / "quality" / "worker-logs"
         folder.mkdir(parents=True, exist_ok=True)
         with (folder / (submission + ".log")).open("ab") as handle:
-            return self.spawn(
+            child = self.spawn(
                 command, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True
-            ).pid
+            )
+            self.children[child.pid] = child
+            return child.pid
 
 
 class Inline:
@@ -99,97 +101,52 @@ class Dispatcher:
         self.process = process or LocalProcess()
 
     def submit(self, request, *, background=False):
-        db = self.store.db
-        stamp = time.time()
-        # A queue launch is short; deduplication is durable across dashboard restarts.
         with submission_gate(self.store.root, "submit:" + request.dedupe):
-            with db:
-                assert_owned(db, self.store.root)
-                row = db.execute(
-                    "SELECT id,pid,updated FROM submissions WHERE dedupe=? AND state IN ('queued','active')",
-                    (request.dedupe,),
-                ).fetchone()
-                if row:
-                    owned = db.execute(
-                        "SELECT 1 FROM claims WHERE resource=? AND expires>?",
-                        ("submission:" + row[0], stamp),
-                    ).fetchone()
-                    if owned or row[2] > stamp - 90:
-                        return row[0]
-                    db.execute(
-                        "UPDATE submissions SET state='interrupted',updated=? WHERE id=?",
-                        (stamp, row[0]),
-                    )
-                identifier = uuid.uuid4().hex
-                db.execute(
-                    "INSERT INTO submissions VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        identifier,
-                        request.dedupe,
-                        request.encode(),
-                        "queued",
-                        None,
-                        None,
-                        stamp,
-                        stamp,
-                    ),
-                )
-            if background:
+            identifier, created = self.store.enqueue(request.encode(), request.dedupe)
+            if background and created and not self.store.config.queued:
                 try:
                     pid = self.process.start(self.store.root, request, identifier)
-                    with db:
-                        db.execute(
-                            "UPDATE submissions SET pid=?,updated=? WHERE id=?",
-                            (pid, time.time(), identifier),
-                        )
+                    self.store.update_submission(identifier, pid=pid)
                 except BaseException as error:
-                    with db:
-                        db.execute(
-                            "UPDATE submissions SET state='failed',error=?,updated=? WHERE id=?",
-                            (str(error), time.time(), identifier),
-                        )
+                    self.store.update_submission(identifier, state="failed", error=str(error))
                     raise
             return identifier
 
     def execute(self, request, adapter, *, identifier=None):
         identifier = identifier or self.submit(request)
-        db = self.store.db
-        row = db.execute(
-            "SELECT request,state FROM submissions WHERE id=?", (identifier,)
-        ).fetchone()
-        if not row or row[0] != request.encode() or row[1] not in ("queued", "active"):
-            raise ValueError("Submission does not match this worker request")
         with lease(self.store.root, "submission:" + identifier):
-            with db:
-                assert_owned(db, self.store.root)
-                db.execute(
-                    "UPDATE submissions SET state='active',pid=?,updated=? WHERE id=?",
-                    (os.getpid(), time.time(), identifier),
-                )
+            row = self.store.submission(identifier)
+            if not row or row["request"] != request.encode():
+                raise ValueError("Submission does not match this worker request")
+            if row["state"] == "complete" and row["result"]:
+                return json.loads(row["result"])
+            if row["state"] not in {"queued", "active"}:
+                raise ValueError("Submission cannot execute in its current state")
+            self.store.update_submission(identifier, state="active", pid=os.getpid())
             try:
-                # Waiting submissions heartbeat independently while archive capacity is full.
-                while (
-                    request.options.get("wait")
-                    and db.execute(
-                        "SELECT 1 FROM claims WHERE resource='archive' AND expires>?",
-                        (time.time(),),
-                    ).fetchone()
-                ):
+                while request.options.get("wait") and self.store.owned("archive"):
                     time.sleep(3)
-                result = adapter.execute()
-            except BaseException as error:
-                with db:
-                    db.execute(
-                        "UPDATE submissions SET state='interrupted',error=?,updated=? WHERE id=?",
-                        (str(error), time.time(), identifier),
+                from .execution import CURRENT_SUBMISSION
+
+                token = CURRENT_SUBMISSION.set(identifier)
+                try:
+                    self.store.record_event(
+                        identifier, "queue_started", {"queue_seconds": time.time() - row["created"]}
                     )
-                raise
-            with db:
-                assert_owned(db, self.store.root)
-                db.execute(
-                    "UPDATE submissions SET state=?,updated=? WHERE id=?",
-                    ("failed" if result.get("failed") else "complete", time.time(), identifier),
+                    result = adapter.execute()
+                finally:
+                    CURRENT_SUBMISSION.reset(token)
+            except BaseException as error:
+                self.store.update_submission(
+                    identifier, state="interrupted", error=str(error), pid=None
                 )
+                raise
+            self.store.update_submission(
+                identifier,
+                state="failed" if result.get("failed") else "complete",
+                pid=None,
+                result=json.dumps(result),
+            )
             return result
 
 
@@ -198,3 +155,39 @@ def execute_cli(store, args, operation):
     options = {k: v for k, v in vars(args).items() if k not in excluded}
     request = JobRequest(args.command, json.loads(json.dumps(options, default=str)))
     return Dispatcher(store).execute(request, Inline(operation), identifier=args.submission)
+
+
+def consume(store, *, once=False, poll=None, process=None):
+    """Independent dispatcher; durable queued requests survive the web process."""
+    process = process or LocalProcess()
+    completed = failed = 0
+    with lease(store.root, "dispatcher", reentrant=False):
+        while True:
+            store.reclaim_submissions()
+            rows = store.queued_submissions()
+            for row in rows:
+                request = JobRequest(**json.loads(row["request"]))
+                try:
+                    pid = process.start(store.root, request, row["id"])
+                    store.update_submission(row["id"], pid=pid)
+                    # Keep archive capacity conservative; child handles submission/job fencing.
+                    if process.spawn is subprocess.Popen:
+                        while True:
+                            child = process.children.get(pid)
+                            if child is not None and child.poll() is not None:
+                                break
+                            current = store.submission(row["id"])
+                            if current["state"] not in {"queued", "active"}:
+                                break
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                break
+                            time.sleep(poll or store.config.worker_poll)
+                    completed += 1
+                except Exception as error:
+                    store.update_submission(row["id"], state="failed", error=str(error), pid=None)
+                    failed += 1
+            if once:
+                return {"dispatched": completed, "failed": failed}
+            time.sleep(poll or store.config.worker_poll)

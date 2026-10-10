@@ -3,23 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TubeScribe · Channels and videos</title>
+  <title>TubeScribe · Your library</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
-<body>
-  <main>
-    <header class="page-heading">
-      <div><div class="brand">TubeScribe</div><h1>Channels &amp; videos</h1><p id="archive-summary">Connecting to archive…</p></div>
-      <div class="live"><span id="updated">Connecting…</span><button id="refresh">Refresh</button></div>
-    </header>
-    <div id="error" class="error hidden" role="alert"></div>
-    <div class="toolbar"><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search channels, video titles, or IDs…"><span id="result-count" class="muted" role="status"></span></div>
-    <div id="channels" aria-label="Channels and videos"><p class="empty">Loading channels…</p></div>
-    <footer><span>Local archive · <span id="root-label"></span></span><span>Updates every 5 seconds</span></footer>
+<body class="library-app">
+  <a class="skip-link" href="#channels">Skip to videos</a>
+  <header class="app-bar">
+    <a class="brand" href="/" aria-label="TubeScribe library">TubeScribe</a>
+    <div class="live"><span id="worker-status">Connecting…</span><span id="updated"></span><button id="refresh" class="icon-button" aria-label="Refresh library" title="Refresh library"><img src="/icons/arrow-path.svg" alt=""></button></div>
+    <time id="today" class="today"></time>
+  </header>
+  <main class="workspace">
+    <div class="library-column">
+      <header class="page-heading"><h1>Your library</h1><p id="archive-summary">Connecting to your library…</p></header>
+      <div id="error" class="error hidden" role="alert"></div>
+      <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search channels, video titles, or IDs…"></div><span id="result-count" role="status"></span></div>
+      <div id="channels" tabindex="-1" aria-label="Channels and videos"><p class="empty">Loading your videos…</p></div>
+      <footer>Transcripts, context, and the ideas worth keeping.<span>Library updates automatically</span></footer>
+    </div>
+    <aside id="reader" class="reader" aria-labelledby="reader-title">
+      <div class="reader-empty"><p class="eyebrow">YOUR READING SPACE</p><h2 id="reader-title">Find your next idea.</h2><p>Select a video to read its summary or preview its transcript.</p></div>
+    </aside>
   </main>
   <dialog id="transcript-preview" aria-labelledby="preview-title">
-    <div class="dialog-heading"><h2 id="preview-title">Transcript</h2><button id="close-preview" aria-label="Close transcript">×</button></div>
+    <div class="dialog-heading"><h2 id="preview-title">Transcript</h2><button id="close-preview" class="icon-button" aria-label="Close transcript"><img src="/icons/x-mark.svg" alt=""></button></div>
     <div class="preview-actions"><label>Format <select id="preview-format" aria-label="Transcript format"></select></label><a id="preview-download" class="button">Download</a><a id="preview-srt" class="button hidden">View SRT</a></div>
     <div id="preview-content"></div>
   </dialog>

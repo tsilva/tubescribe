@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import fcntl
 import html
 import json
@@ -24,7 +23,10 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
+from .config import RuntimeConfig, database_path
 from .pipeline import status as stage
+from .repository import ArchiveViews
+from .resources import artifact_url, transcript_url
 from .storage import atomic_write, now
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
@@ -43,21 +45,18 @@ CONTENT_TYPES = {
     ".png": "image/png",
     ".zip": "application/zip",
     ".md": "text/markdown; charset=utf-8",
+    ".svg": "image/svg+xml",
 }
 
 
 def lock_status(root: Path, name: str) -> dict:
-    if name == "worker.lock" and (root / "archive.sqlite3").is_file():
-        with contextlib.closing(sqlite3.connect(root / "archive.sqlite3")) as db:
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='claims'").fetchone():
-                owned = db.execute(
-                    "SELECT 1 FROM claims WHERE resource='archive' AND expires>?", (time.time(),)
-                ).fetchone()
-                try:
-                    pid = int((root / name).read_text()) if owned else None
-                except (OSError, ValueError):
-                    pid = None
-                return {"running": bool(owned), "pid": pid}
+    if name == "worker.lock" and database_path(root).is_file():
+        owned = ArchiveViews(root).owned("archive")
+        try:
+            pid = int((root / name).read_text()) if owned else None
+        except (OSError, ValueError):
+            pid = None
+        return {"running": owned, "pid": pid}
     try:
         with (root / name).open() as handle:
             try:
@@ -89,12 +88,50 @@ def allowed_file(root: Path, relative: str) -> Path:
     resolved = path.resolve()
     if not resolved.is_relative_to(root / category) or path.suffix.lower() not in formats:
         raise FileNotFoundError("Not an archive output")
+    from .storage import Store
+
+    archive = Store(root)
+    try:
+        archive.materialize(relative)
+    finally:
+        archive.db.close()
     if not path.is_file():
         raise FileNotFoundError("File is no longer available")
     return path
 
 
 def output_files(root: Path) -> list[dict]:
+    from .storage import Store
+
+    archive = Store(root)
+    try:
+        if not archive.local_blobs:
+            files = []
+            for key in archive.blobs.keys():
+                category = Path(key).parts[0]
+                if category not in {
+                    "transcripts",
+                    "subtitles",
+                    "diarization",
+                    "quality",
+                    "audio",
+                } or Path(key).suffix not in TEXT_FORMATS | {".png", ".zip"}:
+                    continue
+                metadata = archive.blobs.stat(key)
+                files.append(
+                    {
+                        "path": key,
+                        "name": Path(key).name,
+                        "format": Path(key).suffix[1:],
+                        "category": category,
+                        **metadata,
+                        "previewable": Path(key).suffix in TEXT_FORMATS,
+                        "url": "/api/file?path=" + quote(key, safe=""),
+                    }
+                )
+            return files
+    finally:
+        archive.db.close()
     files = []
     for category in ("transcripts", "subtitles", "diarization", "quality", "audio"):
         for path in sorted((root / category).rglob("*")):
@@ -140,7 +177,8 @@ def _events_in_file(path: Path) -> list[dict]:
 
 def recent_events(root: Path) -> list[dict]:
     return sorted(
-        _events_in_file(root / "backfill.log")
+        ArchiveViews(root).events()
+        + _events_in_file(root / "backfill.log")
         + _events_in_file(root / "diarization-backfill.log")
         + _events_in_file(root / "postprocessing-backfill.log"),
         key=lambda e: e.get("time", ""),
@@ -151,46 +189,14 @@ def recent_events(root: Path) -> list[dict]:
 def snapshot(root: Path) -> dict:
     root = root.resolve()
     # Short read transaction gives consistent counters without taking the worker lock.
-    with contextlib.closing(
-        sqlite3.connect((root / "archive.sqlite3").as_uri() + "?mode=ro", uri=True, timeout=3)
-    ) as db:
-        db.row_factory = sqlite3.Row
-        db.execute("BEGIN")
-        channels = [dict(r) for r in db.execute("SELECT * FROM channels ORDER BY title")]
-        discovery = [dict(r) for r in db.execute("SELECT * FROM discovery")]
-        profiles = [dict(r) for r in db.execute("SELECT * FROM profiles")]
-        jobs = [
-            dict(r)
-            for r in db.execute("""
-                SELECT v.id AS video_id,v.channel_id,v.title,v.url,v.kind,v.duration,
-                       v.published_at,v.discovered_at,j.id AS job_id,j.profile,j.state,
-                       j.download_state,j.asr_state,j.download_attempts,j.asr_attempts,
-                       j.next_retry,j.failed_stage,j.error_kind,j.error,j.audio_path,
-                       j.updated_at,j.completed_at,t.json_path,t.text_path,t.model,t.revision,
-                       t.language,t.processing_seconds,t.saved_at,
-                       d.state AS diarization_state,d.stage AS diarization_stage,
-                       d.error AS diarization_error,d.next_retry AS diarization_next_retry,d.updated_at AS diarization_updated_at,
-                       d.attempts AS diarization_attempts,d.speaker_count,
-                       d.processing_seconds AS diarization_seconds,d.asr_path,
-                       d.prediction_path,d.audio_path AS diarization_audio_path
-                       ,p.state AS postprocessing_state,p.stage AS postprocessing_stage,
-                       p.error AS postprocessing_error,p.next_retry AS postprocessing_next_retry,
-                       p.updated_at AS postprocessing_updated_at,p.attempts AS postprocessing_attempts,
-                       p.figures,p.agent_seconds,p.output_dir AS postprocessing_dir,
-                       a.state AS summary_state,a.stage AS summary_stage,a.error AS summary_error,
-                       a.next_retry AS summary_next_retry,a.updated_at AS summary_updated_at,
-                       a.attempts AS summary_attempts,a.output_dir AS summary_dir
-                FROM videos v LEFT JOIN jobs j ON j.video_id=v.id
-                LEFT JOIN transcripts t ON t.job_id=j.id
-                LEFT JOIN diarizations d ON d.job_id=j.id
-                LEFT JOIN postprocessings p ON p.job_id=j.id
-                LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary'
-                ORDER BY COALESCE(v.published_at,'') DESC,v.discovered_at DESC,v.id,j.id
-            """)
-        ]
-        db.rollback()
+    channels, discovery, profiles, jobs = ArchiveViews(root).snapshot()
     files = output_files(root)
     by_path = {f["path"]: f for f in files}
+    covers = {}
+    for file in files:
+        path = Path(file["path"])
+        if re.fullmatch(r"frame_\d+\.png", path.name) and path.parent.name == "figures":
+            covers.setdefault(path.parent.parent.as_posix(), path.name)
     counts = dict.fromkeys(
         (
             "queued",
@@ -232,12 +238,13 @@ def snapshot(root: Path) -> dict:
         job["channel_title"] = names.get(job["channel_id"], job["channel_id"])
         paths = []
         if job["json_path"]:
+            job["transcript_url"] = transcript_url(job["video_id"], job["profile"])
             base = Path(job["json_path"])
             paths.extend(
                 base.with_suffix(ext).as_posix() for ext in (".md", ".srt", ".txt", ".json")
             )
             if base.with_suffix(".srt").as_posix() in by_path:
-                job["srt_url"] = f"/transcripts/{job['job_id']}/srt"
+                job["srt_url"] = transcript_url(job["video_id"], job["profile"]) + "subtitles/"
         if job["audio_path"]:
             paths.append(job["audio_path"])
         if job.get("postprocessing_state") == "complete" and job.get("postprocessing_dir"):
@@ -245,14 +252,20 @@ def snapshot(root: Path) -> dict:
             processed = (directory / "processed.md").as_posix()
             if processed in by_path:
                 job["processed_path"] = processed
-                job["processed_url"] = f"/processed/{job['job_id']}/preview.html"
+                job["processed_url"] = transcript_url(job["video_id"], job["profile"])
                 paths.extend([processed, (directory / "processed-with-figures.zip").as_posix()])
+                if cover := covers.get(directory.as_posix()):
+                    job["cover_url"] = job["processed_url"] + "figures/" + cover
         if job.get("summary_state") == "complete" and job.get("summary_dir"):
             from .artifacts import artifact_path
 
             directory = artifact_path(SimpleNamespace(root=root), job["summary_dir"])
             if (directory / "artifact.md").is_file():
-                job["summary_url"] = f"/artifacts/{job['job_id']}/summary/"
+                job["summary_url"] = artifact_url(job["video_id"], job["profile"], "summary")
+                for figure in sorted((directory / "figures").glob("frame_*.png")):
+                    if re.fullmatch(r"frame_\d+\.png", figure.name) and figure.is_file():
+                        job["cover_url"] = job["summary_url"] + "figures/" + figure.name
+                        break
         for key in ("asr_path", "prediction_path", "diarization_audio_path"):
             if job.get(key):
                 paths.append(job[key])
@@ -289,6 +302,7 @@ def snapshot(root: Path) -> dict:
 
 def make_server(root: Path, port: int = 0, instance: str | None = None) -> ThreadingHTTPServer:
     root = root.resolve()
+    config = RuntimeConfig.load(root)
     instance = instance or uuid.uuid4().hex
     children_lock = threading.Lock()
 
@@ -304,6 +318,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(length))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Vary", "Accept")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header(
@@ -312,23 +327,69 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                 if generated_html
                 else "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
             )
+            if getattr(self, "resource", None):
+                self.send_header("Link", f'<{self.origin() + self.resource.url}>; rel="canonical"')
             if disposition:
                 self.send_header("Content-Disposition", disposition)
             self.end_headers()
 
+        def origin(self):
+            return (
+                config.public_origin.rstrip("/")
+                if config.public_origin
+                else "http://" + self.headers["Host"]
+            )
+
+        def document_data(self, data):
+            resource = getattr(self, "resource", None)
+            if not resource or resource.leaf.endswith(
+                (".png", ".zip", ".json", ".srt", ".txt", "transcript.md")
+            ):
+                return data
+            from .resources import rewrite_links
+
+            text = rewrite_links(data.decode("utf-8"), resource)
+            if "<!doctype html>" in text.lower():
+                canonical = html.escape(self.origin() + resource.url, quote=True)
+                tag = f'<link rel="canonical" href="{canonical}">'
+                if "</head>" in text:
+                    text = text.replace("</head>", tag + "</head>", 1)
+                else:
+                    text = text.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + tag, 1)
+            return text.encode()
+
+        def write_data(self, data):
+            if self.command != "HEAD":
+                self.wfile.write(data)
+
         def send_json(self, value, status=200):
             data = json.dumps(value, ensure_ascii=False).encode()
             self.send_headers(status, CONTENT_TYPES[".json"], len(data))
-            self.wfile.write(data)
+            self.write_data(data)
 
         def trusted(self):
             port = self.server.server_port
             hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            if config.public_origin:
+                hosts.add(urlsplit(config.public_origin).netloc)
+            if config.access_token:
+                import hmac
+                from http.cookies import SimpleCookie
+
+                cookies = SimpleCookie(self.headers.get("Cookie", ""))
+                supplied = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                if not supplied and "tubescribe_access" in cookies:
+                    supplied = cookies["tubescribe_access"].value
+                if not hmac.compare_digest(supplied, config.access_token):
+                    self.send_json({"error": "Authentication required"}, 401)
+                    return False
             if self.headers.get("Host") not in hosts:
                 self.send_json({"error": "Use the local dashboard address"}, 403)
                 return False
             origin = self.headers.get("Origin")
-            if origin and origin not in {f"http://{h}" for h in hosts}:
+            if origin and origin not in {f"http://{h}" for h in hosts} | (
+                {config.public_origin} if config.public_origin else set()
+            ):
                 self.send_json({"error": "Cross-origin access is disabled"}, 403)
                 return False
             if self.headers.get("Sec-Fetch-Site") == "cross-site":
@@ -342,6 +403,73 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             url = urlsplit(self.path)
             query = parse_qs(url.query)
             try:
+                from .resources import render_video, resolve, segment, video_metadata
+
+                self.resource = None
+                views = ArchiveViews(root)
+                force_json = url.path.startswith("/api/videos/")
+                resource_path = url.path.removeprefix("/api") if force_json else url.path
+                wants_json = force_json or "application/json" in self.headers.get("Accept", "")
+                if video := re.fullmatch(r"/videos/([^/]+)(?:/(transcripts))?/?", resource_path):
+                    metadata = video_metadata(views, segment(video[1]), self.origin())
+                    if wants_json or video[2]:
+                        self.send_json(metadata["transcripts"] if video[2] else metadata)
+                    else:
+                        data = render_video(metadata).encode()
+                        data = self.document_data(data)
+                        self.send_headers(
+                            200, CONTENT_TYPES[".html"], len(data), generated_html=True
+                        )
+                        self.write_data(data)
+                    return
+                self.resource = resource = resolve(views, resource_path)
+                if resource:
+                    if (
+                        resource.canonical_request
+                        and resource_path != resource.url
+                        and not force_json
+                    ):
+                        self.send_response(308)
+                        self.send_header("Location", resource.url)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    if wants_json and not resource.leaf:
+                        if resource.workflow:
+                            from .artifacts import workflow
+
+                            workflow(root, resource.workflow)
+                        self.send_json(resource.metadata(views, self.origin()))
+                        return
+                    if resource.raw_key:
+                        data = allowed_file(root, resource.raw_key).read_bytes()
+                        if not resource.leaf:
+                            from .postprocessing import render_preview
+
+                            data = (
+                                render_preview(data.decode(), resource.row["title"])
+                                .replace('href="processed.md"', 'href="transcript.md"')
+                                .replace(
+                                    "</header>",
+                                    ' · <a href="transcript.json">JSON</a> · <a href="transcript.txt">Text</a>'
+                                    ' · <a href="source.srt">Download SRT</a> · <a href="subtitles/">View SRT</a></header>',
+                                )
+                                .encode()
+                            )
+                        data = self.document_data(data)
+                        suffix = Path(resource.raw_key).suffix if resource.leaf else ".html"
+                        self.send_headers(
+                            200,
+                            CONTENT_TYPES.get(suffix, "text/plain; charset=utf-8"),
+                            len(data),
+                            generated_html=suffix == ".html",
+                        )
+                        self.write_data(data)
+                        return
+                    if not resource.internal:
+                        raise FileNotFoundError()
+                    if resource.canonical_request:
+                        url = url._replace(path=resource.internal)
                 if url.path == "/api/health":
                     self.send_json(
                         {
@@ -366,13 +494,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                         self.end_headers()
                         return
                     definition = workflow(root, match[2])
-                    with contextlib.closing(sqlite3.connect(root / "archive.sqlite3")) as db:
-                        row = db.execute(
-                            "SELECT v.title,p.state,a.state,a.output_dir,a.error,a.run_pid FROM jobs j "
-                            "JOIN videos v ON v.id=j.video_id JOIN postprocessings p ON p.job_id=j.id "
-                            "LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow=? WHERE j.id=?",
-                            (match[2], int(match[1])),
-                        ).fetchone()
+                    row = ArchiveViews(root).artifact(int(match[1]), match[2])
                     if not row or row[1] != "complete":
                         raise FileNotFoundError()
                     if row[2] == "complete" and row[3]:
@@ -389,13 +511,14 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                             data = render_bundle(directory, markdown=bool(match[3])).encode()
                         else:
                             data = path.read_bytes()
+                        data = self.document_data(data)
                         self.send_headers(
                             200,
                             CONTENT_TYPES.get(path.suffix, "text/plain; charset=utf-8"),
                             len(data),
                             generated_html=path.suffix == ".html",
                         )
-                        self.wfile.write(data)
+                        self.write_data(data)
                     elif match[3]:
                         raise FileNotFoundError()
                     else:
@@ -443,18 +566,13 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                             + form
                             + f'<p><a href="/processed/{match[1]}/preview.html">Full transcript</a></p></main></html>'
                         ).encode()
+                        data = self.document_data(data)
                         self.send_headers(200, CONTENT_TYPES[".html"], len(data))
-                        self.wfile.write(data)
+                        self.write_data(data)
                 elif match := re.fullmatch(r"/transcripts/(\d+)/srt", url.path):
                     from .srt_viewer import render_srt
 
-                    with contextlib.closing(sqlite3.connect(root / "archive.sqlite3")) as db:
-                        row = db.execute(
-                            "SELECT t.json_path,v.title,v.id,p.state FROM transcripts t "
-                            "JOIN jobs j ON j.id=t.job_id JOIN videos v ON v.id=j.video_id "
-                            "LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.id=?",
-                            (int(match[1]),),
-                        ).fetchone()
+                    row = ArchiveViews(root).srt(int(match[1]))
                     if not row:
                         raise FileNotFoundError()
                     relative = Path(row[0]).with_suffix(".srt").as_posix()
@@ -463,22 +581,21 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                         path.read_text(encoding="utf-8"),
                         title=row[1],
                         video_id=row[2],
-                        download_url="/api/file?path=" + quote(relative, safe="") + "&download=1",
+                        download_url=self.resource.base + "source.srt"
+                        if self.resource
+                        else "/api/file?path=" + quote(relative, safe="") + "&download=1",
                         processed_url=f"/processed/{match[1]}/preview.html"
                         if row[3] == "complete"
                         else None,
                     ).encode()
+                    data = self.document_data(data)
                     self.send_headers(200, CONTENT_TYPES[".html"], len(data), generated_html=True)
-                    self.wfile.write(data)
+                    self.write_data(data)
                 elif match := re.fullmatch(
                     r"/processed/(\d+)/(preview\.html|processed\.md|source\.srt|processed-with-figures\.zip|figures/frame_\d+\.png)",
                     url.path,
                 ):
-                    with contextlib.closing(sqlite3.connect(root / "archive.sqlite3")) as db:
-                        row = db.execute(
-                            "SELECT p.output_dir,p.source_path,v.title FROM postprocessings p JOIN jobs j ON j.id=p.job_id JOIN videos v ON v.id=j.video_id WHERE p.job_id=? AND p.state='complete'",
-                            (int(match[1]),),
-                        ).fetchone()
+                    row = ArchiveViews(root).processed(int(match[1]))
                     if not row:
                         raise FileNotFoundError()
                     filename = match[2]
@@ -505,10 +622,11 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                             )
                             .encode()
                         )
+                        data = self.document_data(data)
                         self.send_headers(
                             200, CONTENT_TYPES[".html"], len(data), generated_html=True
                         )
-                        self.wfile.write(data)
+                        self.write_data(data)
                     else:
                         relative = (
                             Path(row[1]).with_suffix(".srt")
@@ -517,6 +635,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                         )
                         path = allowed_file(root, relative.as_posix())
                         data = path.read_bytes()
+                        data = self.document_data(data)
                         self.send_headers(
                             200,
                             CONTENT_TYPES.get(path.suffix, "text/plain; charset=utf-8"),
@@ -525,7 +644,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                             if path.suffix == ".zip"
                             else None,
                         )
-                        self.wfile.write(data)
+                        self.write_data(data)
                 elif url.path in ("/api/file", "/api/preview"):
                     path = allowed_file(root, query.get("path", [""])[0])
                     if url.path == "/api/preview":
@@ -551,12 +670,16 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                                 length,
                                 disposition=f"{disposition}; filename*=UTF-8''{quote(path.name)}",
                             )
-                            shutil.copyfileobj(handle, self.wfile)
-                elif url.path in ("/", "/app.js", "/artifact.js", "/style.css"):
+                            if self.command != "HEAD":
+                                shutil.copyfileobj(handle, self.wfile)
+                elif url.path in ("/", "/app.js", "/artifact.js", "/style.css") or re.fullmatch(
+                    r"/icons/(magnifying-glass|document-text|clipboard-document|arrow-top-right-on-square|arrow-down-tray|chevron-up|x-mark|arrow-path)\.svg",
+                    url.path,
+                ):
                     path = ASSETS / ("index.html" if url.path == "/" else url.path[1:])
                     data = path.read_bytes()
                     self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
-                    self.wfile.write(data)
+                    self.write_data(data)
                 else:
                     self.send_json({"error": "Not found"}, 404)
             except (FileNotFoundError, IsADirectoryError):
@@ -570,12 +693,29 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             except OSError:
                 self.send_json({"error": "Output file is temporarily unavailable"}, 503)
 
+        do_HEAD = do_GET
+
         def do_POST(self):
             if not self.trusted():
                 return
-            match = re.fullmatch(
-                r"/artifacts/(\d+)/([a-z][a-z0-9_-]{0,63})/run", urlsplit(self.path).path
-            )
+            self.resource = None
+            requested_path = urlsplit(self.path).path
+            from .resources import resolve
+
+            try:
+                resource = (
+                    resolve(ArchiveViews(root), requested_path)
+                    if requested_path.startswith("/videos/")
+                    else None
+                )
+            except FileNotFoundError:
+                self.send_json({"error": "Resource not found"}, 404)
+                return
+            internal = requested_path
+            if resource and resource.canonical_request and resource.workflow and not resource.leaf:
+                self.resource = resource
+                internal = resource.internal + "run"
+            match = re.fullmatch(r"/artifacts/(\d+)/([a-z][a-z0-9_-]{0,63})/run", internal)
             if not match:
                 self.send_json(
                     {"error": "Only artifact workflows can be triggered here"},
@@ -587,13 +727,26 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                 from .storage import Store
 
                 length = int(self.headers.get("Content-Length", "0"))
+                content_type = self.headers.get("Content-Type", "").split(";")[0]
+                json_request = content_type == "application/json" and self.resource is not None
                 if (
                     not 0 < length <= 1024
-                    or self.headers.get("Content-Type", "").split(";")[0]
-                    != "application/x-www-form-urlencoded"
+                    or content_type not in {"application/x-www-form-urlencoded", "application/json"}
+                    or (content_type == "application/json" and not json_request)
                 ):
-                    raise ValueError("Use the artifact workflow form")
-                fields = parse_qs(self.rfile.read(length).decode())
+                    raise ValueError("Use a workflow form or JSON token object")
+                raw = self.rfile.read(length).decode()
+                if json_request:
+                    value = json.loads(raw)
+                    if (
+                        not isinstance(value, dict)
+                        or set(value) != {"token"}
+                        or not isinstance(value["token"], str)
+                    ):
+                        raise ValueError("Workflow JSON requires a token string")
+                    fields = {"token": [value["token"]]}
+                else:
+                    fields = parse_qs(raw)
                 if fields.get("token") != [instance]:
                     self.send_json({"error": "Refresh the workflow page before triggering it"}, 403)
                     return
@@ -604,11 +757,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
 
                         source = inputs(store, int(match[1]), match[2])[0]
                         key = (int(match[1]), match[2])
-                        with store.db:
-                            store.db.execute(
-                                "INSERT OR IGNORE INTO artifacts(job_id,workflow,updated_at) VALUES(?,?,?)",
-                                (*key, now()),
-                            )
+                        store.ensure_stage("artifact", key[0], workflow=key[1])
                         request = JobRequest(
                             "artifacts",
                             {
@@ -621,26 +770,37 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                         identifier = Dispatcher(
                             store, process=LocalProcess(spawn=subprocess.Popen)
                         ).submit(request, background=True)
-                        pid = store.db.execute(
-                            "SELECT pid FROM submissions WHERE id=?", (identifier,)
-                        ).fetchone()[0]
-                        with store.db:
-                            store.db.execute(
-                                "UPDATE artifacts SET run_pid=? WHERE job_id=? AND workflow=?",
-                                (pid, *key),
-                            )
+                        pid = store.submission(identifier)["pid"]
+                        store.stage_update("artifact", key[0], workflow=key[1], run_pid=pid)
                     finally:
                         store.db.close()
-                self.send_response(303)
-                self.send_header("Location", f"/artifacts/{match[1]}/{match[2]}/")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
+                location = artifact_url(source["video_id"], source["profile"], match[2])
+                if json_request:
+                    data = json.dumps(
+                        {
+                            "submission_id": identifier,
+                            "state": "queued",
+                            "url": self.origin() + location,
+                        }
+                    ).encode()
+                    self.send_response(202)
+                    self.send_header("Content-Type", CONTENT_TYPES[".json"])
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Location", location)
+                    self.end_headers()
+                    self.write_data(data)
+                else:
+                    self.send_response(303)
+                    self.send_header("Location", location)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
             except (ValueError, FileNotFoundError, KeyError) as error:
                 self.send_json({"error": str(error)}, 400)
             except (OSError, sqlite3.Error, RuntimeError):
                 self.send_json({"error": "Artifact worker could not start"}, 503)
 
-    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    return ThreadingHTTPServer((config.host, port), Handler)
 
 
 def dashboard_status(root: Path) -> dict:
@@ -655,7 +815,13 @@ def dashboard_status(root: Path) -> dict:
             address = urlsplit(state["url"])
             if address.hostname != "127.0.0.1" or address.scheme != "http":
                 raise ValueError("Invalid dashboard address")
-            response = httpx.get(state["url"] + "/api/health", timeout=1, trust_env=False)
+            config = RuntimeConfig.load(root)
+            headers = (
+                {"Authorization": "Bearer " + config.access_token} if config.access_token else None
+            )
+            response = httpx.get(
+                state["url"] + "/api/health", timeout=1, trust_env=False, headers=headers
+            )
             response.raise_for_status()
             health = response.json()
             ready = (
