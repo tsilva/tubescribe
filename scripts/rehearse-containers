@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Own a disposable Compose project; exercise real services with synthetic inference."""
+
+import json
+import os
+import secrets
+import subprocess
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PROJECT = "tubescribe-rehearsal-" + uuid.uuid4().hex[:8]
+RESTORE_PROJECT = PROJECT + "-restore"
+ENV = {**os.environ, "TUBESCRIBE_ACCESS_TOKEN": secrets.token_urlsafe(32)}
+BASE = [
+    "docker",
+    "compose",
+    "-p",
+    PROJECT,
+    "-f",
+    str(ROOT / "compose.network.yaml"),
+    "-f",
+    str(ROOT / "compose.rehearsal.yaml"),
+]
+
+
+def compose(*args, timeout=120, project=PROJECT, crashing=False):
+    command = BASE.copy()
+    command[3] = project
+    result = subprocess.run(
+        command + list(args), cwd=ROOT, env=ENV, capture_output=True, text=True, timeout=timeout
+    )
+    if result.returncode and not (crashing and result.returncode in {137, 143}):
+        if args and args[0] == "run":
+            with tempfile.NamedTemporaryFile(
+                mode="w", prefix=project + "-tests-", suffix=".log", delete=False
+            ) as report:
+                report.write(result.stdout + result.stderr)
+            print("Full network test diagnostics: " + report.name, flush=True)
+        raise RuntimeError(result.stderr[-4000:] or result.stdout[-4000:])
+    return result.stdout + result.stderr if args and args[0] == "run" else result.stdout
+
+
+def eventually(operation, predicate=lambda value: value, timeout=60):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = operation()
+            if predicate(last):
+                return last
+        except Exception as error:
+            last = str(error)
+        time.sleep(1)
+    raise RuntimeError("Rehearsal condition did not complete: " + str(last))
+
+
+def control(method="GET"):
+    code = (
+        "import os,httpx,json; r=httpx.request("
+        + repr(method)
+        + ",'http://127.0.0.1:8084',headers={'Authorization':'Bearer '+os.environ['TUBESCRIBE_ACCESS_TOKEN']},timeout=5,trust_env=False); r.raise_for_status(); print(r.text)"
+    )
+    return json.loads(compose("exec", "-T", "gateway-fixture", "python", "-c", code, timeout=15))
+
+
+def web(path, *, project=PROJECT, service="gateway-fixture"):
+    code = (
+        "import os,httpx,json; r=httpx.get('http://web:8080"
+        + path
+        + "',headers={'Authorization':'Bearer '+os.environ['TUBESCRIBE_ACCESS_TOKEN'],'Host':'tubescribe.local'},timeout=10,trust_env=False); print(json.dumps({'status':r.status_code,'body':r.text[:1000]}))"
+    )
+    return json.loads(
+        compose("exec", "-T", service, "python", "-c", code, timeout=20, project=project)
+    )
+
+
+def restore_stack(job_id):
+    # Transfer a verified snapshot to wholly new database/object volumes and web scratch.
+    compose("pause", "worker", "worker2")
+    queued = control("POST")["submission"]
+    compose("exec", "-T", "gateway-fixture", "tubescribe", "export", "/tmp/tubescribe-backup")
+    source = compose("ps", "-q", "gateway-fixture").strip()
+    compose(
+        "up",
+        "--build",
+        "-d",
+        "database",
+        "objects",
+        "initialize-objects",
+        "web",
+        project=RESTORE_PROJECT,
+        timeout=300,
+    )
+    target = compose("ps", "-q", "web", project=RESTORE_PROJECT).strip()
+    with tempfile.TemporaryDirectory(prefix="tubescribe-container-backup-") as temporary:
+        for src, dst in (
+            (source + ":/tmp/tubescribe-backup", temporary),
+            (str(Path(temporary) / "tubescribe-backup"), target + ":/tmp/restore-backup"),
+        ):
+            subprocess.run(
+                ["docker", "cp", src, dst], env=ENV, capture_output=True, check=True, timeout=60
+            )
+        compose(
+            "exec",
+            "-T",
+            "--user",
+            "root",
+            "web",
+            "chown",
+            "-R",
+            "10001:10001",
+            "/tmp/restore-backup",
+            project=RESTORE_PROJECT,
+        )
+        compose(
+            "exec",
+            "-T",
+            "web",
+            "tubescribe",
+            "restore",
+            "/tmp/restore-backup",
+            project=RESTORE_PROJECT,
+        )
+    eventually(
+        lambda: web("/api/ready", project=RESTORE_PROJECT, service="web"),
+        lambda r: r["status"] == 200,
+    )
+    for path in (
+        f"/transcripts/{job_id}/srt",
+        f"/processed/{job_id}/preview.html",
+        f"/processed/{job_id}/figures/frame_0001000.png",
+        f"/artifacts/{job_id}/summary/",
+    ):
+        assert web(path, project=RESTORE_PROJECT, service="web")["status"] == 200, path
+    rows = json.loads(
+        compose("exec", "-T", "web", "tubescribe", "queue", "status", project=RESTORE_PROJECT)
+    )
+    assert next(row for row in rows if row["id"] == queued)["state"] == "queued"
+    print(
+        "Verified backup restored transcripts, screenshots, summary and queued work into a fresh container stack: passed",
+        flush=True,
+    )
+
+
+def main():
+    try:
+        subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            env=ENV,
+            capture_output=True,
+            check=True,
+            timeout=15,
+        )
+        compose("config", "--quiet")
+        print("Building isolated container stack: " + PROJECT, flush=True)
+        compose(
+            "up",
+            "--build",
+            "-d",
+            "database",
+            "objects",
+            "initialize-objects",
+            "web",
+            "worker",
+            "worker2",
+            "gateway-fixture",
+            timeout=1800,
+        )
+        eventually(control, timeout=90)
+        eventually(lambda: web("/api/ready"), lambda r: r["status"] == 200)
+        compose("pause", "worker", "worker2")
+        first, second = control("POST"), control("POST")
+        assert first == second, "Duplicate requests were not deduplicated"
+        compose("unpause", "worker", "worker2")
+        complete = eventually(control, lambda r: r["status"]["completed_jobs"] == 1)
+        calls = complete["calls"]
+        job_id = complete["job_id"]
+        assert calls == 3, (
+            "Expected one text, one illustrated transcript, and one summary model call"
+        )
+        for path in [
+            f"/transcripts/{job_id}/srt",
+            f"/processed/{job_id}/preview.html",
+            f"/artifacts/{job_id}/summary/",
+            f"/processed/{job_id}/figures/frame_0001000.png",
+            "/metrics",
+        ]:
+            assert web(path)["status"] == 200, path
+        print(
+            "Separate worker/gateway containers, duplicate delivery, screenshots and summary: passed",
+            flush=True,
+        )
+        compose("stop", "objects")
+        assert web("/api/ready")["status"] == 503
+        assert web("/api/health")["status"] == 200
+        control("POST")
+        time.sleep(5)
+        assert control()["status"]["completed_jobs"] == 1, "Storage outage changed completed stages"
+        compose("start", "objects")
+        eventually(lambda: web("/api/ready"), lambda r: r["status"] == 200)
+        eventually(
+            lambda: json.loads(compose("exec", "-T", "worker", "tubescribe", "queue", "status")),
+            lambda rows: all(r["state"] == "complete" for r in rows),
+        )
+        assert control()["calls"] == calls, "Storage recovery repeated inference"
+        print(
+            "Object-server outage and automatic retry without repeated inference: passed",
+            flush=True,
+        )
+        compose("stop", "database")
+        assert web("/api/ready")["status"] == 503
+        assert web("/api/health")["status"] == 200
+        compose("start", "database")
+        eventually(lambda: web("/api/ready"), lambda r: r["status"] == 200)
+        eventually(control)
+        assert control()["status"]["completed_jobs"] == 1
+        for service in ("worker", "web", "gateway-fixture"):
+            container = compose("ps", "-q", service).strip()
+
+            def restart_count():
+                return int(
+                    subprocess.check_output(
+                        ["docker", "inspect", container, "--format", "{{.RestartCount}}"],
+                        env=ENV,
+                        text=True,
+                        timeout=15,
+                    )
+                )
+
+            before = restart_count()
+            # Docker's explicit stop/kill disables restart policy. Kill the application
+            # from inside its container to simulate an unexpected process failure.
+            compose(
+                "exec",
+                "-T",
+                service,
+                "python",
+                "-c",
+                "import os,signal; from pathlib import Path; os.kill(int(Path('/proc/1/task/1/children').read_text().split()[0]),signal.SIGKILL)",
+                crashing=True,
+            )
+            eventually(restart_count, lambda count: count > before, timeout=100)
+            eventually(lambda: compose("exec", "-T", service, "true") or True, timeout=100)
+            eventually(control, timeout=100)
+            eventually(lambda: web("/api/ready"), lambda r: r["status"] == 200, timeout=100)
+            control("POST")
+            eventually(
+                lambda: json.loads(
+                    compose("exec", "-T", "worker", "tubescribe", "queue", "status")
+                ),
+                lambda rows: all(r["state"] == "complete" for r in rows),
+                timeout=100,
+            )
+            assert control()["calls"] == calls, service + " restart repeated inference"
+        print(
+            "Database outage and worker/web/gateway restart with disposable scratch: passed",
+            flush=True,
+        )
+        print("Running network/restore suite against real PostgreSQL and SeaweedFS", flush=True)
+        output = compose(
+            "run",
+            "--rm",
+            "--no-deps",
+            "-e",
+            "TUBESCRIBE_TEST_DATABASE_URL=postgresql://tubescribe:local-only-rehearsal-password@database:5432/tubescribe",
+            "-e",
+            "TUBESCRIBE_TEST_S3_ENDPOINT=http://objects:8333",
+            "--entrypoint",
+            "python",
+            "gateway-fixture",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-p",
+            "test_network_runtime.py",
+            "-v",
+            timeout=300,
+        )
+        print(output[-1000:], flush=True)
+        restore_stack(job_id)
+        print(
+            "Container rehearsal passed; all project containers and volumes will be removed.",
+            flush=True,
+        )
+    except BaseException:
+        try:
+            print(compose("logs", "--tail", "40")[-12000:], flush=True)
+        except Exception:
+            pass
+        raise
+    finally:
+        # Only this randomly named project's disposable volumes; no existing services.
+        for project in (RESTORE_PROJECT, PROJECT):
+            try:
+                compose("down", "--volumes", "--remove-orphans", timeout=60, project=project)
+            except Exception as error:
+                print("Cleanup required for " + project + ": " + str(error), flush=True)
+
+
+if __name__ == "__main__":
+    main()

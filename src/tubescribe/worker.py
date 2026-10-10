@@ -8,6 +8,7 @@ import time
 import httpx
 
 from .asr import Client
+from .database import database_errors, transient_errors
 from .diarization_tunnel import ready as ready_diarization
 from .diarization_worker import bind_profile as bind_diarization_profile
 from .diarization_worker import enrich_one
@@ -249,6 +250,26 @@ def work(
                             processing_seconds=result["processing_seconds"],
                             speed=result["duration"] / result["processing_seconds"],
                         )
+                    except transient_errors():
+                        from contextlib import suppress
+
+                        if stage not in {"diarization", "postprocessing", "summary"}:
+                            with suppress(*database_errors()):
+                                store.update(
+                                    job["id"],
+                                    state="pending",
+                                    next_retry=0,
+                                    download_state="pending"
+                                    if stage == "download"
+                                    else job["download_state"],
+                                    asr_state="pending"
+                                    if stage != "download"
+                                    else job["asr_state"],
+                                    download_attempts=job["download_attempts"],
+                                    asr_attempts=job["asr_attempts"],
+                                    error="Durable service unavailable; checkpoints retained",
+                                )
+                        raise
                     except (KeyboardInterrupt, SystemExit):
                         if stage in {"diarization", "postprocessing", "summary"}:
                             raise

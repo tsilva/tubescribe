@@ -23,3 +23,12 @@ RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable --extra asr --
 USER tubescribe
 ENTRYPOINT ["python", "-m", "uvicorn"]
 CMD ["tubescribe.server:create_app", "--factory", "--host", "0.0.0.0", "--port", "18765"]
+
+FROM runtime AS rehearsal
+USER root
+RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable --extra cloud --group rehearsal
+COPY tests /app/tests
+USER tubescribe
+ENV TUBESCRIBE_NETWORK_TESTS=1
+ENTRYPOINT ["python"]
+CMD ["-m", "unittest", "discover", "-s", "tests", "-p", "test_network_runtime.py", "-v"]

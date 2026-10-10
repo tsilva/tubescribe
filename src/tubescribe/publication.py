@@ -52,10 +52,11 @@ def render_bundle(directory, delivery=Delivery(), *, markdown=False):
 def export_publications(root):
     """Render the exported copy, including legacy bundles, without editing live files."""
     import sqlite3
+    from contextlib import closing
 
     from .blobs import LocalArtifacts, publish_bundle
 
-    with sqlite3.connect(root / "archive.sqlite3") as db:
+    with closing(sqlite3.connect(root / "archive.sqlite3")) as db, db:
         rows = db.execute(
             "SELECT a.job_id,a.output_dir,v.title FROM artifacts a JOIN jobs j ON j.id=a.job_id JOIN videos v ON v.id=j.video_id WHERE a.state='complete'"
         ).fetchall()

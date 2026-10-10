@@ -207,7 +207,26 @@ The worker starts in a separate process session and survives this chat/terminal 
 scripts/tubescribe export /absolute/path/to/a/new/tubescribe-backup
 ```
 
-Export holds the archive lease, uses SQLite's backup API, and copies JSON, text, SRT, and Markdown transcripts, original ASR/diarization checkpoints and retained retry audio into a **new** directory outside the live archive. It generates SRT and Markdown from saved JSON for older completed transcripts before copying. Stop an active worker and wait for queued/active gateway runs before export. Restore by selecting the exported directory with `--data`, creating/reconnecting both forwards, and resuming `work`. The export deliberately omits SSH control sockets and host-specific tunnel state. Copy the export to your normal backup storage; a local copy alone does not protect against disk loss.
+Export holds the archive lease and creates a portable SQLite snapshot plus transcripts,
+screenshots, summaries, workflow definitions, inference checkpoints, and retained retry
+media in a **new** directory outside the live archive. It generates missing subtitle
+exports from saved JSON, rewrites publication links for portability, and records every
+file's SHA-256 in `backup.json`. The destination appears only after the snapshot is
+complete. Stop active workers and wait for queued/active gateway runs before export.
+Queued submissions are preserved; active submissions become queued in the copy, with
+claims and process ownership cleared. SSH control sockets and host-specific tunnel state
+are omitted. Copy the export to your normal backup storage.
+
+```bash
+# Restore into a new local archive, or into empty configured PostgreSQL/S3 storage:
+scripts/tubescribe --data /absolute/path/to/new-archive restore /absolute/path/to/tubescribe-backup
+```
+
+Restore verifies the entire inventory before writing, refuses a populated database, and
+verifies uploaded objects before committing restored records. Matching object uploads
+from a partial restore can resume. Network restore requires selecting the new database
+and bucket through the runtime settings below; do not select the live archive. Reconnect
+inference services and resume `work` or `queue serve` afterward.
 
 ## Library dashboard
 
@@ -400,9 +419,16 @@ SRT, illustrated Markdown, screenshots, checkpoints, and summaries remain availa
 Canonical artifact Markdown uses `transcript:JOB_ID` and `figure:IMAGE_ID` with a
 `references.json` map. Delivery resolves these into usable links without a model call.
 Export reads durable objects, resolves legacy and current bundles in the exported copy,
-and clears copied claims/PIDs. The default backup/restore procedure above still works;
-when restoring a separate-volume configuration, point the database and objects settings
-at the restored archive rather than the original deployment.
+and clears copied claims/PIDs. The verified `restore` command above supports both local
+and network storage; select an empty target database and object location.
+
+Storage timeouts, service outages, and permission failures are distinguished from missing
+objects. They preserve completed stage pointers and requeue interrupted submissions
+without consuming stage attempt budgets. Saved model responses resume packaging without
+another inference call. Missing or checksum-invalid content still enters normal repair.
+Database outages can terminate a consumer; service supervision restarts it and expired
+ownership is reclaimed. Unknown upstream model execution remains subject to the gateway's
+operator-review policy below.
 
 ### Independent queue worker
 
@@ -533,9 +559,9 @@ as container loopback. A local AgentBridge gateway must be exposed through your 
 HTTPS proxy. Optional `gpu` profile services run model servers; their private ports still
 need an explicit TLS/authenticated routing configuration to be used by remote clients.
 
-Compose configuration was validated. Image building could not run on the development
-Mac because Docker Desktop reported it could not start; CPU/GPU container execution is
-therefore **not yet verified**. No cloud infrastructure was provisioned.
+The CPU runtime image and PostgreSQL/SeaweedFS container stack were built and exercised
+locally with synthetic inference as described below. The GPU image and live inference
+containers remain unverified. No cloud infrastructure was provisioned.
 
 ### Local PostgreSQL and S3 rehearsal
 
@@ -544,7 +570,9 @@ therefore **not yet verified**. No cloud infrastructure was provisioned.
 worker use independent tmpfs scratch with **no shared application volume**; only the
 database and object server keep persistent volumes. `deploy/rehearsal-s3.json` contains
 local rehearsal credentials. These are development defaults, not deployment secrets.
-The initializer waits for S3 and creates the explicit rehearsal bucket.
+The initializer waits for S3 and creates the explicit rehearsal bucket. The local object
+server allows 128 small volumes so isolated test buckets do not exhaust its default
+eight-volume limit; size storage for actual archive workloads separately.
 
 ```bash
 export TUBESCRIBE_ACCESS_TOKEN=REPLACE_WITH_A_RANDOM_SECRET_OF_AT_LEAST_32_CHARACTERS
@@ -594,9 +622,24 @@ live-job recovery fencing and host clock skew, exercises gateway-owned FFmpeg sc
 callbacks, and verifies multipart transfer, checksums, and portable SQLite export.
 It does not contact the real ASR/AgentBridge services or consume model tokens.
 
-Both Compose configurations validate, and all **seven network tests** pass locally.
-Docker engine availability prevented image/container execution on this machine; the
-SeaweedFS container and GPU containers remain unverified here. No cloud resources were created.
+Run the full disposable container rehearsal with an available Docker engine:
+
+```bash
+scripts/rehearse-containers
+```
+
+It builds the application runtime and a separate test image, starts real PostgreSQL and
+SeaweedFS, two queue consumers, web, and a synthetic durable gateway with independent
+scratch. A test sidecar keeps a stable network namespace for loopback callbacks while
+application containers restart; application files remain separate. It checks duplicate delivery, published screenshots,
+object/database outages, abrupt service restarts, and verified restore into a fresh
+database schema and bucket, then restores a portable backup into a second stack with
+new PostgreSQL/object volumes. It removes only its randomly named projects' containers and
+volumes, including on failure. No production inference services or model tokens are used.
+`DOCKER_HOST` may select an isolated local engine without changing the global Docker context.
+
+Application containers use `restart: unless-stopped` for unexpected exits. The GPU image
+is separate and is not exercised by this CPU-only rehearsal. No cloud resources are created.
 
 ### Operations and reconciliation
 
@@ -604,8 +647,21 @@ SeaweedFS container and GPU containers remain unverified here. No cloud resource
 key, errors, and available inference/token metrics. `runtime_events` retains submission,
 queue-delay, state-transition, agent-result, and reconciliation events independent of
 scratch logs; the dashboard merges these with legacy logs. Generated model reports record
-prompt/schema fingerprints for provenance. These are an operational ledger, not yet an
-external metrics/alerting system.
+prompt/schema fingerprints for provenance. Authenticated web endpoints expose
+`/api/ready` (200/503), `/api/metrics` (JSON), and `/metrics` (Prometheus text).
+`/api/health` remains process liveness even when durable services are unavailable.
+The gateway exposes `/ready`, `/metrics` (JSON), and `/health` behind its bearer token.
+Readiness checks database connectivity and object-store access; it does not check GPU
+inference or AgentBridge capacity. Metrics include queue age and states, stage failures,
+active/expired leases, elapsed stage time, and available inference time/token usage.
+Labels exclude job IDs and transcript content. Ledger-derived totals are gauges so
+restoring a snapshot does not imply monotonically increasing counters. An external
+collector or alerting service can consume these endpoints; none is installed by default.
+
+```bash
+scripts/tubescribe operations ready       # also works without opening an archive writer
+scripts/tubescribe operations metrics
+```
 
 ```bash
 scripts/tubescribe reconcile                         # recover expired work; report orphan bundles
@@ -645,6 +701,15 @@ audio after worker replacement. In-memory objects also exercise full
 processed-transcript recovery and summary generation without a filesystem-path API.
 Model responses in this rehearsal are synthetic: it validates runtime failure boundaries,
 not transcription accuracy, GPU/container performance, or model token savings.
+
+The reliability pass executes **173 local tests** (nine network cases are opt-in), plus
+all **nine network tests** against real PostgreSQL and SeaweedFS containers. The disposable
+container stack verifies two consumers, duplicate delivery, object/database outages,
+unexpected worker/web/gateway exits, and recovery without repeating saved inference.
+A second stack with new PostgreSQL and object volumes restores the verified backup and
+serves SRT, processed Markdown, screenshots, and summary while preserving queued work.
+Readiness returns 503 during durable-service outages while process liveness stays healthy.
+GPU inference containers are outside this CPU-only rehearsal.
 
 ### Verified full pipeline (10 October 2026)
 

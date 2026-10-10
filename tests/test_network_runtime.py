@@ -78,11 +78,13 @@ class NetworkRuntime(unittest.TestCase):
             cls.database_url = f"postgresql://127.0.0.1:{port}/postgres"
         cls.admin = psycopg.connect(cls.database_url, autocommit=True)
         cls.addClassCleanup(cls.admin.close)
-        cls.objects = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
-        cls.objects.start()
-        cls.addClassCleanup(cls.objects.stop)
-        host, port = cls.objects.get_host_and_port()
-        cls.endpoint = f"http://{host}:{port}"
+        cls.endpoint = os.environ.get("TUBESCRIBE_TEST_S3_ENDPOINT")
+        if not cls.endpoint:
+            cls.objects = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+            cls.objects.start()
+            cls.addClassCleanup(cls.objects.stop)
+            host, port = cls.objects.get_host_and_port()
+            cls.endpoint = f"http://{host}:{port}"
 
     def setUp(self):
         from urllib.parse import quote, urlencode
@@ -111,8 +113,8 @@ class NetworkRuntime(unittest.TestCase):
                 "TUBESCRIBE_ACCESS_TOKEN": "",
                 "TUBESCRIBE_DISPATCH": "queue",
                 "TUBESCRIBE_WORKER_POLL": "0.05",
-                "AWS_ACCESS_KEY_ID": "rehearsal",
-                "AWS_SECRET_ACCESS_KEY": "rehearsal",
+                "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID", "rehearsal"),
+                "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY", "rehearsal"),
                 "AWS_DEFAULT_REGION": "us-east-1",
                 "AWS_EC2_METADATA_DISABLED": "true",
                 "TUBESCRIBE_AGENT_PROTOCOL": "sync",
@@ -260,6 +262,153 @@ class NetworkRuntime(unittest.TestCase):
             self.store.db.execute("UPDATE submissions SET updated=0")
         self.assertEqual(other.reclaim_submissions(), 2)
         self.assertIsNotNone(other.claim_submission("replacement"))
+
+    def test_network_backup_restores_into_new_database_and_bucket(self):
+        from urllib.parse import quote, urlencode
+
+        import boto3
+        from psycopg import sql
+
+        from tubescribe.backup import export_archive, restore_archive
+        from tubescribe.operations import metrics, readiness
+        from tubescribe.postprocessing_worker import process_one
+
+        self.fixture.full()
+        video = self.store.root / "backup-fixture.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x180:r=10:d=4",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(video),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=15,
+        )
+        self.fixture.inspect_video = True
+        self.store.stage_update(
+            "postprocessing",
+            self.fixture.job["id"],
+            state="pending",
+            mode="video",
+            output_dir=None,
+            manifest_path=None,
+            attempts=0,
+        )
+        with patch("tubescribe.postprocessing_worker.cached_video", return_value=str(video)):
+            process_one(self.store, self.fixture.job, bridge=self.fixture.bridge, mode="video")
+        self.assertEqual(self.fixture.row()["figures"], 1)
+        build_one(self.store, self.fixture.job["id"], "summary", bridge=self.fixture.bridge)
+        queued = Dispatcher(self.store).submit(JobRequest("artifacts", {"workflow": "notes"}))
+        backup = Path(self.base.name) / (self.schema + "-backup")
+        self.addCleanup(lambda: shutil.rmtree(backup, ignore_errors=True))
+        export_archive(self.store, backup)
+        restored_schema = "restore_" + uuid.uuid4().hex
+        bucket = "restore-" + uuid.uuid4().hex
+        self.admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(restored_schema)))
+        self.addCleanup(
+            lambda: self.admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(restored_schema))
+            )
+        )
+        boto3.client("s3", endpoint_url=self.endpoint).create_bucket(Bucket=bucket)
+        url = (
+            self.database_url
+            + ("&" if "?" in self.database_url else "?")
+            + urlencode({"options": "-c search_path=" + restored_schema}, quote_via=quote)
+        )
+        with patch.dict(
+            os.environ, {"TUBESCRIBE_DATABASE_URL": url, "TUBESCRIBE_S3_BUCKET": bucket}
+        ):
+            restored = self.replacement("restored")
+            restore_archive(restored, backup)
+            restored.recover()
+            self.assertEqual(restored.status_data()["completed_jobs"], 1)
+            self.assertEqual(restored.submission(queued)["state"], "queued")
+            self.assertTrue(readiness(restored.root)["ready"])
+            self.assertGreater(sum(r["tokens"] for r in metrics(restored.root)["usage"]), 0)
+            processed = restored.stage_row("postprocessing", self.fixture.job["id"])
+            self.assertEqual(processed["figures"], 1)
+            self.assertTrue(restored.exists(processed["output_dir"] + "/figures/frame_0001000.png"))
+            for key in restored.blobs.keys():
+                self.assertEqual(restored.read_key(key), (backup / key).read_bytes())
+            # Restored PostgreSQL identity sequences must accept new records.
+            restored.index(
+                self.fixture.job["channel_id"],
+                "videos",
+                [
+                    {
+                        "id": "newvideo123",
+                        "title": "New",
+                        "url": "https://youtube.com/watch?v=newvideo123",
+                    }
+                ],
+                "turbo-v1",
+            )
+            self.assertEqual(len(restored.pipeline_jobs()), 2)
+
+    def test_s3_http_outage_preserves_completed_records_and_resumes(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        import boto3
+        from botocore.config import Config
+
+        from tubescribe.artifacts import complete_valid
+        from tubescribe.blobs import StorageUnavailable
+        from tubescribe.s3 import S3Artifacts
+
+        self.fixture.full()
+        build_one(self.store, self.fixture.job["id"], "summary", bridge=self.fixture.bridge)
+
+        class Offline(BaseHTTPRequestHandler):
+            status = 503
+
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                self.send_response(self.status)
+                self.end_headers()
+
+            do_HEAD = do_GET
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Offline)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        cold = self.replacement("outage")
+        normal = cold.blobs
+        cold.blobs = S3Artifacts(
+            self.bucket,
+            client=boto3.client(
+                "s3",
+                endpoint_url=f"http://127.0.0.1:{server.server_port}",
+                config=Config(retries={"max_attempts": 0}),
+            ),
+        )
+        before = cold.status_data()
+        for status in (503, 404):
+            Offline.status = status
+            with self.assertRaises(StorageUnavailable):
+                cold.recover()
+            with self.assertRaises(StorageUnavailable):
+                complete_valid(
+                    cold, cold.stage_row("artifact", self.fixture.job["id"], workflow="summary")
+                )
+            self.assertEqual(before, cold.status_data())
+        cold.blobs = normal
+        cold.recover()
+        self.assertEqual(cold.status_data()["completed_jobs"], 1)
+        self.assertEqual(self.fixture.requests, 2)
 
     def test_recovery_skips_a_live_job_in_another_process(self):
         self.fixture.full()

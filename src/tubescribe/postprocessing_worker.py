@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 
 from . import postprocessing as engine
+from .database import database_errors, transient_errors
 from .execution import capacity, job_stage, pipeline_lock
 from .inference import PostprocessingUnavailable
 from .inference import ready_bridge as ready
@@ -136,7 +137,7 @@ def recover(store):
                 if valid:
                     cleanup_video(store, row["video_id"])
                     continue
-            except (OSError, ValueError, KeyError, TypeError):
+            except (FileNotFoundError, ValueError, KeyError, TypeError):
                 pass
             update(
                 store,
@@ -323,6 +324,20 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             agent_seconds=report["agent_elapsed_seconds"],
             total_tokens=report["usage"]["total"]["totalTokens"],
         )
+    except transient_errors():
+        from contextlib import suppress
+
+        with suppress(*database_errors()):
+            update(
+                store,
+                job["id"],
+                state="pending",
+                stage=stage,
+                error="Durable service unavailable; checkpoints retained",
+                next_retry=0,
+                **{COUNTERS[stage]: row[COUNTERS[stage]]},
+            )
+        raise
     except (KeyboardInterrupt, SystemExit):
         update(
             store,
@@ -479,6 +494,8 @@ def run(
                         )
                     )
                     completed += int(changed)
+                except transient_errors():
+                    raise
                 except Exception as error:
                     failed += 1
                     if isinstance(

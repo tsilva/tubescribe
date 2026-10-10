@@ -5,14 +5,13 @@ import json
 import os
 import re
 import signal
-import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 from . import youtube
 from .asr import Client
-from .storage import Store, atomic_write, worker_lock
+from .storage import Store, worker_lock
 from .submission import execute_cli
 from .tunnel import tunnel
 from .worker import work
@@ -104,6 +103,10 @@ def main():
     c.add_argument("--video", action="append")
     c = sub.add_parser("export")
     c.add_argument("destination", type=Path)
+    c = sub.add_parser("restore", help="Restore a verified backup into an empty archive")
+    c.add_argument("source", type=Path)
+    c = sub.add_parser("operations", help="Durable-service readiness and ledger metrics")
+    c.add_argument("action", choices=["ready", "metrics"])
     c = sub.add_parser("subtitles", help="Generate/export SRT and Markdown speaker turns")
     c.add_argument(
         "destination",
@@ -151,6 +154,16 @@ def main():
         or (getattr(args, "limit", None) is not None and args.limit < 1)
     ):
         p.error("Counts, limits and attempt bounds must be positive")
+    if args.command == "operations":
+        from .operations import metrics, readiness
+
+        try:
+            result = readiness(args.data) if args.action == "ready" else metrics(args.data)
+            out(result)
+            return int(result.get("ready") is False)
+        except Exception:
+            out({"error": "Durable services unavailable"})
+            return 1
     store = Store(args.data)
 
     def stop_worker(signum, frame):
@@ -405,41 +418,13 @@ def main():
         elif args.command == "tunnel":
             out(tunnel(store.root, args.action, args.host, args.local_port, args.remote_port))
         elif args.command == "export":
-            dest = args.destination.resolve()
-            if dest == store.root or store.root in dest.parents:
-                raise ValueError("Export outside the live archive directory")
-            # Consistent DB/files snapshot; no inference worker can delete/update files during export.
-            with worker_lock(store.root):
-                if store.pending_agent_runs():
-                    raise ValueError("Wait for queued/active gateway runs before export")
-                dest.mkdir(parents=True, exist_ok=False)
-                store.subtitles()
-                from .database import export_sqlite
+            from .backup import export_archive
 
-                export_sqlite(store.root, dest / "archive.sqlite3")
-                with sqlite3.connect(dest / "archive.sqlite3") as target:
-                    target.execute("DELETE FROM claims")
-                    target.execute(
-                        "UPDATE submissions SET state='interrupted',pid=NULL,worker_id=NULL WHERE state IN ('queued','active')"
-                    )
-                for key in store.blobs.keys():
-                    if key.split("/")[0] in {
-                        "transcripts",
-                        "audio",
-                        "artifacts",
-                        "workflows",
-                        "agent-results",
-                    }:
-                        atomic_write(dest / key, store.read_key(key))
-                from .publication import export_publications
+            out(export_archive(store, args.destination))
+        elif args.command == "restore":
+            from .backup import restore_archive
 
-                export_publications(dest)
-                out(
-                    {
-                        "exported_to": str(dest),
-                        "includes": "SQLite, transcripts, artifacts, workflow definitions, retained retry audio",
-                    }
-                )
+            out(restore_archive(store, args.source))
     except KeyboardInterrupt:
         message = (
             "Dashboard stopped."

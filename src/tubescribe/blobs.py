@@ -9,6 +9,10 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 
+class StorageUnavailable(OSError):
+    """Durable storage cannot be consulted; absence must not be inferred."""
+
+
 @dataclass(frozen=True)
 class ArtifactRef:
     key: str
@@ -41,6 +45,7 @@ def atomic_write(path, content):
 
 
 class ArtifactStore(Protocol):
+    def probe(self) -> None: ...
     def put(self, key: str, content: bytes) -> ArtifactRef: ...
     def read(self, ref: ArtifactRef) -> bytes: ...
     def get(self, key: str) -> bytes: ...
@@ -89,6 +94,10 @@ class LocalArtifacts:
     def __init__(self, root, *, writer=atomic_write):
         self.root = Path(root).resolve()
         self.writer = writer
+
+    def probe(self):
+        if not self.root.is_dir() or not os.access(self.root, os.R_OK | os.W_OK):
+            raise StorageUnavailable("Archive directory is unavailable")
 
     def path(self, key):
         path = (self.root / checked_key(key)).resolve()
@@ -154,6 +163,9 @@ class MemoryArtifacts:
 
     def __init__(self):
         self.objects = {}
+
+    def probe(self):
+        pass
 
     def put(self, key, content):
         self.objects[checked_key(key)] = bytes(content)
@@ -221,6 +233,9 @@ class DirectoryObjects:
 
     def __init__(self, directory):
         self._local = LocalArtifacts(directory)
+
+    def probe(self):
+        self._local.probe()
 
     def put(self, key, content):
         return self._local.put(key, content)

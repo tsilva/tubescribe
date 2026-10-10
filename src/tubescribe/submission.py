@@ -139,14 +139,27 @@ class Dispatcher:
                 finally:
                     CURRENT_SUBMISSION.reset(token)
             except BaseException as error:
-                self.store.update_submission(
-                    identifier, state="interrupted", error=str(error), pid=None
-                )
+                from contextlib import suppress
+
+                from .database import database_errors, transient_errors
+
+                temporary = isinstance(error, transient_errors())
+                with suppress(*database_errors()):
+                    self.store.update_submission(
+                        identifier,
+                        state="queued" if temporary else "interrupted",
+                        error="Durable service unavailable; checkpoints retained"
+                        if temporary
+                        else str(error),
+                        pid=None,
+                        worker_id=None,
+                    )
                 raise
             self.store.update_submission(
                 identifier,
                 state="failed" if result.get("failed") else "complete",
                 pid=None,
+                error=None,
                 result=json.dumps(result),
             )
             return result
@@ -216,6 +229,13 @@ def consume_network(store, *, once, poll, process):
                 child = process.children.get(pid)
                 if child is not None:
                     child.wait()
+                current = store.submission(row["id"])
+                if current["state"] == "queued":
+                    # A transient service failure retains this exact request for retry.
+                    if once:
+                        return {"dispatched": completed, "failed": failed, "paused": True}
+                    time.sleep(max(1, poll or store.config.worker_poll))
+                    continue
                 completed += 1
             except BaseException as error:
                 store.update_submission(

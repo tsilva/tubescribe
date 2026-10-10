@@ -6,7 +6,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from .blobs import ArtifactRef, checked_key, file_digest
+from .blobs import ArtifactRef, StorageUnavailable, checked_key, file_digest
 
 
 class S3Artifacts:
@@ -29,18 +29,28 @@ class S3Artifacts:
         self.bucket, self.client = bucket, client
 
     @contextmanager
-    def request(self, key):
+    def request(self, key, *, missing=True):
         from boto3.exceptions import RetriesExceededError, S3UploadFailedError
         from botocore.exceptions import BotoCoreError, ClientError
 
         try:
             yield
         except ClientError as error:
-            if error.response["Error"]["Code"] in {"NoSuchKey", "NotFound", "404"}:
+            if missing and error.response["Error"]["Code"] in {"NoSuchKey", "NotFound", "404"}:
+                # HEAD cannot distinguish a missing key from an unavailable bucket.
+                # Confirm the bucket before allowing recovery to infer missing content.
+                try:
+                    self.client.head_bucket(Bucket=self.bucket)
+                except (ClientError, BotoCoreError) as bucket_error:
+                    raise StorageUnavailable("Object bucket unavailable") from bucket_error
                 raise FileNotFoundError(key) from error
-            raise OSError("Object store request failed") from error
+            raise StorageUnavailable("Object store request failed") from error
         except (BotoCoreError, S3UploadFailedError, RetriesExceededError) as error:
-            raise OSError("Object store unavailable") from error
+            raise StorageUnavailable("Object store unavailable") from error
+
+    def probe(self):
+        with self.request(self.bucket, missing=False):
+            self.client.head_bucket(Bucket=self.bucket)
 
     def put(self, key, content):
         key = checked_key(key)

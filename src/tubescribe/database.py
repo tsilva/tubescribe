@@ -35,6 +35,16 @@ def database_errors():
     return (sqlite3.Error,)
 
 
+def transient_errors():
+    from .blobs import StorageUnavailable
+
+    if network_database():
+        import psycopg
+
+        return (StorageUnavailable, psycopg.OperationalError, psycopg.InterfaceError)
+    return (StorageUnavailable,)
+
+
 class Record:
     """Named and positional access matching the repository's existing row contract."""
 

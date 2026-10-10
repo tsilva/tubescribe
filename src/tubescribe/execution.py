@@ -60,13 +60,20 @@ def lease(root, resource, *, ttl=90, reentrant=True, wait=False):
     stop = threading.Event()
 
     def heartbeat():
-        connection = Claims(root)
+        from .database import database_errors
+
+        connection = None
         try:
+            connection = Claims(root)
             while not stop.wait(ttl / 3):
                 if not connection.renew(resource, owner, ttl=ttl):
                     break
+        except database_errors():
+            # Ownership will expire; subsequent state commits still require fencing.
+            pass
         finally:
-            connection.close()
+            if connection:
+                connection.close()
 
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
@@ -78,8 +85,14 @@ def lease(root, resource, *, ttl=90, reentrant=True, wait=False):
         stop.set()
         thread.join(timeout=5)
         _LOCAL.owners = owners
-        claims.release(resource, owner)
-        claims.close()
+        from .database import database_errors
+
+        try:
+            claims.release(resource, owner)
+        except database_errors():
+            pass
+        finally:
+            claims.close()
 
 
 def job_stage(function):
@@ -145,13 +158,18 @@ def job_stage(function):
                 store.finish_attempt(attempt, "complete", metrics=metrics, run_id=run_id)
                 return result
             except BaseException as error:
-                store.finish_attempt(
-                    attempt,
-                    "interrupted"
-                    if isinstance(error, (KeyboardInterrupt, SystemExit))
-                    else "failed",
-                    error=str(error),
-                )
+                from contextlib import suppress
+
+                from .database import database_errors
+
+                with suppress(*database_errors()):
+                    store.finish_attempt(
+                        attempt,
+                        "interrupted"
+                        if isinstance(error, (KeyboardInterrupt, SystemExit))
+                        else "failed",
+                        error=str(error),
+                    )
                 raise
 
     return run

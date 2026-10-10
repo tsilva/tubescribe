@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from .database import database_errors, transient_errors
 from .execution import job_stage, pipeline_lock
 from .inference import LocalTools
 from .postprocessing import render_preview
@@ -231,7 +232,7 @@ def complete_valid(store, row):
             and digest(directory / path) == checksum
             for path, checksum in files.items()
         )
-    except (OSError, ValueError, KeyError, TypeError):
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
         return False
 
 
@@ -253,7 +254,7 @@ def recover(store):
                     row["input_sha256"],
                     row["workflow_sha256"],
                 )
-            except (OSError, ValueError, KeyError):
+            except (FileNotFoundError, ValueError, KeyError):
                 # Earlier source stages own repairs; rebuild from them once they finish.
                 changed = True
             if changed or not complete_valid(store, row):
@@ -603,6 +604,23 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             run_pid=None,
             next_retry=0,
         )
+    except transient_errors():
+        from contextlib import suppress
+
+        counter = "save_attempts" if stage == "save" else "attempts"
+        with suppress(*database_errors()):
+            update(
+                store,
+                job_id,
+                name,
+                state="pending",
+                stage=stage,
+                error="Durable service unavailable; checkpoints retained",
+                next_retry=0,
+                run_pid=None,
+                **{counter: row[counter]},
+            )
+        raise
     except (KeyboardInterrupt, SystemExit):
         counter = "save_attempts" if stage == "save" else "attempts"
         update(
@@ -712,6 +730,8 @@ def run_locked(store, *, name, ids, profile, limit, bridge, force, max_attempts)
                 completed += 1
             else:
                 skipped += 1
+        except transient_errors():
+            raise
         except Exception as error:
             failed += 1
             log("artifact_failed", video_id=job["video_id"], workflow=name, error=str(error))

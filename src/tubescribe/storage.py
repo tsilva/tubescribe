@@ -79,7 +79,7 @@ class Store:
             else:
                 self.blobs.stat(key)
             return True
-        except (OSError, ValueError):
+        except (FileNotFoundError, ValueError):
             return False
 
     def materialize(self, key, checksum=None):
@@ -184,7 +184,7 @@ class Store:
                 self.exists(key + "/" + checked_key(name), digest)
                 for name, digest in manifest["files"].items()
             )
-        except (OSError, ValueError, KeyError, TypeError):
+        except (FileNotFoundError, ValueError, KeyError, TypeError):
             return False
 
     def recover(self):

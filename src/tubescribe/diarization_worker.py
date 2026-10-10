@@ -6,6 +6,7 @@ import time
 
 import httpx
 
+from .database import database_errors, transient_errors
 from .diarization import Client, assign_speakers, validate
 from .execution import capacity, job_stage, pipeline_lock
 from .storage import ProfileChanged, atomic_write, now
@@ -129,6 +130,8 @@ def enrich_one(store, job, client, *, keep_audio=False):
                 try:
                     client = ready(store.root)
                     health = client.health()
+                except transient_errors():
+                    raise
                 except Exception as error:
                     raise httpx.ConnectError(f"Diarization reconnect failed: {error}") from error
             bind_profile(store, job["profile"], health)
@@ -187,6 +190,20 @@ def enrich_one(store, job, client, *, keep_audio=False):
             processing_seconds=prediction["processing_seconds"],
         )
         return True
+    except transient_errors():
+        from contextlib import suppress
+
+        with suppress(*database_errors()):
+            update(
+                store,
+                job["id"],
+                state="pending",
+                stage=stage,
+                error="Durable service unavailable; checkpoints retained",
+                next_retry=0,
+                **{ATTEMPTS[stage]: row[ATTEMPTS[stage]]},
+            )
+        raise
     except (KeyboardInterrupt, SystemExit):
         counter = ATTEMPTS[stage]
         update(
@@ -255,6 +272,8 @@ def run(store, endpoint, *, ids=None, profile="turbo-v1", max_attempts=3, wait=F
         for job in scope:
             try:
                 prepare(store, dict(job))
+            except transient_errors():
+                raise
             except Exception:
                 failed += 1
         skipped = sum(
@@ -282,6 +301,8 @@ def run(store, endpoint, *, ids=None, profile="turbo-v1", max_attempts=3, wait=F
                 client = ready(store.root)
                 try:
                     completed += int(enrich_one(store, dict(job), client))
+                except transient_errors():
+                    raise
                 except Exception as error:
                     failed += 1
                     if isinstance(error, (httpx.TransportError, ProfileChanged)):

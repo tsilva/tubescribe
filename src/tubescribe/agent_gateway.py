@@ -240,6 +240,15 @@ def make_gateway(root, upstream, *, port=0, runner_factory=AgentRunner):
             parts = urlsplit(self.path).path.strip("/").split("/")
             if parts == ["health"]:
                 return self.send({"service": "tubescribe-agent-gateway", "protocol": "durable-v1"})
+            if parts == ["ready"]:
+                from .operations import readiness
+
+                result = readiness(root)
+                return self.send(result, 200 if result["ready"] else 503)
+            if parts == ["metrics"]:
+                from .operations import metrics
+
+                return self.send(metrics(root))
             if len(parts) != 5 or parts[:4] != ["api", "v1", "durable", "runs"]:
                 return self.send({"error": "Not found"}, 404)
             identifier = parts[4]

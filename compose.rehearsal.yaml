@@ -1,0 +1,42 @@
+# Synthetic model tools use a stable sidecar network namespace; application files stay separate.
+services:
+  loopback:
+    extends:
+      file: compose.network.yaml
+      service: worker
+    entrypoint: [python, -c, 'import time; time.sleep(31536000)']
+    command: []
+  worker:
+    network_mode: service:loopback
+    environment:
+      TUBESCRIBE_AGENTBRIDGE: http://127.0.0.1:8083
+      TUBESCRIBE_REMOTE_INFERENCE: '0'
+    depends_on:
+      loopback:
+        condition: service_started
+  worker2:
+    extends:
+      file: compose.network.yaml
+      service: worker
+    network_mode: service:loopback
+    environment:
+      TUBESCRIBE_AGENTBRIDGE: http://127.0.0.1:8083
+      TUBESCRIBE_REMOTE_INFERENCE: '0'
+    depends_on:
+      loopback:
+        condition: service_started
+  gateway-fixture:
+    extends:
+      file: compose.network.yaml
+      service: worker
+    build:
+      target: rehearsal
+    network_mode: service:loopback
+    environment:
+      TUBESCRIBE_AGENT_PROTOCOL: sync
+      TUBESCRIBE_REMOTE_INFERENCE: '0'
+    entrypoint: [python, /app/tests/container_fixture.py]
+    command: []
+    depends_on:
+      loopback:
+        condition: service_started

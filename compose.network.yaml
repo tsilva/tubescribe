@@ -4,6 +4,7 @@ x-runtime: &runtime
     context: .
     target: runtime
   init: true
+  restart: unless-stopped
   stop_grace_period: 45s
   environment: &environment
     TUBESCRIBE_DATABASE_URL: postgresql://tubescribe:local-only-rehearsal-password@database:5432/tubescribe
@@ -38,12 +39,13 @@ services:
       timeout: 3s
       retries: 20
   objects:
-    image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    build:
+      context: ./deploy
+      dockerfile: Dockerfile.objects
     working_dir: /data
-    command: [server, '-dir=/data', '-ip=objects', '-s3', '-s3.port=8333', '-s3.config=/etc/seaweedfs/s3.json', '-master.volumeSizeLimitMB=1024']
+    command: [server, '-dir=/data', '-ip=objects', '-s3', '-s3.port=8333', '-s3.config=/etc/seaweedfs/s3.json', '-master.volumeSizeLimitMB=64', '-volume.max=128']
     volumes:
       - objects:/data
-      - ./deploy/rehearsal-s3.json:/etc/seaweedfs/s3.json:ro
     ports: ['127.0.0.1::8333']
   initialize-objects:
     build:

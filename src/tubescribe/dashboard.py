@@ -484,6 +484,23 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                             "archive_root": str(root),
                         }
                     )
+                elif url.path == "/api/ready":
+                    from .operations import readiness
+
+                    result = readiness(root)
+                    self.send_json(result, 200 if result["ready"] else 503)
+                elif url.path in {"/api/metrics", "/metrics"}:
+                    from .operations import metrics, prometheus
+
+                    result = metrics(root)
+                    if url.path == "/api/metrics":
+                        self.send_json(result)
+                    else:
+                        data = prometheus(result).encode()
+                        self.send_headers(
+                            200, "text/plain; version=0.0.4; charset=utf-8", len(data)
+                        )
+                        self.write_data(data)
                 elif url.path == "/api/snapshot":
                     self.send_json(snapshot(root))
                 elif match := re.fullmatch(
