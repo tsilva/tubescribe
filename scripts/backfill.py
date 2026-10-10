@@ -38,15 +38,31 @@ state = json.loads(state_file.read_text()) if state_file.exists() else {}
 worker_pid = None
 try:
     worker_pid = int((root / "worker.lock").read_text())
-    # Test the lock instead of trusting a potentially reused PID in a stale file.
-    import fcntl
+    # The expiring archive claim owns capacity; the file only displays its PID.
+    import sqlite3
+    import time
 
-    with (root / "worker.lock").open("a") as f:
+    with sqlite3.connect(root / "archive.sqlite3") as db:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='claims'").fetchone():
+            if not db.execute(
+                "SELECT 1 FROM claims WHERE resource='archive' AND expires>?", (time.time(),)
+            ).fetchone():
+                worker_pid = None
+        else:
+            # Read archives created by older workers without changing their schema.
+            import fcntl
+
+            with (root / "worker.lock").open("a") as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    worker_pid = None
+                except BlockingIOError:
+                    pass
+    if worker_pid is not None:
         try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.kill(worker_pid, 0)
+        except ProcessLookupError:
             worker_pid = None
-        except BlockingIOError:
-            pass
 except (ValueError, FileNotFoundError):
     pass
 if args.action == "status":

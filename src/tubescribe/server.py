@@ -12,10 +12,11 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from .inference import HardwarePolicy
 from .storage import now
 
 
-def create_app():
+def create_app(*, hardware=HardwarePolicy()):
     from fastapi import FastAPI, HTTPException, UploadFile
     from faster_whisper import WhisperModel
     from faster_whisper.utils import download_model
@@ -58,8 +59,7 @@ def create_app():
             .split(",")
         )
         gpu_name = gpu[0].strip()
-        if "RTX 4090" not in gpu_name:
-            raise RuntimeError(f"Expected beast-3 RTX 4090, found {gpu_name}")
+        hardware.check(device, gpu_name)
         model = WhisperModel(
             model_path,
             device=device,

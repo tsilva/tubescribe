@@ -577,7 +577,7 @@ class ExpandedRegressionTests(unittest.TestCase):
                         str(root / "out"),
                     ],
                 ),
-                patch.object(pilot.httpx, "Client") as client,
+                patch("tubescribe.inference.httpx.Client") as client,
                 patch("builtins.print"),
             ):
                 client.return_value.__enter__.return_value.post.return_value.json.return_value = (

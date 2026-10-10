@@ -14,6 +14,7 @@ from pathlib import Path
 from . import youtube
 from .asr import Client
 from .storage import Store, worker_lock
+from .submission import execute_cli
 from .tunnel import tunnel
 from .worker import work
 
@@ -26,6 +27,7 @@ def main():
     p = argparse.ArgumentParser(description="Local YouTube archive using remote ASR")
     p.add_argument("--data", type=Path, default=Path(os.environ.get("TUBESCRIBE_DATA", "data")))
     p.add_argument("--endpoint", default=os.environ.get("TUBESCRIBE_ENDPOINT"))
+    p.add_argument("--submission", help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="command", required=True)
     c = sub.add_parser("channels")
     cs = c.add_subparsers(dest="action", required=True)
@@ -51,6 +53,7 @@ def main():
         "--keep-audio", action="store_true", help="Retain successful audio for quality review"
     )
     c.add_argument("--postprocessing", choices=["video", "text", "off"], default="video")
+    c.add_argument("--no-summary", action="store_true", help="Stop after processed Markdown")
     c.add_argument(
         "--bridge", help="Loopback AgentBridge URL (defaults to saved config or port 8082)"
     )
@@ -63,6 +66,7 @@ def main():
     c.add_argument("--max-attempts", type=int, default=3)
     c.add_argument("--wait", action="store_true")
     c.add_argument("--mode", choices=["video", "text"], default="video")
+    c.add_argument("--no-summary", action="store_true", help="Stop after processed Markdown")
     c.add_argument("--bridge")
     c.add_argument("--video-cache")
     c.add_argument(
@@ -70,6 +74,20 @@ def main():
         action="store_true",
         help="Regenerate selected outputs, preserving earlier bundles",
     )
+    c = sub.add_parser(
+        "artifacts", help="Build or retry artifacts from completed processed Markdown"
+    )
+    c.add_argument("--workflow", default="summary")
+    c.add_argument("--video", action="append")
+    c.add_argument("--profile", default="turbo-v1")
+    c.add_argument("--limit", type=int)
+    c.add_argument("--bridge")
+    c.add_argument("--force", action="store_true")
+    c.add_argument("--max-attempts", type=int, default=3)
+    c.add_argument(
+        "--wait", action="store_true", help="Wait for an active archive worker to finish"
+    )
+    c.add_argument("--list-workflows", action="store_true")
     c = sub.add_parser("status")
     c.add_argument("--failures", action="store_true")
     c = sub.add_parser("retry")
@@ -145,21 +163,49 @@ def main():
                 raise KeyboardInterrupt()
 
             signal.signal(signal.SIGTERM, stop_postprocessing)
-            result = postprocess(
+            result = execute_cli(
                 store,
-                bridge=args.bridge,
-                ids=args.video,
-                channel=args.channel,
-                profile=args.profile,
-                limit=args.limit,
-                max_attempts=args.max_attempts,
-                wait=args.wait,
-                mode=args.mode,
-                video_cache=args.video_cache,
-                force=args.force,
+                args,
+                lambda: postprocess(
+                    store,
+                    bridge=args.bridge,
+                    ids=args.video,
+                    channel=args.channel,
+                    profile=args.profile,
+                    limit=args.limit,
+                    max_attempts=args.max_attempts,
+                    wait=args.wait,
+                    mode=args.mode,
+                    video_cache=args.video_cache,
+                    force=args.force,
+                    summary=not args.no_summary,
+                ),
             )
             out(result)
             return int(result["failed"] > 0)
+        elif args.command == "artifacts":
+            from .artifacts import run, workflows
+
+            if args.list_workflows:
+                out(workflows(store.root))
+            else:
+                result = execute_cli(
+                    store,
+                    args,
+                    lambda: run(
+                        store,
+                        name=args.workflow,
+                        ids=args.video,
+                        profile=args.profile,
+                        limit=args.limit,
+                        bridge=args.bridge,
+                        force=args.force,
+                        max_attempts=args.max_attempts,
+                        wait=args.wait,
+                    ),
+                )
+                out(result)
+                return int(result["failed"] > 0)
         elif args.command == "diarize":
             from .diarization_tunnel import endpoint as diarization_endpoint
             from .diarization_tunnel import ready
@@ -171,13 +217,17 @@ def main():
             signal.signal(signal.SIGTERM, stop_diarization)
             ready(store.root)
             out(
-                diarize(
+                execute_cli(
                     store,
-                    diarization_endpoint(store.root),
-                    ids=args.video,
-                    profile=args.profile,
-                    max_attempts=args.max_attempts,
-                    wait=args.wait,
+                    args,
+                    lambda: diarize(
+                        store,
+                        diarization_endpoint(store.root),
+                        ids=args.video,
+                        profile=args.profile,
+                        max_attempts=args.max_attempts,
+                        wait=args.wait,
+                    ),
                 )
             )
         elif args.command == "dashboard":
@@ -262,19 +312,24 @@ def main():
                 raise KeyboardInterrupt()
 
             signal.signal(signal.SIGTERM, stop)
-            result = work(
+            result = execute_cli(
                 store,
-                endpoint(),
-                ids=args.video,
-                channel=args.channel,
-                profile=args.profile,
-                limit=args.limit,
-                max_attempts=args.max_attempts,
-                wait=args.wait,
-                keep_audio=args.keep_audio,
-                postprocessing=args.postprocessing,
-                bridge=args.bridge,
-                video_cache=args.video_cache,
+                args,
+                lambda: work(
+                    store,
+                    endpoint(),
+                    ids=args.video,
+                    channel=args.channel,
+                    profile=args.profile,
+                    limit=args.limit,
+                    max_attempts=args.max_attempts,
+                    wait=args.wait,
+                    keep_audio=args.keep_audio,
+                    postprocessing=args.postprocessing,
+                    bridge=args.bridge,
+                    video_cache=args.video_cache,
+                    summary=not args.no_summary,
+                ),
             )
             out(result)
             return int(result["failed"] > 0)
@@ -300,7 +355,7 @@ def main():
                         )
                     ],
                     "completed_jobs": store.db.execute(
-                        "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id JOIN postprocessings p ON p.job_id=j.id WHERE j.state='complete' AND d.state='complete' AND p.state='complete'"
+                        "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id JOIN postprocessings p ON p.job_id=j.id JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary' WHERE j.state='complete' AND d.state='complete' AND p.state='complete' AND a.state='complete'"
                     ).fetchone()[0],
                     "awaiting_diarization": store.db.execute(
                         "SELECT COUNT(*) FROM jobs j LEFT JOIN diarizations d ON d.job_id=j.id WHERE j.state='complete' AND COALESCE(d.state,'pending')!='complete'"
@@ -314,9 +369,26 @@ def main():
                     "awaiting_postprocessing": store.db.execute(
                         "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.state='complete' AND d.state='complete' AND COALESCE(p.state,'pending')!='complete'"
                     ).fetchone()[0],
+                    "artifacts": [
+                        dict(r)
+                        for r in store.db.execute(
+                            "SELECT j.profile,a.workflow,a.state,a.stage,COUNT(*) AS count FROM artifacts a JOIN jobs j ON j.id=a.job_id GROUP BY j.profile,a.workflow,a.state,a.stage"
+                        )
+                    ],
+                    "awaiting_summary": store.db.execute(
+                        "SELECT COUNT(*) FROM jobs j JOIN postprocessings p ON p.job_id=j.id LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary' WHERE p.state='complete' AND COALESCE(a.state,'pending')!='complete'"
+                    ).fetchone()[0],
                 }
             )
             if args.failures:
+                out(
+                    [
+                        dict(r)
+                        for r in store.db.execute(
+                            "SELECT j.video_id,j.profile,a.workflow,a.stage AS failed_stage,a.error,a.attempts,a.save_attempts,a.next_retry FROM artifacts a JOIN jobs j ON j.id=a.job_id WHERE a.state='failed'"
+                        )
+                    ]
+                )
                 out(
                     [
                         dict(r)
@@ -366,14 +438,25 @@ def main():
                 store.subtitles()
                 with sqlite3.connect(dest / "archive.sqlite3") as target:
                     store.db.backup(target)
+                    target.execute("DELETE FROM claims")
+                    target.execute(
+                        "UPDATE submissions SET state='interrupted',pid=NULL WHERE state IN ('queued','active')"
+                    )
                 if (store.root / "transcripts").exists():
                     shutil.copytree(store.root / "transcripts", dest / "transcripts")
                 if (store.root / "audio").exists():
                     shutil.copytree(store.root / "audio", dest / "audio")
+                if (store.root / "artifacts").exists():
+                    shutil.copytree(store.root / "artifacts", dest / "artifacts")
+                if (store.root / "workflows").exists():
+                    shutil.copytree(store.root / "workflows", dest / "workflows")
+                from .publication import export_publications
+
+                export_publications(dest)
                 out(
                     {
                         "exported_to": str(dest),
-                        "includes": "SQLite, transcripts, retained retry audio",
+                        "includes": "SQLite, transcripts, artifacts, workflow definitions, retained retry audio",
                     }
                 )
     except KeyboardInterrupt:

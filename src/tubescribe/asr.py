@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
+
+from .inference import EndpointPolicy, HardwarePolicy, health_request
 
 
 def validate(result: dict):
@@ -49,28 +50,41 @@ def validate(result: dict):
 
 
 class Client:
-    def __init__(self, endpoint: str):
-        url = urlparse(endpoint)
-        if url.scheme != "http" or url.hostname != "127.0.0.1":
-            raise ValueError("ASR endpoint must use http://127.0.0.1 through SSH")
-        self.endpoint = endpoint.rstrip("/")
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        policy=EndpointPolicy(),
+        hardware=HardwarePolicy(),
+        headers=None,
+        transport=None,
+    ):
+        self.endpoint = policy.check(endpoint)
+        self.hardware = hardware
+        self.headers = headers or {}
+        self.transport = transport
 
     def health(self):
-        r = httpx.get(self.endpoint + "/health", timeout=10, trust_env=False)
+        r = health_request(self.endpoint, headers=self.headers, transport=self.transport)
         r.raise_for_status()
         if r.json().get("service") != "tubescribe-asr":
             raise RuntimeError("Forwarded endpoint is not TubeScribe ASR")
         health = r.json()
-        if health.get("device") != "cuda" or "RTX 4090" not in health.get("gpu_name", ""):
-            raise RuntimeError(
-                "ASR must run on beast-3 RTX 4090 with CUDA; CPU fallback is disabled"
-            )
+        try:
+            self.hardware.check(health.get("device"), health.get("gpu_name"))
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
         return health
 
     def transcribe(self, path: Path):
         with (
             path.open("rb") as f,
-            httpx.Client(timeout=httpx.Timeout(7200, connect=10), trust_env=False) as client,
+            httpx.Client(
+                timeout=httpx.Timeout(7200, connect=10),
+                trust_env=False,
+                headers=self.headers,
+                transport=self.transport,
+            ) as client,
         ):
             r = client.post(
                 self.endpoint + "/transcribe",

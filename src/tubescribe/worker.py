@@ -11,7 +11,7 @@ from .asr import Client
 from .diarization_tunnel import ready as ready_diarization
 from .diarization_worker import bind_profile as bind_diarization_profile
 from .diarization_worker import enrich_one
-from .postprocessing_worker import PostprocessingUnavailable, process_one
+from .postprocessing_worker import PostprocessingUnavailable
 from .storage import ProfileChanged, Store, now, worker_lock
 from .tunnel import tunnel
 from .youtube import YouTubeError, download
@@ -66,31 +66,23 @@ def work(
     postprocessing="video",
     bridge=None,
     video_cache=None,
+    summary=True,
+    asr_client=None,
+    diarization_factory=None,
 ):
     if postprocessing not in {"video", "text", "off"}:
         raise ValueError("Postprocessing must be video, text, or off")
+    summary = summary and postprocessing != "off"
     done = failed = 0
     with worker_lock(store.root):
         store.recover()
-        scope = "profile=? AND state='complete' AND EXISTS(SELECT 1 FROM diarizations d WHERE d.job_id=jobs.id AND d.state='complete')"
-        if postprocessing != "off":
-            scope += " AND EXISTS(SELECT 1 FROM postprocessings p WHERE p.job_id=jobs.id AND p.state='complete')"
-        values = [profile]
-        if ids:
-            scope += f" AND video_id IN ({','.join('?' for _ in ids)})"
-            values.extend(ids)
-            found = store.db.execute(
-                f"SELECT COUNT(DISTINCT video_id) FROM jobs WHERE profile=? AND video_id IN ({','.join('?' for _ in ids)})",
-                [profile, *ids],
-            ).fetchone()[0]
-            if found != len(set(ids)):
-                raise ValueError("One or more requested video IDs are not indexed for this profile")
-        if channel:
-            scope += " AND video_id IN (SELECT id FROM videos WHERE channel_id=?)"
-            values.append(channel)
-        skipped = store.db.execute("SELECT COUNT(*) FROM jobs WHERE " + scope, values).fetchone()[0]
+        from .pipeline import Plan
+
+        plan = Plan(True, postprocessing != "off", summary)
+        scope = {"profile": profile, "ids": ids, "channel": channel}
+        skipped = store.completed(plan, **scope)
         log("skip_completed", count=skipped)
-        client = Client(endpoint)
+        client = asr_client or Client(endpoint)
         health = None
         while True:
             jobs = store.jobs(
@@ -100,45 +92,11 @@ def work(
                 max_attempts=max_attempts,
                 require_diarization=True,
                 require_postprocessing=postprocessing != "off",
+                require_summary=summary,
             )
             if not jobs:
                 if wait:
-                    # Wait only for retryable jobs in this worker's scope, never forever for exhausted jobs.
-                    sql = "SELECT MIN(next_retry) FROM jobs WHERE profile=? AND state='failed' AND download_attempts<? AND asr_attempts<?"
-                    args = [profile, max_attempts, max_attempts]
-                    if ids:
-                        sql += f" AND video_id IN ({','.join('?' for _ in ids)})"
-                        args.extend(ids)
-                    if channel:
-                        sql += " AND video_id IN (SELECT id FROM videos WHERE channel_id=?)"
-                        args.append(channel)
-                    due = store.db.execute(sql, args).fetchone()[0]
-                    diar_sql = "SELECT MIN(d.next_retry) FROM diarizations d JOIN jobs j ON j.id=d.job_id WHERE j.profile=? AND j.state='complete' AND d.state IN ('pending','failed') AND d.download_attempts<? AND d.attempts<? AND d.save_attempts<?"
-                    diar_args = [profile, max_attempts, max_attempts, max_attempts]
-                    if ids:
-                        diar_sql += f" AND j.video_id IN ({','.join('?' for _ in ids)})"
-                        diar_args.extend(ids)
-                    if channel:
-                        diar_sql += " AND j.video_id IN (SELECT id FROM videos WHERE channel_id=?)"
-                        diar_args.append(channel)
-                    diar_due = store.db.execute(diar_sql, diar_args).fetchone()[0]
-                    post_due = None
-                    if postprocessing != "off":
-                        post_sql = "SELECT MIN(p.next_retry) FROM postprocessings p JOIN jobs j ON j.id=p.job_id JOIN diarizations d ON d.job_id=j.id WHERE j.profile=? AND j.state='complete' AND d.state='complete' AND p.state IN ('pending','failed') AND p.download_attempts<? AND (p.stage='save' OR p.attempts<?) AND p.save_attempts<?"
-                        post_args = [profile, max_attempts, max_attempts, max_attempts]
-                        if ids:
-                            post_sql += f" AND j.video_id IN ({','.join('?' for _ in ids)})"
-                            post_args.extend(ids)
-                        if channel:
-                            post_sql += (
-                                " AND j.video_id IN (SELECT id FROM videos WHERE channel_id=?)"
-                            )
-                            post_args.append(channel)
-                        post_due = store.db.execute(post_sql, post_args).fetchone()[0]
-                    due = min(
-                        (value for value in (due, diar_due, post_due) if value is not None),
-                        default=None,
-                    )
+                    due = store.next_due(plan, max_attempts=max_attempts, **scope)
                     if due is not None:
                         time.sleep(min(30, max(1, due - time.time())))
                         continue
@@ -150,192 +108,225 @@ def work(
             for row in jobs:
                 if limit is not None and done + failed >= limit:
                     return {"completed": done, "failed": failed, "skipped": skipped}
-                job = dict(row)
-                stage = "diarization" if job["asr_state"] == "complete" else "download"
-                try:
-                    if postprocessing != "off" and job.get("diarization_state") == "complete":
-                        stage = "postprocessing"
-                        done += int(
-                            process_one(
+                from .execution import lease
+
+                with lease(store.root, f"job:{row['id']}"):
+                    job = dict(row)
+                    stage = "diarization" if job["asr_state"] == "complete" else "download"
+
+                    def finish():
+                        from .pipeline import finish as finish_pipeline
+
+                        def entered(name):
+                            nonlocal stage
+                            stage = name
+
+                        return any(
+                            result.changed
+                            for result in finish_pipeline(
                                 store,
                                 job,
                                 bridge=bridge,
                                 mode=postprocessing,
                                 video_cache=video_cache,
+                                summary=summary,
+                                max_attempts=max_attempts,
+                                on_stage=entered,
                             )
                         )
-                        continue
+
                     try:
-                        diarization_client = ready_diarization(store.root)
-                        bind_diarization_profile(store, profile, diarization_client.health())
-                    except Exception as error:
-                        raise InferenceUnavailable(f"Diarization unavailable: {error}") from error
-                    if job["asr_state"] == "complete":
-                        stage = "diarization"
-                        completed = enrich_one(
-                            store, job, diarization_client, keep_audio=keep_audio
-                        )
-                        if postprocessing != "off":
-                            stage = "postprocessing"
-                            completed = process_one(
-                                store,
-                                job,
-                                bridge=bridge,
-                                mode=postprocessing,
-                                video_cache=video_cache,
+                        if postprocessing != "off" and job.get("diarization_state") == "complete":
+                            done += int(finish())
+                            continue
+                        try:
+                            diarization_client = (diarization_factory or ready_diarization)(
+                                store.root
                             )
-                        done += int(completed)
-                        continue
-                    store.bind_profile(profile, ensure_ready(client, store, endpoint))
-                    path = store.root / job["audio_path"] if job["audio_path"] else None
-                    if not path or not path.is_file():
+                            bind_diarization_profile(store, profile, diarization_client.health())
+                        except Exception as error:
+                            raise InferenceUnavailable(
+                                f"Diarization unavailable: {error}"
+                            ) from error
+                        if job["asr_state"] == "complete":
+                            stage = "diarization"
+                            completed = enrich_one(
+                                store, job, diarization_client, keep_audio=keep_audio
+                            )
+                            if postprocessing != "off":
+                                completed = finish() or completed
+                            done += int(completed)
+                            continue
+                        store.bind_profile(profile, ensure_ready(client, store, endpoint))
+                        path = store.root / job["audio_path"] if job["audio_path"] else None
+                        if not path or not path.is_file():
+                            store.update(
+                                job["id"],
+                                state="active",
+                                download_state="active",
+                                download_attempts=job["download_attempts"] + 1,
+                            )
+                            log("download_start", video_id=job["video_id"], title=job["title"])
+                            path, metadata = download(store.root, job["video_id"])
+                            if metadata.get("channel_id") != job["channel_id"]:
+                                raise YouTubeError(
+                                    "Downloaded video channel does not match indexed channel"
+                                )
+                            job["title"] = metadata.get("title") or job["title"]
+                            job["duration"] = metadata.get("duration")
+                            store.update_video(job, metadata)
+                            job["audio_path"] = str(path.relative_to(store.root))
+                            store.update(
+                                job["id"],
+                                audio_path=job["audio_path"],
+                                download_state="complete",
+                                download_attempts=0,
+                            )
+                            log(
+                                "download_complete",
+                                video_id=job["video_id"],
+                                bytes=path.stat().st_size,
+                            )
+                        stage = "asr"
+                        store.bind_profile(profile, ensure_ready(client, store, endpoint))
                         store.update(
                             job["id"],
                             state="active",
-                            download_state="active",
-                            download_attempts=job["download_attempts"] + 1,
+                            asr_state="active",
+                            asr_attempts=job["asr_attempts"] + 1,
                         )
-                        log("download_start", video_id=job["video_id"], title=job["title"])
-                        path, metadata = download(store.root, job["video_id"])
-                        if metadata.get("channel_id") != job["channel_id"]:
-                            raise YouTubeError(
-                                "Downloaded video channel does not match indexed channel"
+                        log("asr_start", video_id=job["video_id"])
+                        result = client.transcribe(path)
+                        # Recheck each result: a remote deployment may change mid-import.
+                        store.bind_profile(profile, result)
+                        expected = job.get("duration")
+                        if expected and abs(result["duration"] - expected) > max(
+                            5, expected * 0.01
+                        ):
+                            raise ValueError(
+                                "Decoded audio duration differs from video metadata; audio retained for inspection"
                             )
-                        job["title"] = metadata.get("title") or job["title"]
-                        job["duration"] = metadata.get("duration")
-                        with store.db:
-                            store.db.execute(
-                                "UPDATE videos SET title=?,duration=?,published_at=? WHERE id=?",
-                                (
-                                    job["title"],
-                                    metadata.get("duration"),
-                                    str(
-                                        metadata.get("timestamp")
-                                        or metadata.get("upload_date")
-                                        or ""
-                                    ),
-                                    job["video_id"],
-                                ),
-                            )
-                        job["audio_path"] = str(path.relative_to(store.root))
+                        stage = "save"
+                        store.save(job, result, keep_audio=True)
+                        stage = "diarization"
+                        enrich_one(store, job, diarization_client, keep_audio=keep_audio)
+                        if postprocessing != "off":
+                            finish()
+                        done += 1
+                        log(
+                            "complete",
+                            video_id=job["video_id"],
+                            duration=result["duration"],
+                            processing_seconds=result["processing_seconds"],
+                            speed=result["duration"] / result["processing_seconds"],
+                        )
+                    except (KeyboardInterrupt, SystemExit):
+                        if stage in {"diarization", "postprocessing", "summary"}:
+                            raise
                         store.update(
                             job["id"],
-                            audio_path=job["audio_path"],
-                            download_state="complete",
-                            download_attempts=0,
+                            state="pending",
+                            **{
+                                (
+                                    "download_state" if stage == "download" else "asr_state"
+                                ): "pending"
+                            },
+                            **{
+                                (
+                                    "download_attempts" if stage == "download" else "asr_attempts"
+                                ): job[
+                                    "download_attempts" if stage == "download" else "asr_attempts"
+                                ]
+                            },
                         )
-                        log(
-                            "download_complete", video_id=job["video_id"], bytes=path.stat().st_size
-                        )
-                    stage = "asr"
-                    store.bind_profile(profile, ensure_ready(client, store, endpoint))
-                    store.update(
-                        job["id"],
-                        state="active",
-                        asr_state="active",
-                        asr_attempts=job["asr_attempts"] + 1,
-                    )
-                    log("asr_start", video_id=job["video_id"])
-                    result = client.transcribe(path)
-                    # Recheck each result: a remote deployment may change mid-import.
-                    store.bind_profile(profile, result)
-                    expected = job.get("duration")
-                    if expected and abs(result["duration"] - expected) > max(5, expected * 0.01):
-                        raise ValueError(
-                            "Decoded audio duration differs from video metadata; audio retained for inspection"
-                        )
-                    stage = "save"
-                    store.save(job, result, keep_audio=True)
-                    stage = "diarization"
-                    enrich_one(store, job, diarization_client, keep_audio=keep_audio)
-                    if postprocessing != "off":
-                        stage = "postprocessing"
-                        process_one(
-                            store, job, bridge=bridge, mode=postprocessing, video_cache=video_cache
-                        )
-                    done += 1
-                    log(
-                        "complete",
-                        video_id=job["video_id"],
-                        duration=result["duration"],
-                        processing_seconds=result["processing_seconds"],
-                        speed=result["duration"] / result["processing_seconds"],
-                    )
-                except (KeyboardInterrupt, SystemExit):
-                    if stage in {"diarization", "postprocessing"}:
                         raise
-                    store.update(
-                        job["id"],
-                        state="pending",
-                        **{("download_state" if stage == "download" else "asr_state"): "pending"},
-                        **{
-                            ("download_attempts" if stage == "download" else "asr_attempts"): job[
-                                "download_attempts" if stage == "download" else "asr_attempts"
-                            ]
-                        },
-                    )
-                    raise
-                except Exception as e:
-                    kind = e.kind if isinstance(e, YouTubeError) else stage
-                    attempts = (
-                        job["download_attempts" if stage == "download" else "asr_attempts"] + 1
-                    )
-                    delay = 1800 if kind == "rate_limit" else min(1800, 60 * 2 ** (attempts - 1))
-                    if stage in {"diarization", "postprocessing"}:
+                    except Exception as e:
+                        kind = e.kind if isinstance(e, YouTubeError) else stage
+                        attempts = (
+                            job["download_attempts" if stage == "download" else "asr_attempts"] + 1
+                        )
+                        delay = (
+                            1800 if kind == "rate_limit" else min(1800, 60 * 2 ** (attempts - 1))
+                        )
+                        if stage in {"diarization", "postprocessing", "summary"}:
+                            failed += 1
+                            log("failed", video_id=job["video_id"], stage=stage, error=str(e))
+                            if isinstance(
+                                e, (InferenceUnavailable, PostprocessingUnavailable)
+                            ) or isinstance(
+                                e, (httpx.TransportError, httpx.HTTPStatusError, ProfileChanged)
+                            ):
+                                log(
+                                    "queue_paused",
+                                    reason=f"{stage} paused: {e}; prior checkpoints retained",
+                                )
+                                return {"completed": done, "failed": failed, "skipped": skipped}
+                            # A failure before stage bookkeeping must not spin on the same job.
+                            if any(
+                                r["id"] == job["id"]
+                                for r in store.jobs(
+                                    **scope,
+                                    max_attempts=max_attempts,
+                                    require_diarization=True,
+                                    require_postprocessing=postprocessing != "off",
+                                    require_summary=summary,
+                                )
+                            ):
+                                log(
+                                    "queue_paused",
+                                    reason="Stage failed before a retry checkpoint was recorded: "
+                                    + str(e),
+                                )
+                                return {"completed": done, "failed": failed, "skipped": skipped}
+                            if kind == "rate_limit":
+                                log(
+                                    "backoff",
+                                    reason=f"YouTube rate limit during {stage}; pausing the queue",
+                                )
+                                if not wait:
+                                    return {"completed": done, "failed": failed, "skipped": skipped}
+                                for _ in range(delay // 30):
+                                    time.sleep(30)
+                                break
+                            continue
+                        store.update(
+                            job["id"],
+                            state="failed",
+                            failed_stage=stage,
+                            error_kind=kind,
+                            error=str(e),
+                            next_retry=time.time() + delay,
+                            **{
+                                ("download_state" if stage == "download" else "asr_state"): "failed"
+                            },
+                        )
                         failed += 1
-                        log("failed", video_id=job["video_id"], stage=stage, error=str(e))
-                        if isinstance(
-                            e, (InferenceUnavailable, PostprocessingUnavailable)
-                        ) or isinstance(e, (httpx.TransportError, ProfileChanged)):
+                        log(
+                            "failed",
+                            video_id=job["video_id"],
+                            stage=stage,
+                            kind=kind,
+                            error=str(e),
+                            retry_after_seconds=delay,
+                        )
+                        if isinstance(e, ProfileChanged):
+                            log("queue_paused", reason=str(e))
+                            return {"completed": done, "failed": failed, "skipped": skipped}
+                        if isinstance(e, InferenceUnavailable):
                             log(
                                 "queue_paused",
-                                reason=f"{stage} paused: {e}; prior checkpoints retained",
+                                reason="ASR unavailable; audio retained, no further downloads",
                             )
                             return {"completed": done, "failed": failed, "skipped": skipped}
                         if kind == "rate_limit":
                             log(
                                 "backoff",
-                                reason=f"YouTube rate limit during {stage}; pausing the queue",
+                                reason="YouTube rate limit or bot check; pausing the queue",
                             )
                             if not wait:
                                 return {"completed": done, "failed": failed, "skipped": skipped}
                             for _ in range(delay // 30):
                                 time.sleep(30)
                             break
-                        continue
-                    store.update(
-                        job["id"],
-                        state="failed",
-                        failed_stage=stage,
-                        error_kind=kind,
-                        error=str(e),
-                        next_retry=time.time() + delay,
-                        **{("download_state" if stage == "download" else "asr_state"): "failed"},
-                    )
-                    failed += 1
-                    log(
-                        "failed",
-                        video_id=job["video_id"],
-                        stage=stage,
-                        kind=kind,
-                        error=str(e),
-                        retry_after_seconds=delay,
-                    )
-                    if isinstance(e, ProfileChanged):
-                        log("queue_paused", reason=str(e))
-                        return {"completed": done, "failed": failed, "skipped": skipped}
-                    if isinstance(e, InferenceUnavailable):
-                        log(
-                            "queue_paused",
-                            reason="ASR unavailable; audio retained, no further downloads",
-                        )
-                        return {"completed": done, "failed": failed, "skipped": skipped}
-                    if kind == "rate_limit":
-                        log("backoff", reason="YouTube rate limit or bot check; pausing the queue")
-                        if not wait:
-                            return {"completed": done, "failed": failed, "skipped": skipped}
-                        for _ in range(delay // 30):
-                            time.sleep(30)
-                        break
     log("worker_finished", completed=done, failed=failed, skipped=skipped)
     return {"completed": done, "failed": failed, "skipped": skipped}
