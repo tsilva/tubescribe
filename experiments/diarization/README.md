@@ -1,34 +1,26 @@
 # Speaker diarization trial
 
-This experiment tests speaker tagging on beast-3’s RTX 4090. NVIDIA Nemotron 3 completed the interview and monologue control; pyannote Community-1 remains an optional gated comparison. Production now uses a separate resident Nemotron service and the archive worker includes diarization; see the [main README](../../README.md#remote-speaker-diarization). This trial stays independent. The isolated project and committed lock preserve the seven-day age cutoff and bad-package constraints. Both runners verify CUDA/RTX 4090 and at least 2 GiB free VRAM, reuse their loaded model across sequential runs, record provenance and timings, and exit afterward.
+NVIDIA Nemotron 3 completed the interview and monologue control on beast-3's RTX 4090. Production uses a separate resident Nemotron service; see the [main README](../../README.md#remote-speaker-diarization). The Nemotron runner and review tools remain available and use the repository's patched dependency lock. They verify CUDA/RTX 4090 and at least 2 GiB free VRAM, record provenance and timings, and exit after the trial.
 
-The prepared remote environment is `~/.local/share/tubescribe/diarization-trial`. Transfer this directory’s source files and the repository’s `uv.toml` there. Supply mono 16 kHz PCM16 WAV files, including an optional single-speaker control.
+The optional Pyannote comparison is retired as of 2026-10-10. Its incompatible, vulnerable Torch/audio environment is no longer an installable project in this checkout. Historical source, manifests and the lock are recoverable from [revision 795322b2ba92](https://github.com/tsilva/tubescribe/tree/795322b2ba922dce09665a89bd4afdae906d5be9/experiments/diarization). Restoration requires a separately reviewed, compatible patched dependency stack. Do not launch a previously prepared trial environment.
 
 ## Nemotron 3: tested without authentication
 
-[NVIDIA Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) runs through the released Transformers 5.18.0 package in the optional `nemotron` extra. The runner pins revision `f667ed73aee57d40cc39428eb768b4fd87a0a29e` and explicitly downloads without a token. No Git dependency or package-age exception is needed.
+[NVIDIA Nemotron 3 Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) runs through the released Transformers 5.18.0 package in the root project’s `diarization` extra. The runner pins revision `f667ed73aee57d40cc39428eb768b4fd87a0a29e` and explicitly downloads without a token. No Git dependency or package-age exception is needed.
 
 ```bash
-cd ~/.local/share/tubescribe/diarization-trial
-~/.local/bin/uv --config-file uv.toml sync --locked --extra nemotron --python 3.12 --no-dev
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python run_nemotron.py interview.wav prediction.json --control monologue.wav
+cd /path/to/tubescribe
+uv --config-file uv.toml sync --locked --extra diarization --python 3.12 --no-dev
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python experiments/diarization/run_nemotron.py interview.wav prediction.json --control monologue.wav
 ```
 
 The runner records overlapping speaker activity and a derived exclusive timeline, choosing the highest activity probability during overlap for word assignment. Raw overlapping turns remain available. It does not require a supplied speaker count.
 
 On 2026-10-09, the ten-minute interview produced two speakers in 1.025 seconds after model loading, with 461 MiB peak PyTorch allocation. The 30-second Jordi monologue produced one speaker in 0.043 seconds. Later reference intervals showed 97.9% label agreement over 412.34 seconds of predicted speech, covering 84.7% of the 487 seconds of reference intervals. Reference intervals include pauses. These are sample results, not general accuracy or a comparison against pyannote. The local evidence is under ignored `data/diarization/`, including `prediction.json`, `evaluation.json`, `report.md`, and `nemotron_automatic.srt`.
 
-## Pyannote Community-1: optional comparison
+## Pyannote Community-1: retired comparison
 
-Accept the model’s [access conditions](https://huggingface.co/pyannote/speaker-diarization-community-1) and configure a read token using `hf auth login` on beast-3. Tokens remain in the normal Hugging Face credential store, outside this repository. Do not put a token in commands, transcripts, or logs. This comparison has not run because model access was unavailable.
-
-```bash
-cd ~/.local/share/tubescribe/diarization-trial
-~/.local/bin/uv --config-file uv.toml sync --locked --python 3.12 --no-dev
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python run.py interview.wav prediction.json
-```
-
-PyTorch/torchaudio 2.8 and TorchCodec 0.7 are paired deliberately. Beast-3 has FFmpeg 8; this runner supplies the predecoded WAV in memory, avoiding TorchCodec’s FFmpeg 4–7 decoder limitation. A decoder warning is expected at import. The runner pins the model revision and records automatic speaker count and a known-two-speakers comparison, including regular/exclusive diarization.
+This comparison never ran because gated model access was unavailable. The available Torch/torchaudio pair retains a Torch vulnerability and constrains setuptools below its patched release; forcing mismatched native binaries is unsupported. The historical runner remains as reference source, but its entry point exits before importing dependencies or loading a model. Recovery instructions and the original paired environment are in the revision linked above.
 
 ## Review and subtitle export
 
@@ -44,12 +36,6 @@ Review writes `evaluation.json` plus `<run-label>.json`, `.txt`, `.srt`, and `.m
 
 Markdown merges consecutive cues from the same voice into turns with a speaker-name prefix. The known names come from the reference-guided mapping; unidentified voices keep their recorded IDs. It preserves the ASR text and omits cue timestamps for reading.
 
-## Dependency security blocker
+## Dependency security
 
-The historical Pyannote comparison remains on its old paired Torch/audio stack
-and has open Torch security alerts. Do not restore or run it until that stack
-passes a fresh security review. The available torchaudio 2.11 requires Torch
-2.11, which still lacks the future-callback fix and constrains setuptools below
-its patched release. Forcing torchaudio onto Torch 2.13 would break the supported
-binary pairing. The independent production dependency lock uses patched Torch 2.13; updating
-the lock does not upgrade an already running service.
+The root lock uses patched Torch 2.13 and supplies the maintained Nemotron trial. The old Pyannote environment is retired, rather than upgraded through an incompatible binary pairing. Removing its dependency project does not remove source history, saved results, or model caches.

@@ -18,6 +18,11 @@ REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
 
 
 def main():
+    raise SystemExit(
+        "The optional Pyannote comparison is retired because its paired audio stack "
+        "has unresolved security issues. See this directory's README for recovery history."
+    )
+
     import numpy as np
     import torch
     from pyannote.audio import Pipeline
