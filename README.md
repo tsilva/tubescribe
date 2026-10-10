@@ -235,7 +235,8 @@ postprocessing; `--no-summary` skips the default final step. The built-in `summa
 with a hard 650-word limit: central thesis, major insights, mechanisms, consequential
 numbers, and caveats. Delivering roughly 95% of useful insight is an editorial objective,
 not a measured accuracy claim. Summaries link to at most three saved screenshots instead
-of embedding them, and their preview includes a compact A4 print layout.
+of embedding them, and their preview includes a compact A4 print layout using
+10-point type and one continuous list across blank-separated bullets.
 
 ```bash
 scripts/tubescribe artifacts --video VIDEO_ID                    # build/retry summary directly
@@ -335,6 +336,12 @@ uv --config-file uv.toml run --locked python -m unittest discover -s tests -v
 ```
 
 Tests cover duplicate indexing, completed-job skips, independent ASR/diarization/postprocessing state, speaker-word assignment and unmatched speech, inference failure with media reuse, native image tool delivery, checkpoint integrity, failed durable writes, repair without repeated inference, exclusive workers, interrupted-stage recovery, bounded attempts/backoff, force limits, absent tabs vs bot checks, explicit upgrade profiles, RTX 4090 enforcement, tunnel reconnection, offline batch suspension, downloader process cleanup, dashboard state and figure downloads, and timestamp/schema validation. The initial ASR smoke run processed three videos and reran those IDs to check completed-job skips. Final-stage integration was separately verified on an existing diarized source. Runtime quality/speed results are recorded in ignored `data/quality/`; channel history is complete only when its recorded jobs establish completion.
+
+### Verified full pipeline (10 October 2026)
+
+Three fresh jobs (`VPuzUZlvk0U`, `Domk77rYJhU`, `xFhSliUKP1I`) under the explicit `turbo-torch213` profile completed download → ASR → diarization → screenshot-assisted Markdown → summary: **96.8 minutes of source in 24.9 minutes of wall-clock time**. Six AgentBridge turns using `codex/gpt-6.1-sol` with high reasoning took 20.3 minutes combined, consuming **305,479 uncached input tokens**, 1,583,360 cached input tokens, and 45,532 output tokens. All 18,115 ASR words/timestamps/confidence values were preserved; one closing word remains `UNKNOWN`. The 577–613-word summaries passed 62 exact evidence-quote checks and print as one A4 page each. Source video caches were deleted; a rerun with inference endpoints offline skipped all three. Repackaging reused saved model responses without another agent call.
+
+The **149-test** suite includes real SIGTERM interruption/recovery during postprocessing and summary model execution and packaging. Manual review checked major arguments, speaker-name evidence and eight selected screenshots. These recordings share one English presenter; preservation, quote provenance and editorial coverage do not establish human-reference WER/DER, multi-speaker generality or a measured 95% insight score. Per-video metrics, caveats, logs and printed PDFs are in `data/quality/runtime-validation-20261010/review.md` and its accompanying JSON files.
 
 ### Verified first run (9 October 2026)
 

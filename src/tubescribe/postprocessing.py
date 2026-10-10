@@ -1199,7 +1199,7 @@ def render_preview(markdown: str, title: str) -> str:
         heading = re.fullmatch(r"(#{1,4})\s+(.+)", line)
         figure = re.fullmatch(r"!\[([^\]]*)\]\((figures/[A-Za-z0-9_-]+\.png)\)", line.strip())
         bullet = re.fullmatch(r"[-*]\s+(.+)", line)
-        if not bullet:
+        if not bullet and line.strip():
             flush_items()
         if bullet:
             flush()

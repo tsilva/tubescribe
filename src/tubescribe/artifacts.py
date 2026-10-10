@@ -592,7 +592,7 @@ def render_artifact(markdown, title, transcript_url):
     )
     page = page.replace(
         "</style>",
-        "@page{size:A4;margin:16mm}body{font-size:16px;line-height:1.5}h2{margin-top:24px;font-size:20px}p{margin:12px 0}li{margin:7px 0}@media print{header,nav{display:none}main{max-width:none;padding:0}body{background:white;font-size:11pt;line-height:1.35}h1{font-size:18pt}h2{font-size:13pt;margin-top:14pt}p{margin:6pt 0}li{margin:4pt 0}a{color:inherit}}</style>",
+        "@page{size:A4;margin:16mm}body{font-size:16px;line-height:1.5}h2{margin-top:24px;font-size:20px}p{margin:12px 0}li{margin:7px 0}@media print{header,nav{display:none}main{max-width:none;padding:0}body{background:white;font-size:10pt;line-height:1.25}h1{font-size:16pt}h2{font-size:12pt;margin-top:10pt}p{margin:5pt 0}ul{margin:5pt 0;padding-left:14pt}li{margin:4pt 0;break-inside:avoid}a{color:inherit}}</style>",
     )
     return page
 

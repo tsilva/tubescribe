@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 import httpx
 import test_postprocessing_pipeline as pipeline
 
-from tubescribe.artifacts import build_one, digest, run, validate, workflow
+from tubescribe.artifacts import build_one, digest, render_artifact, run, validate, workflow
 from tubescribe.dashboard import make_server
 from tubescribe.postprocessing_worker import run as postprocess
 from tubescribe.storage import atomic_write
@@ -22,6 +22,18 @@ PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMWQAAAAASUVORK5CYII="
 )
 QUOTE = "The key argument is that structural changes weaken old signals."
+
+
+class ArtifactRendering(unittest.TestCase):
+    def test_blank_lines_between_summary_bullets_keep_one_list(self):
+        page = render_artifact(
+            "# Summary\n\n- First insight.\n\n- Second insight.\n\nFinal caveat.",
+            "Summary",
+            "/processed/1/preview.html",
+        )
+        self.assertEqual(page.count("<ul>"), 1)
+        self.assertIn("<li>First insight.</li><li>Second insight.</li>", page)
+        self.assertIn("</ul><p>Final caveat.</p>", page)
 
 
 class Artifacts(unittest.TestCase):
