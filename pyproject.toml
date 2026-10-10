@@ -20,6 +20,10 @@ asr = [
     "nvidia-cudnn-cu12>=9.1; sys_platform == 'linux'",
     "av<17",
 ]
+cloud = [
+    "boto3>=1.35",
+    "psycopg[binary]>=3.2",
+]
 
 [project.scripts]
 tubescribe = "tubescribe.cli:main"
@@ -35,6 +39,9 @@ constraint-dependencies = ["mistralai!=2.4.6", "guardrails-ai!=0.10.1"]
 [dependency-groups]
 dev = [
     "ruff>=0.16.10",
+]
+rehearsal = [
+    "moto[s3,server]>=5.0",
 ]
 
 [tool.ruff]

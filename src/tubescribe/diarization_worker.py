@@ -7,8 +7,8 @@ import time
 import httpx
 
 from .diarization import Client, assign_speakers, validate
-from .execution import job_stage
-from .storage import ProfileChanged, atomic_write, now, worker_lock
+from .execution import capacity, job_stage, pipeline_lock
+from .storage import ProfileChanged, atomic_write, now
 from .youtube import YouTubeError, download
 
 ATTEMPTS = {"download": "download_attempts", "diarization": "attempts", "save": "save_attempts"}
@@ -112,7 +112,8 @@ def enrich_one(store, job, client, *, keep_audio=False):
                     error=None,
                 )
                 log("diarization_download_start", video_id=job["video_id"], title=job["title"])
-                path, metadata = download(store.root, job["video_id"], concurrent_fragments=2)
+                with capacity(store.root, "download"):
+                    path, metadata = download(store.root, job["video_id"], concurrent_fragments=2)
                 if metadata.get("channel_id") != job["channel_id"]:
                     raise ValueError("Downloaded audio channel identity differs")
             update(store, job["id"], audio_path=store.persist_media(path), download_attempts=0)
@@ -141,7 +142,8 @@ def enrich_one(store, job, client, *, keep_audio=False):
                 error=None,
             )
             log("diarization_start", video_id=job["video_id"], title=job["title"])
-            prediction = client.diarize(path)
+            with capacity(store.root, "gpu"):
+                prediction = client.diarize(path)
             bind_profile(store, job["profile"], prediction)
             if abs(prediction["duration"] - asr["duration"]) > max(5, asr["duration"] * 0.01):
                 raise ValueError("Diarization audio duration differs from saved ASR")
@@ -244,7 +246,7 @@ def run(store, endpoint, *, ids=None, profile="turbo-v1", max_attempts=3, wait=F
     from .inference import client_options
 
     client = Client(endpoint, **client_options())
-    with worker_lock(store.root):
+    with pipeline_lock(store.root):
         store.recover()
         client.health()
         scope = store.stage_inputs("asr", profile=profile, ids=ids, order="id")

@@ -17,8 +17,9 @@ from urllib.parse import urlsplit
 import httpx
 
 from .blobs import atomic_write
-from .config import RuntimeConfig, database_path
-from .execution import lease
+from .config import RuntimeConfig
+from .database import clock, connect, database_errors, serialize
+from .execution import capacity, lease
 from .inference import AgentRunner, LocalTools
 from .storage import Store, durable_writes
 
@@ -30,13 +31,8 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS agent_runs (
 
 class Runs:
     def __init__(self, root):
-        import sqlite3
-
         self.root = Path(root)
-        self.db = sqlite3.connect(database_path(root), timeout=30)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute(SCHEMA)
-        self.db.commit()
+        self.db = connect(root)
 
     def get(self, identifier):
         row = self.db.execute("SELECT * FROM agent_runs WHERE id=?", (identifier,)).fetchone()
@@ -48,13 +44,13 @@ class Runs:
         raw = json.dumps(payload, sort_keys=True)
         fingerprint = hashlib.sha256(raw.encode()).hexdigest()
         with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
+            serialize(self.db, "agent-run:" + identifier)
             row = self.get(identifier)
             if row:
                 if row["fingerprint"] != fingerprint:
                     raise ValueError("Idempotency key reused for a different request")
                 return row, False
-            stamp = time.time()
+            stamp = clock(self.db)
             self.db.execute(
                 "INSERT INTO agent_runs VALUES(?,?,?,?,?,?,?,?,?)",
                 (identifier, fingerprint, raw, "queued", None, None, stamp, stamp, 0),
@@ -68,7 +64,7 @@ class Runs:
             from .execution import assert_owned
 
             assert_owned(self.db, self.root)
-            values["updated"] = time.time()
+            values["updated"] = clock(self.db)
             self.db.execute(
                 "UPDATE agent_runs SET " + ",".join(k + "=?" for k in values) + " WHERE id=?",
                 (*values.values(), identifier),
@@ -79,20 +75,20 @@ class Runs:
         for row in self.db.execute("SELECT * FROM agent_runs WHERE state='active'").fetchall():
             if self.db.execute(
                 "SELECT 1 FROM claims WHERE resource=? AND expires>?",
-                ("agent-run:" + row["id"], time.time()),
+                ("agent-run:" + row["id"], clock(self.db)),
             ).fetchone():
                 continue
             store = Store(self.root)
             try:
                 with self.db:
-                    self.db.execute("BEGIN IMMEDIATE")
+                    serialize(self.db, "agent-run:" + row["id"])
                     # Serialize with completion and replacement ownership before repairing state.
                     current = self.get(row["id"])
                     if (
                         current["state"] != "active"
                         or self.db.execute(
                             "SELECT 1 FROM claims WHERE resource=? AND expires>?",
-                            ("agent-run:" + row["id"], time.time()),
+                            ("agent-run:" + row["id"], clock(self.db)),
                         ).fetchone()
                     ):
                         continue
@@ -110,7 +106,7 @@ class Runs:
                             None
                             if saved
                             else "Gateway interrupted during upstream execution; explicit operator retry required",
-                            time.time(),
+                            clock(self.db),
                             row["id"],
                         ),
                     )
@@ -163,7 +159,8 @@ def execute(root, identifier, upstream, *, runner_factory=AgentRunner):
                     tools = LocalTools(lambda token: figure_handler(figures, token))
                 else:
                     raise ValueError("Unknown durable tool context")
-                result = runner_factory(upstream).run(request, tools)
+                with capacity(root, "agent"):
+                    result = runner_factory(upstream).run(request, tools)
                 if kind == "postprocessing":
                     result["tool_state"] = (
                         {
@@ -210,8 +207,12 @@ def make_gateway(root, upstream, *, port=0, runner_factory=AgentRunner):
     if not config.access_token:
         raise ValueError("Agent gateway requires TUBESCRIBE_ACCESS_TOKEN")
     executor = ThreadPoolExecutor(max_workers=config.agent_concurrency)
-    # Exclusive daemon claim prevents another gateway from recovering live upstream runs.
-    owner = lease(root, "agent-gateway", reentrant=False)
+    # Local mode retains exclusive gateway ownership; network runs have individual leases.
+    owner = lease(
+        root,
+        "agent-gateway:" + config.worker_id if config.network else "agent-gateway",
+        reentrant=False,
+    )
     owner.__enter__()
     with closing(Runs(root)) as runs:
         pending = runs.recover()
@@ -286,6 +287,8 @@ def make_gateway(root, upstream, *, port=0, runner_factory=AgentRunner):
                 self.route()
             except (ValueError, KeyError, TypeError) as error:
                 self.send({"error": str(error)}, 400)
+            except (OSError, *database_errors()):
+                self.send({"error": "Durable services unavailable; retry the same run ID"}, 503)
             except (BrokenPipeError, ConnectionResetError):
                 pass
 

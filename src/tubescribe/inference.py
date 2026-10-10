@@ -182,7 +182,19 @@ def configured_runner(store, endpoint, run_key):
         if os.environ.get("TUBESCRIBE_INFERENCE_TOKEN")
         else None
     )
-    return AgentRunner(endpoint, policy=EndpointPolicy(local=not remote), headers=headers)
+    runner = AgentRunner(endpoint, policy=EndpointPolicy(local=not remote), headers=headers)
+    return CapacityAgentRunner(runner, store.root)
+
+
+class CapacityAgentRunner:
+    def __init__(self, runner, root):
+        self.runner, self.root = runner, root
+
+    def run(self, request, tools):
+        from .execution import capacity
+
+        with capacity(self.root, "agent"):
+            return self.runner.run(request, tools)
 
 
 def client_options():

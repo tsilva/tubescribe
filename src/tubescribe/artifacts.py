@@ -12,11 +12,11 @@ from pathlib import Path
 
 import httpx
 
-from .execution import job_stage
+from .execution import job_stage, pipeline_lock
 from .inference import LocalTools
 from .postprocessing import render_preview
 from .postprocessing_worker import archive_path, bridge_endpoint, digest, log, ready
-from .storage import atomic_write, now, worker_lock
+from .storage import atomic_write, now
 
 SUMMARY = {
     "title": "One-page summary",
@@ -236,28 +236,37 @@ def complete_valid(store, row):
 
 
 def recover(store):
-    """Called under the archive lock before selecting pipeline work."""
+    """Repair idle jobs before selecting pipeline work."""
     store.reset_interrupted("artifact")
     for row in store.stage_records("artifact", states=("complete",)):
-        try:
-            changed = inputs(store, row["job_id"], row["workflow"])[-2:] != (
-                row["input_sha256"],
-                row["workflow_sha256"],
-            )
-        except (OSError, ValueError, KeyError):
-            # Earlier source stages own repairs; rebuild from them once they finish.
-            changed = True
-        if changed or not complete_valid(store, row):
-            update(
-                store,
-                row["job_id"],
-                row["workflow"],
-                state="pending",
-                next_retry=0,
-                attempts=0,
-                save_attempts=0,
-                error="Artifact repair or regeneration queued",
-            )
+        from .execution import recovery_job
+
+        with recovery_job(store, row["job_id"]) as idle:
+            if not idle:
+                continue
+            if store.config.network:
+                row = store.stage_row("artifact", row["job_id"], workflow=row["workflow"])
+                if row["state"] != "complete":
+                    continue
+            try:
+                changed = inputs(store, row["job_id"], row["workflow"])[-2:] != (
+                    row["input_sha256"],
+                    row["workflow_sha256"],
+                )
+            except (OSError, ValueError, KeyError):
+                # Earlier source stages own repairs; rebuild from them once they finish.
+                changed = True
+            if changed or not complete_valid(store, row):
+                update(
+                    store,
+                    row["job_id"],
+                    row["workflow"],
+                    state="pending",
+                    next_retry=0,
+                    attempts=0,
+                    save_attempts=0,
+                    error="Artifact repair or regeneration queued",
+                )
 
 
 def summary_row(store, job_id):
@@ -667,10 +676,10 @@ def run(
     max_attempts=3,
     wait=False,
 ):
-    # The shared archive lock keeps source replacement and artifact publication serialized.
+    # Lifetime and per-job ownership fence source replacement and publication.
     while True:
         try:
-            with worker_lock(store.root):
+            with pipeline_lock(store.root):
                 return run_locked(
                     store,
                     name=name,

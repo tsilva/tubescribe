@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [[ -n "${TUBESCRIBE_DATABASE_URL:-}" || -n "${TUBESCRIBE_S3_BUCKET:-}" ]]; then
+  exec uv --config-file uv.toml run --locked --inexact --extra cloud tubescribe "$@"
+fi
 exec uv --config-file uv.toml run --locked tubescribe "$@"

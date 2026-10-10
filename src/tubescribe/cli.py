@@ -301,12 +301,9 @@ def main():
                 store.channel(channel)
                 out(channel)
             else:
-                out([dict(r) for r in store.db.execute("SELECT * FROM channels")])
+                out(store.channels())
         elif args.command in ("sync", "latest"):
-            channels = store.db.execute(
-                "SELECT * FROM channels" + (" WHERE id=?" if args.channel else ""),
-                (args.channel,) if args.channel else (),
-            ).fetchall()
+            channels = store.channels(args.channel)
             if not channels:
                 raise ValueError("No matching channels; add one first")
             errors = 0
@@ -388,85 +385,10 @@ def main():
             out(result)
             return int(result["failed"] > 0)
         elif args.command == "status":
-            out(
-                {
-                    "jobs": [
-                        dict(r)
-                        for r in store.db.execute(
-                            "SELECT profile,state,download_state,asr_state,count(*) AS count FROM jobs GROUP BY profile,state,download_state,asr_state"
-                        )
-                    ],
-                    "discovery": [dict(r) for r in store.db.execute("SELECT * FROM discovery")],
-                    "transcripts": dict(
-                        store.db.execute(
-                            "SELECT COUNT(*) AS count, SUM(duration) AS audio_seconds,SUM(processing_seconds) AS asr_seconds FROM transcripts"
-                        ).fetchone()
-                    ),
-                    "diarization": [
-                        dict(r)
-                        for r in store.db.execute(
-                            "SELECT j.profile,d.state,d.stage,COUNT(*) AS count FROM diarizations d JOIN jobs j ON j.id=d.job_id GROUP BY j.profile,d.state,d.stage"
-                        )
-                    ],
-                    "completed_jobs": store.db.execute(
-                        "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id JOIN postprocessings p ON p.job_id=j.id JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary' WHERE j.state='complete' AND d.state='complete' AND p.state='complete' AND a.state='complete'"
-                    ).fetchone()[0],
-                    "awaiting_diarization": store.db.execute(
-                        "SELECT COUNT(*) FROM jobs j LEFT JOIN diarizations d ON d.job_id=j.id WHERE j.state='complete' AND COALESCE(d.state,'pending')!='complete'"
-                    ).fetchone()[0],
-                    "postprocessing": [
-                        dict(r)
-                        for r in store.db.execute(
-                            "SELECT j.profile,p.state,p.stage,COUNT(*) AS count FROM postprocessings p JOIN jobs j ON j.id=p.job_id GROUP BY j.profile,p.state,p.stage"
-                        )
-                    ],
-                    "awaiting_postprocessing": store.db.execute(
-                        "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.state='complete' AND d.state='complete' AND COALESCE(p.state,'pending')!='complete'"
-                    ).fetchone()[0],
-                    "artifacts": [
-                        dict(r)
-                        for r in store.db.execute(
-                            "SELECT j.profile,a.workflow,a.state,a.stage,COUNT(*) AS count FROM artifacts a JOIN jobs j ON j.id=a.job_id GROUP BY j.profile,a.workflow,a.state,a.stage"
-                        )
-                    ],
-                    "awaiting_summary": store.db.execute(
-                        "SELECT COUNT(*) FROM jobs j JOIN postprocessings p ON p.job_id=j.id LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary' WHERE p.state='complete' AND COALESCE(a.state,'pending')!='complete'"
-                    ).fetchone()[0],
-                }
-            )
+            out(store.status_data())
             if args.failures:
-                out(
-                    [
-                        dict(r)
-                        for r in store.db.execute(
-                            "SELECT j.video_id,j.profile,a.workflow,a.stage AS failed_stage,a.error,a.attempts,a.save_attempts,a.next_retry FROM artifacts a JOIN jobs j ON j.id=a.job_id WHERE a.state='failed'"
-                        )
-                    ]
-                )
-                out(
-                    [
-                        dict(r)
-                        for r in store.db.execute(
-                            "SELECT video_id,profile,failed_stage,error_kind,error,download_attempts,asr_attempts,next_retry,audio_path FROM jobs WHERE state='failed'"
-                        )
-                    ]
-                )
-                out(
-                    [
-                        dict(r)
-                        for r in store.db.execute(
-                            "SELECT j.video_id,j.profile,p.stage AS failed_stage,p.error,p.download_attempts,p.attempts,p.save_attempts,p.next_retry FROM postprocessings p JOIN jobs j ON j.id=p.job_id WHERE p.state='failed'"
-                        )
-                    ]
-                )
-                out(
-                    [
-                        dict(r)
-                        for r in store.db.execute(
-                            "SELECT j.video_id,j.profile,d.stage AS failed_stage,d.error,d.download_attempts,d.attempts AS diarization_attempts,d.save_attempts,d.next_retry,d.audio_path FROM diarizations d JOIN jobs j ON j.id=d.job_id WHERE d.state='failed'"
-                        )
-                    ]
-                )
+                for rows in store.failures():
+                    out(rows)
         elif args.command == "retry":
             with worker_lock(store.root):
                 out({"requeued": store.retry(args.video)})
@@ -492,11 +414,13 @@ def main():
                     raise ValueError("Wait for queued/active gateway runs before export")
                 dest.mkdir(parents=True, exist_ok=False)
                 store.subtitles()
+                from .database import export_sqlite
+
+                export_sqlite(store.root, dest / "archive.sqlite3")
                 with sqlite3.connect(dest / "archive.sqlite3") as target:
-                    store.db.backup(target)
                     target.execute("DELETE FROM claims")
                     target.execute(
-                        "UPDATE submissions SET state='interrupted',pid=NULL WHERE state IN ('queued','active')"
+                        "UPDATE submissions SET state='interrupted',pid=NULL,worker_id=NULL WHERE state IN ('queued','active')"
                     )
                 for key in store.blobs.keys():
                     if key.split("/")[0] in {

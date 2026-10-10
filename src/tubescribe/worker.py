@@ -11,8 +11,9 @@ from .asr import Client
 from .diarization_tunnel import ready as ready_diarization
 from .diarization_worker import bind_profile as bind_diarization_profile
 from .diarization_worker import enrich_one
+from .execution import capacity, pipeline_lock
 from .postprocessing_worker import PostprocessingUnavailable
-from .storage import ProfileChanged, Store, now, worker_lock
+from .storage import ProfileChanged, Store, now
 from .tunnel import tunnel
 from .youtube import YouTubeError, download
 
@@ -74,7 +75,7 @@ def work(
         raise ValueError("Postprocessing must be video, text, or off")
     summary = summary and postprocessing != "off"
     done = failed = 0
-    with worker_lock(store.root):
+    with pipeline_lock(store.root):
         store.recover()
         from .pipeline import Plan
 
@@ -112,8 +113,13 @@ def work(
                     return {"completed": done, "failed": failed, "skipped": skipped}
                 from .execution import lease
 
-                with lease(store.root, f"job:{row['id']}"):
-                    job = dict(row)
+                with (
+                    lease(store.root, f"video:{row['video_id']}", wait=store.config.network),
+                    lease(store.root, f"job:{row['id']}", wait=store.config.network),
+                ):
+                    job = next(r for r in store.pipeline_jobs(**scope) if r["id"] == row["id"])
+                    if plan.complete(job):
+                        continue
                     stage = "diarization" if job["asr_state"] == "complete" else "download"
 
                     def finish():
@@ -169,7 +175,8 @@ def work(
                                 download_attempts=job["download_attempts"] + 1,
                             )
                             log("download_start", video_id=job["video_id"], title=job["title"])
-                            path, metadata = download(store.root, job["video_id"])
+                            with capacity(store.root, "download"):
+                                path, metadata = download(store.root, job["video_id"])
                             if metadata.get("channel_id") != job["channel_id"]:
                                 raise YouTubeError(
                                     "Downloaded video channel does not match indexed channel"
@@ -200,7 +207,8 @@ def work(
                         log("asr_start", video_id=job["video_id"])
                         attempt = store.begin_attempt(job["id"], "asr")
                         try:
-                            result = client.transcribe(path)
+                            with capacity(store.root, "gpu"):
+                                result = client.transcribe(path)
                         except BaseException as error:
                             store.finish_attempt(
                                 attempt,

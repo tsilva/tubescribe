@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import signal
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -24,6 +23,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 import httpx
 
 from .config import RuntimeConfig, database_path
+from .database import database_errors
 from .pipeline import status as stage
 from .repository import ArchiveViews
 from .resources import artifact_url, transcript_url
@@ -50,8 +50,13 @@ CONTENT_TYPES = {
 
 
 def lock_status(root: Path, name: str) -> dict:
-    if name == "worker.lock" and database_path(root).is_file():
-        owned = ArchiveViews(root).owned("archive")
+    if name == "worker.lock" and (
+        RuntimeConfig.load(root).network or database_path(root).is_file()
+    ):
+        views = ArchiveViews(root)
+        if RuntimeConfig.load(root).network:
+            return {"running": views.workers_running(), "pid": None}
+        owned = views.owned("archive")
         try:
             pid = int((root / name).read_text()) if owned else None
         except (OSError, ValueError):
@@ -686,7 +691,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                 self.send_json({"error": "File is not available"}, 404)
             except ValueError as error:
                 self.send_json({"error": str(error)}, 400)
-            except sqlite3.Error:
+            except database_errors():
                 self.send_json({"error": "Archive database is unavailable; refresh to retry"}, 503)
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -797,7 +802,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                     self.end_headers()
             except (ValueError, FileNotFoundError, KeyError) as error:
                 self.send_json({"error": str(error)}, 400)
-            except (OSError, sqlite3.Error, RuntimeError):
+            except (OSError, RuntimeError, *database_errors()):
                 self.send_json({"error": "Artifact worker could not start"}, 503)
 
     return ThreadingHTTPServer((config.host, port), Handler)

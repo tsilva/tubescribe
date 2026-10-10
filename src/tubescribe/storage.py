@@ -1,4 +1,4 @@
-"""SQLite owns state; fsynced files own transcript content."""
+"""A repository owns state; durable objects own transcript content."""
 
 from __future__ import annotations
 
@@ -55,9 +55,12 @@ class Store:
 
         self.config = RuntimeConfig.load(self.root)
         self._uploaded = {}
+        from .s3 import S3Artifacts
 
         self.blobs = blobs or (
-            DirectoryObjects(self.config.objects)
+            S3Artifacts(self.config.s3_bucket, endpoint=self.config.s3_endpoint)
+            if self.config.s3_bucket
+            else DirectoryObjects(self.config.objects)
             if self.config.objects
             else LocalArtifacts(self.root, writer=lambda path, content: atomic_write(path, content))
         )
@@ -188,54 +191,64 @@ class Store:
         self.reset_interrupted()
         # Reopen completed jobs only if their authoritative content has vanished/corrupted.
         for r in self.transcript_records():
-            valid = all(self.exists(r[k + "_path"], r[k + "_sha256"]) for k in ("json", "text"))
-            if not valid:
-                checkpoint = self.stage_row("diarization", r["id"])
-                recoverable = checkpoint and all(
-                    checkpoint[k + "_path"]
-                    and self.exists(checkpoint[k + "_path"], checkpoint[k + "_sha256"])
-                    for k in ("asr", "prediction")
-                )
-                if recoverable:
-                    self.stage_update(
-                        "diarization",
-                        r["id"],
-                        state="pending",
-                        stage="save",
-                        next_retry=0,
-                        save_attempts=0,
-                        error="Output repair queued from checkpoints",
-                    )
+            from .execution import recovery_job
+
+            with recovery_job(self, r["id"]) as idle:
+                if not idle:
                     continue
-                self.update(
-                    r["id"],
-                    state="pending",
-                    asr_state="pending",
-                    asr_attempts=0,
-                    next_retry=0,
-                    error="Saved transcript missing or corrupt; repair queued",
-                )
-                if checkpoint:
-                    # An ASR rebuild must not inherit completion from unusable enrichment.
-                    # Leave the old files as evidence, but establish new hashes/checkpoints.
-                    self.stage_update(
-                        "diarization",
+                if self.config.network:
+                    current = self.transcript_records(job_id=r["id"])
+                    if not current:
+                        continue
+                    r = current[0]
+                valid = all(self.exists(r[k + "_path"], r[k + "_sha256"]) for k in ("json", "text"))
+                if not valid:
+                    checkpoint = self.stage_row("diarization", r["id"])
+                    recoverable = checkpoint and all(
+                        checkpoint[k + "_path"]
+                        and self.exists(checkpoint[k + "_path"], checkpoint[k + "_sha256"])
+                        for k in ("asr", "prediction")
+                    )
+                    if recoverable:
+                        self.stage_update(
+                            "diarization",
+                            r["id"],
+                            state="pending",
+                            stage="save",
+                            next_retry=0,
+                            save_attempts=0,
+                            error="Output repair queued from checkpoints",
+                        )
+                        continue
+                    self.update(
                         r["id"],
                         state="pending",
-                        stage=None,
-                        asr_path=None,
-                        asr_sha256=None,
-                        prediction_path=None,
-                        prediction_sha256=None,
-                        download_attempts=0,
-                        attempts=0,
-                        save_attempts=0,
+                        asr_state="pending",
+                        asr_attempts=0,
                         next_retry=0,
-                        error="Unusable checkpoints; ASR repair queued",
+                        error="Saved transcript missing or corrupt; repair queued",
                     )
-            else:
-                # Subtitles are derived content: repair them without another download or ASR.
-                self._subtitle(r)
+                    if checkpoint:
+                        # An ASR rebuild must not inherit completion from unusable enrichment.
+                        # Leave the old files as evidence, but establish new hashes/checkpoints.
+                        self.stage_update(
+                            "diarization",
+                            r["id"],
+                            state="pending",
+                            stage=None,
+                            asr_path=None,
+                            asr_sha256=None,
+                            prediction_path=None,
+                            prediction_sha256=None,
+                            download_attempts=0,
+                            attempts=0,
+                            save_attempts=0,
+                            next_retry=0,
+                            error="Unusable checkpoints; ASR repair queued",
+                        )
+                else:
+                    # Subtitles are derived content: repair them without another download or ASR.
+                    self._subtitle(r)
         from .postprocessing_worker import recover
 
         recover(self)

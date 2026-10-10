@@ -12,7 +12,7 @@ ENV UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/opt/venv PATH="/opt/venv/b
 RUN useradd --uid 10001 --create-home tubescribe && mkdir -p /scratch /state /objects /home/tubescribe/.cache/tubescribe/models && chown -R tubescribe:tubescribe /scratch /state /objects /home/tubescribe/.cache
 
 FROM base AS runtime
-RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable
+RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable --extra cloud
 USER tubescribe
 ENTRYPOINT ["tubescribe"]
 CMD ["dashboard", "serve", "--port", "8080"]

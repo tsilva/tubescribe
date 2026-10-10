@@ -339,25 +339,29 @@ referenced `figures/`, request/response checkpoints, evidence/usage report, and 
 manifest. Intact completed outputs skip inference; changed source or workflow definitions
 generate a new run on the next invocation. Save failures resume from the validated model
 response without another inference call. Artifact failures preserve completed transcript stages while keeping overall pipeline completion
-pending until the summary succeeds. All runs use the shared archive capacity lease. Export includes artifact bundles and
+pending until the summary succeeds. Local runs use the shared archive lease; network runs use per-video/job ownership and independent stage capacities. Export includes artifact bundles and
 custom workflow definitions alongside the transcript archive.
 
-## Local runtime and future cloud adapters
+## Local runtime and network adapters
 
 The default remains the local archive with loopback inference. The runtime now also
 supports separate web, queue worker, durable agent gateway, ASR, and diarization roles.
-No cloud account or new Python dependency is needed. Existing archives migrate in place
-and completed outputs remain readable.
+The default local mode needs no cloud account or additional dependency. PostgreSQL and
+S3-compatible storage are optional through the locked `cloud` extra. Existing SQLite
+archives migrate in place and completed outputs remain readable. Network mode starts a
+separate archive in the configured database; selecting it does not import or modify the
+existing local archive.
 
 | Module | Responsibility |
 | --- | --- |
 | `src/tubescribe/pipeline.py` | Stage dependencies, completion, retry eligibility, and shared final-stage execution. |
-| `src/tubescribe/repository.py` | SQLite job records, claims, read models, submissions, attempts, events, and fenced commits. `Store` composes this adapter rather than inheriting it. |
-| `src/tubescribe/migrations.py` | Numbered, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–4. |
-| `src/tubescribe/blobs.py` | Confined object keys, hashes, metadata, streamed file transfer, and verified bundle publication. Local, separate-volume, and in-memory adapters share the interface. |
+| `src/tubescribe/repository.py` | SQLite/PostgreSQL job records, claims, read models, submissions, attempts, events, and fenced commits. `Store` composes the selected adapter. |
+| `src/tubescribe/database.py` | Database connections, PostgreSQL transaction locks, server-clock ownership, and portable SQLite export. |
+| `src/tubescribe/migrations.py` | Numbered, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–5. |
+| `src/tubescribe/blobs.py` | Confined object keys, hashes, metadata, streamed file transfer, and verified bundle publication. Local, separate-volume, and in-memory adapters share the interface. `src/tubescribe/s3.py` adds S3-compatible objects with multipart uploads and verified streaming downloads. |
 | `src/tubescribe/storage.py` | Durable checkpoint writes, scratch materialization, fresh publication versions, and recovery. |
 | `src/tubescribe/submission.py` | Deduplicated durable requests, recorded results, and local process or independent queue dispatch. |
-| `src/tubescribe/execution.py` | Expiring archive/job leases, heartbeats, fenced commits, and attempt instrumentation. |
+| `src/tubescribe/execution.py` | Expiring archive/video/job leases, independent download/GPU/agent capacities, heartbeats, fenced commits, and attempt instrumentation. |
 | `src/tubescribe/inference.py` | Transport, authentication, endpoint/hardware policies, and callback lifecycle. |
 | `src/tubescribe/agent_gateway.py` | Reconnectable agent requests and gateway-owned transcript, screenshot, and figure tools beside AgentBridge. |
 | `src/tubescribe/config.py` | Validated runtime locations, role options, binding, and authentication configuration. |
@@ -371,6 +375,13 @@ By default, `--data` remains both the archive and scratch directory. Set
 process's `--data` disposable scratch. Web, worker, and gateway can then use different
 scratch directories with the same database and object volume. `DirectoryObjects`
 exposes keys, bytes, metadata, and verified copies, without a filesystem-path API.
+Alternatively, set `TUBESCRIBE_DATABASE_URL` to a PostgreSQL URI and
+`TUBESCRIBE_S3_BUCKET` to an existing bucket (plus `TUBESCRIBE_S3_ENDPOINT` for a compatible
+server). Each role can then run with entirely independent scratch and no shared filesystem.
+The S3 adapter uses the standard AWS credential chain and SHA-256 metadata; bucket
+provisioning is explicit. `scripts/tubescribe` automatically includes the `cloud` extra
+when either network adapter is configured.
+
 Workers hydrate inputs only as needed; response checkpoints, frame ledgers, captured
 PNGs, and inference outputs are persisted before their state pointers advance.
 Video and retry-audio transfers stream through files, and listings/existence checks use
@@ -420,8 +431,12 @@ Submit a saved request with `queue submit --request /absolute/request.json`, for
 {"command":"work","options":{"profile":"turbo-v1","video":["LhuSxhCNa5g"],"limit":1}}
 ```
 
-Claims last **90 seconds** and renew every **30 seconds**. The archive lease deliberately
-keeps one pipeline worker active. Per-video leases fence all stages. A replacement
+Claims last **90 seconds** and renew every **30 seconds**. In SQLite mode, the archive lease
+keeps one pipeline worker active. PostgreSQL consumers reserve separate requests with
+`FOR UPDATE SKIP LOCKED`; per-video/job leases fence all stages while independent
+download, GPU, and agent slot leases bound expensive work. Ownership and expiry use the
+PostgreSQL server clock. PIDs are diagnostic only, never cross-host liveness checks.
+Recovery skips live jobs, and archive maintenance refuses to overlap active workers. A replacement
 consumer requeues expired active work after the launch grace period and lease expiry;
 replayed execution reuses published stages and response checkpoints. `worker.lock` is
 only a PID display file. SIGTERM retains recoverable checkpoints and releases ownership;
@@ -452,7 +467,9 @@ changed input is rejected. Gateway results are saved under `agent-results/ID.jso
 before completion is committed. Worker retries reconnect to that run instead of
 spending another model attempt, and polling backs off to three seconds.
 `agent status --run-id ID` and `agent cancel --run-id ID` operate on the shared ledger.
-The default gateway capacity is one run; it is independently configurable up to eight.
+The default gateway executor capacity is one run; it is independently configurable up to eight.
+In network mode, `TUBESCRIBE_AGENT_SLOTS` also bounds agent calls across all gateways
+and synchronous workers sharing the database.
 
 If the **gateway itself** dies during the synchronous upstream call without a saved
 result, its run becomes `uncertain`. It never silently repeats an expensive call whose
@@ -469,7 +486,15 @@ through their tools.
 | --- | --- |
 | `TUBESCRIBE_DATA` / `--data` | `data`; process scratch and legacy archive root. |
 | `TUBESCRIBE_DATABASE` | `DATA/archive.sqlite3`; durable SQLite location. |
-| `TUBESCRIBE_OBJECTS` | Unset; otherwise a separate durable object directory. |
+| `TUBESCRIBE_OBJECTS` | Unset; otherwise a separate durable object directory. Mutually exclusive with S3. |
+| `TUBESCRIBE_DATABASE_URL` | Unset; PostgreSQL URI overrides the SQLite adapter. |
+| `TUBESCRIBE_S3_BUCKET` | Unset; selects an existing S3-compatible bucket. |
+| `TUBESCRIBE_S3_ENDPOINT` | Unset uses AWS; otherwise HTTP(S) endpoint. Plain HTTP is restricted to loopback or the local Compose `objects` service. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` | Standard SDK credentials/region; use workload credentials when deployed later. |
+| `TUBESCRIBE_WORKER_ID` | Random per-process identity; an explicit value must be unique per running worker replica. |
+| `TUBESCRIBE_DOWNLOAD_SLOTS` | `1`; network download capacity, integer 1–32. |
+| `TUBESCRIBE_GPU_SLOTS` | `1`; shared network ASR/diarization capacity, integer 1–32. |
+| `TUBESCRIBE_AGENT_SLOTS` | `1`; shared network agent capacity, integer 1–32. |
 | `TUBESCRIBE_DISPATCH` | `process` or `queue`. |
 | `TUBESCRIBE_WORKER_POLL` | `3`; positive finite consumer polling seconds. |
 | `TUBESCRIBE_AGENT_PROTOCOL` | `sync` or `durable`. |
@@ -512,6 +537,67 @@ Compose configuration was validated. Image building could not run on the develop
 Mac because Docker Desktop reported it could not start; CPU/GPU container execution is
 therefore **not yet verified**. No cloud infrastructure was provisioned.
 
+### Local PostgreSQL and S3 rehearsal
+
+`compose.network.yaml` adds digest-pinned PostgreSQL and a
+[SeaweedFS S3 server](https://github.com/seaweedfs/seaweedfs/wiki/Amazon-S3-API). Web and
+worker use independent tmpfs scratch with **no shared application volume**; only the
+database and object server keep persistent volumes. `deploy/rehearsal-s3.json` contains
+local rehearsal credentials. These are development defaults, not deployment secrets.
+The initializer waits for S3 and creates the explicit rehearsal bucket.
+
+```bash
+export TUBESCRIBE_ACCESS_TOKEN=REPLACE_WITH_A_RANDOM_SECRET_OF_AT_LEAST_32_CHARACTERS
+# Start only the local durable services first:
+docker compose -f compose.network.yaml up --build -d database objects initialize-objects
+docker compose -f compose.network.yaml port database 5432
+docker compose -f compose.network.yaml port objects 8333
+```
+
+Use the printed loopback ports in host-process configuration:
+
+```bash
+export TUBESCRIBE_DATABASE_URL=postgresql://tubescribe:local-only-rehearsal-password@127.0.0.1:PG_PORT/tubescribe
+export TUBESCRIBE_S3_ENDPOINT=http://127.0.0.1:S3_PORT
+export TUBESCRIBE_S3_BUCKET=tubescribe
+export AWS_ACCESS_KEY_ID=tubescribe-rehearsal
+export AWS_SECRET_ACCESS_KEY=local-only-rehearsal-object-secret
+export AWS_DEFAULT_REGION=us-east-1
+export TUBESCRIBE_DISPATCH=queue
+scripts/tubescribe --data /absolute/scratch/web dashboard serve --port auto
+scripts/tubescribe --data /absolute/scratch/worker queue serve
+```
+
+Run the gateway beside AgentBridge using those same database/S3 settings and a separate
+scratch directory. Its loopback callbacks require the same host/network namespace as
+AgentBridge. For application containers, configure authenticated **HTTPS** inference and
+gateway URLs, then run `docker compose -f compose.network.yaml up --build -d web worker`.
+The placeholder `.invalid` endpoints leave an idle queue safe to start but cannot process
+real videos. `docker compose ... port web 8080` reports the assigned local web port.
+Keep slot settings consistent across replicas; one database represents one capacity pool.
+
+The automated process-level rehearsal does not require Docker:
+
+```bash
+# Requires uv, FFmpeg, and initdb/pg_ctl on PATH (or the disposable database below).
+scripts/rehearse-network
+# Alternatively use a dedicated test database where the user may create/drop schemas:
+TUBESCRIBE_TEST_DATABASE_URL=postgresql://localhost/tubescribe_test scripts/rehearse-network
+```
+
+The script uses real PostgreSQL and an HTTP S3 emulator, creates isolated schemas/buckets,
+and cleans up only its own fixture processes. It executes download → ASR → diarization →
+processed Markdown → summary with synthetic inference responses, removes application
+scratch, and verifies cold serving/recovery. It also kills a real packaging process and
+resumes through a separate queue consumer without repeating successful inference, checks
+live-job recovery fencing and host clock skew, exercises gateway-owned FFmpeg screenshot
+callbacks, and verifies multipart transfer, checksums, and portable SQLite export.
+It does not contact the real ASR/AgentBridge services or consume model tokens.
+
+Both Compose configurations validate, and all **seven network tests** pass locally.
+Docker engine availability prevented image/container execution on this machine; the
+SeaweedFS container and GPU containers remain unverified here. No cloud resources were created.
+
 ### Operations and reconciliation
 
 `attempts` records per-stage start/end, elapsed time, request correlation, publication
@@ -533,12 +619,10 @@ first recorded at least the retention period ago are eligible. Published current
 are retained; purge refuses to run while agent requests are queued or active. Raw transcript versions and response checkpoints are retained; this is not
 a complete archive-history or event-log retention policy.
 
-The adapters prepare a migration without deploying it: SQLite/WAL is still for processes
-on one host with a local volume, **not a database on a network filesystem**. A real multi-host
-service still needs a shared database/claims adapter, an S3-compatible object adapter,
-service supervision/TLS, and deployment-specific credentials. The separate-volume and
-in-memory storage tests exercise those boundaries without implying actual S3/PostgreSQL
-support or multi-tenant isolation.
+SQLite/WAL remains for processes on one host with a local volume, **not a database on a
+network filesystem**. PostgreSQL and S3 now provide the network boundaries for multiple
+workers. Deployment still requires service supervision, TLS, backups, and deployment
+credentials. This archive-level design does not provide multi-tenant isolation or user accounts.
 
 ## Verification
 
@@ -550,7 +634,7 @@ Tests cover duplicate indexing, completed-job skips, independent ASR/diarization
 
 ### Cloud preparation rehearsal (10 October 2026)
 
-The **164-test** suite includes separate CLI processes and empty scratch directories,
+The local regression suite includes separate CLI processes and empty scratch directories,
 queue delivery after the web exits, duplicate delivery with saved-result replay, real
 SIGKILL during packaging, checkpoint rehydration without repeated model execution,
 publication before a failed database commit, shared ownership across scratch directories,

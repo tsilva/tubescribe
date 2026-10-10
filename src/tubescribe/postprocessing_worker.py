@@ -11,10 +11,10 @@ from pathlib import Path
 import httpx
 
 from . import postprocessing as engine
-from .execution import job_stage
+from .execution import capacity, job_stage, pipeline_lock
 from .inference import PostprocessingUnavailable
 from .inference import ready_bridge as ready
-from .storage import now, worker_lock
+from .storage import now
 from .youtube import YouTubeError, download_video
 
 COUNTERS = {"download": "download_attempts", "process": "attempts", "save": "save_attempts"}
@@ -107,41 +107,50 @@ def cleanup_video(store, video_id):
 
 def recover(store):
     for row in store.stage_records("postprocessing", states=("complete",)):
-        source_changed = False
-        try:
-            source = archive_path(store, row["source_path"])
-            source_changed = (
-                digest(source) != row["source_sha256"]
-                or digest(source.with_suffix(".srt")) != row["srt_sha256"]
-            )
-            manifest = archive_path(store, row["manifest_path"])
-            valid = not source_changed and digest(manifest) == row["manifest_sha256"]
-            if valid:
-                entries = json.loads(manifest.read_text())["files"]
-                directory = archive_path(store, row["output_dir"])
-                valid = all(
-                    (directory / path).resolve().is_relative_to(directory)
-                    and digest(directory / path) == checksum
-                    for path, checksum in entries.items()
-                )
-            if valid:
-                cleanup_video(store, row["video_id"])
+        from .execution import recovery_job
+
+        with recovery_job(store, row["job_id"]) as idle:
+            if not idle:
                 continue
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-        update(
-            store,
-            row["job_id"],
-            state="pending",
-            stage="save",
-            completed_at=None,
-            download_attempts=0,
-            attempts=0,
-            save_attempts=0,
-            next_retry=0,
-            error="Output or source changed; repair queued",
-            **({"output_dir": None} if source_changed else {}),
-        )
+            if store.config.network:
+                row = {**row, **store.stage_row("postprocessing", row["job_id"])}
+                if row["state"] != "complete":
+                    continue
+            source_changed = False
+            try:
+                source = archive_path(store, row["source_path"])
+                source_changed = (
+                    digest(source) != row["source_sha256"]
+                    or digest(source.with_suffix(".srt")) != row["srt_sha256"]
+                )
+                manifest = archive_path(store, row["manifest_path"])
+                valid = not source_changed and digest(manifest) == row["manifest_sha256"]
+                if valid:
+                    entries = json.loads(manifest.read_text())["files"]
+                    directory = archive_path(store, row["output_dir"])
+                    valid = all(
+                        (directory / path).resolve().is_relative_to(directory)
+                        and digest(directory / path) == checksum
+                        for path, checksum in entries.items()
+                    )
+                if valid:
+                    cleanup_video(store, row["video_id"])
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            update(
+                store,
+                row["job_id"],
+                state="pending",
+                stage="save",
+                completed_at=None,
+                download_attempts=0,
+                attempts=0,
+                save_attempts=0,
+                next_retry=0,
+                error="Output or source changed; repair queued",
+                **({"output_dir": None} if source_changed else {}),
+            )
 
 
 def initialize(store, job, mode):
@@ -172,7 +181,8 @@ def cached_video(store, job, cache):
         raise ValueError(
             f"No cached video for {job['video_id']} in {directory}; custom caches are read-only"
         )
-    path, metadata = download_video(store.root, job["video_id"])
+    with capacity(store.root, "download"):
+        path, metadata = download_video(store.root, job["video_id"])
     if metadata.get("channel_id") != job["channel_id"]:
         path.rename(path.with_name(f"{path.stem}.rejected-{uuid.uuid4().hex}{path.suffix}"))
         raise ValueError("Video download channel identity differs")
@@ -401,7 +411,7 @@ def run(
     from .artifacts import summary_row
 
     completed = failed = skipped = 0
-    with worker_lock(store.root):
+    with pipeline_lock(store.root):
         store.recover()
         jobs = store.stage_inputs("diarization", profile=profile, ids=ids, channel=channel)
         if ids and set(ids) != {r["video_id"] for r in jobs}:

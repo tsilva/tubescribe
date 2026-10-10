@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "tubescribe-rehearsal",
+      "credentials": [{"accessKey": "tubescribe-rehearsal", "secretKey": "local-only-rehearsal-object-secret"}],
+      "actions": ["Admin", "Read", "List", "Write", "Tagging"]
+    }
+  ]
+}

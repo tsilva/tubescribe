@@ -1,0 +1,429 @@
+"""Opt-in real PostgreSQL and HTTP S3 rehearsal, with disposable test databases."""
+
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import uuid
+from pathlib import Path
+from unittest.mock import patch
+
+import httpx
+import test_postprocessing_pipeline as pipeline
+from test_pipeline import VID
+
+from tubescribe.artifacts import build_one
+from tubescribe.dashboard import make_server, snapshot
+from tubescribe.execution import ClaimBusy, capacity, lease, pipeline_lock
+from tubescribe.storage import Store
+from tubescribe.submission import Dispatcher, JobRequest
+
+
+@unittest.skipUnless(
+    os.environ.get("TUBESCRIBE_NETWORK_TESTS") == "1", "run scripts/rehearse-network"
+)
+class NetworkRuntime(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import psycopg
+        from moto.server import ThreadedMotoServer
+
+        cls.base = tempfile.TemporaryDirectory(prefix="tubescribe-network-")
+        cls.addClassCleanup(cls.base.cleanup)
+        cls.database_url = os.environ.get("TUBESCRIBE_TEST_DATABASE_URL")
+        if not cls.database_url:
+            if not shutil.which("initdb") or not shutil.which("pg_ctl"):
+                raise RuntimeError(
+                    "Supply TUBESCRIBE_TEST_DATABASE_URL or install PostgreSQL tools"
+                )
+            directory = Path(cls.base.name) / "postgres"
+            subprocess.run(
+                ["initdb", "-D", str(directory), "-A", "trust", "--no-locale", "-E", "UTF8"],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            subprocess.run(
+                [
+                    "pg_ctl",
+                    "-D",
+                    str(directory),
+                    "-l",
+                    str(Path(cls.base.name) / "postgres.log"),
+                    "-o",
+                    f"-h 127.0.0.1 -p {port} -k {cls.base.name}",
+                    "-w",
+                    "start",
+                ],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            cls.addClassCleanup(
+                lambda: subprocess.run(
+                    ["pg_ctl", "-D", str(directory), "-m", "fast", "-w", "stop"],
+                    capture_output=True,
+                    timeout=30,
+                )
+            )
+            cls.database_url = f"postgresql://127.0.0.1:{port}/postgres"
+        cls.admin = psycopg.connect(cls.database_url, autocommit=True)
+        cls.addClassCleanup(cls.admin.close)
+        cls.objects = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+        cls.objects.start()
+        cls.addClassCleanup(cls.objects.stop)
+        host, port = cls.objects.get_host_and_port()
+        cls.endpoint = f"http://{host}:{port}"
+
+    def setUp(self):
+        from urllib.parse import quote, urlencode
+
+        import boto3
+        from psycopg import sql
+
+        self.schema = "rehearsal_" + uuid.uuid4().hex
+        self.admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(self.schema)))
+        self.addCleanup(
+            lambda: self.admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(self.schema))
+            )
+        )
+        self.bucket = "rehearsal-" + uuid.uuid4().hex
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "TUBESCRIBE_DATABASE_URL": self.database_url
+                + ("&" if "?" in self.database_url else "?")
+                + urlencode({"options": "-c search_path=" + self.schema}, quote_via=quote),
+                "TUBESCRIBE_S3_BUCKET": self.bucket,
+                "TUBESCRIBE_S3_ENDPOINT": self.endpoint,
+                "TUBESCRIBE_OBJECTS": "",
+                "TUBESCRIBE_BIND": "127.0.0.1",
+                "TUBESCRIBE_ACCESS_TOKEN": "",
+                "TUBESCRIBE_DISPATCH": "queue",
+                "TUBESCRIBE_WORKER_POLL": "0.05",
+                "AWS_ACCESS_KEY_ID": "rehearsal",
+                "AWS_SECRET_ACCESS_KEY": "rehearsal",
+                "AWS_DEFAULT_REGION": "us-east-1",
+                "AWS_EC2_METADATA_DISABLED": "true",
+                "TUBESCRIBE_AGENT_PROTOCOL": "sync",
+            },
+        )
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        boto3.client("s3", endpoint_url=self.endpoint).create_bucket(Bucket=self.bucket)
+        self.fixture = pipeline.FinalStage()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.store = self.fixture.store
+        self.assertFalse((self.store.root / "archive.sqlite3").exists())
+
+    def cli(self, root, *arguments):
+        return [sys.executable, "-m", "tubescribe.cli", "--data", str(root), *arguments]
+
+    def replacement(self, name):
+        root = Path(self.base.name) / (self.schema + "-" + name)
+        store = Store(root)
+        self.addCleanup(store.db.close)
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        return store
+
+    def test_pipeline_and_publications_survive_all_application_scratch_deletion(self):
+        from tubescribe.worker import work
+
+        result = work(
+            self.store,
+            "http://127.0.0.1:1",
+            ids=[VID],
+            bridge=self.fixture.bridge,
+            postprocessing="text",
+        )
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(self.fixture.requests, 2)
+        before = snapshot(self.store.root)["jobs"][0]
+        self.store.db.close()
+        shutil.rmtree(self.store.root)
+        replacement = self.replacement("replacement")
+        replacement.recover()
+        server = make_server(replacement.root)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_port}"
+        for link in [before["processed_url"], before["summary_url"], before["srt_url"]]:
+            self.assertEqual(httpx.get(base + link, trust_env=False).status_code, 200)
+        again = work(
+            replacement,
+            "http://127.0.0.1:1",
+            ids=[VID],
+            bridge=self.fixture.bridge,
+            postprocessing="text",
+        )
+        self.assertEqual(again["skipped"], 1)
+        self.assertEqual(self.fixture.requests, 2)
+        import json
+
+        status = subprocess.run(
+            self.cli(replacement.root, "status"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(json.loads(status.stdout)["completed_jobs"], 1)
+
+    def test_real_queue_consumer_and_killed_packager_reuse_model_response(self):
+        self.assertEqual(self.fixture.full()["completed"], 1)
+        request = JobRequest("artifacts", {"video": [VID], "bridge": self.fixture.bridge})
+        identifier = Dispatcher(self.store).submit(request)
+        marker = Path(self.base.name) / (self.schema + ".marker")
+        wrapper = (
+            "import runpy,time; from pathlib import Path; from tubescribe import artifacts as m\n"
+            "original=m.atomic_write\n"
+            "def pause(path,content):\n"
+            " if path.name=='artifact.md':\n"
+            f"  Path({str(marker)!r}).write_text('saving'); time.sleep(60)\n"
+            " return original(path,content)\n"
+            "m.atomic_write=pause\nrunpy.run_module('tubescribe.cli',run_name='__main__')\n"
+        )
+        scratch = self.replacement("killed").root
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                wrapper,
+                "--data",
+                str(scratch),
+                "--submission",
+                identifier,
+                "artifacts",
+                "--video",
+                VID,
+                "--bridge",
+                self.fixture.bridge,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while not marker.exists() and time.monotonic() < deadline and child.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(
+                marker.exists(),
+                child.stderr.read().decode()
+                if child.poll() is not None
+                else "Packaging not reached",
+            )
+            child.send_signal(signal.SIGKILL)
+            child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            child.stderr.close()
+        shutil.rmtree(scratch)
+        with self.store.db:
+            self.store.db.execute("UPDATE claims SET expires=0")
+            self.store.db.execute("UPDATE submissions SET updated=0")
+        replacement = self.replacement("queue")
+        result = subprocess.run(
+            self.cli(replacement.root, "queue", "once"), capture_output=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode() + result.stdout.decode())
+        self.assertEqual(self.store.submission(identifier)["state"], "complete")
+        self.assertEqual(self.fixture.requests, 2)
+        self.assertEqual(
+            self.store.stage_row("artifact", self.fixture.job["id"], workflow="summary")["state"],
+            "complete",
+        )
+
+    def test_consumers_reserve_distinct_requests_and_expired_ownership_recovers(self):
+        dispatcher = Dispatcher(self.store)
+        first = dispatcher.submit(JobRequest("artifacts", {"video": [VID]}))
+        second = dispatcher.submit(JobRequest("artifacts", {"video": [VID], "workflow": "notes"}))
+        other = self.replacement("consumer")
+        row = self.store.claim_submission("worker-a")
+        next_row = other.claim_submission("worker-b")
+        self.assertEqual({row["id"], next_row["id"]}, {first, second})
+        self.assertIsNone(other.claim_submission("worker-c"))
+        with self.store.db:
+            self.store.db.execute("UPDATE submissions SET updated=0")
+        self.assertEqual(other.reclaim_submissions(), 2)
+        self.assertIsNotNone(other.claim_submission("replacement"))
+
+    def test_recovery_skips_a_live_job_in_another_process(self):
+        self.fixture.full()
+        job_id = self.fixture.job["id"]
+        row = self.store.stage_row("postprocessing", job_id)
+        self.store.blobs.put(row["manifest_path"], b"corrupt manifest")
+        replacement = self.replacement("concurrent-repair")
+        code = (
+            "import sys; from pathlib import Path; from tubescribe.storage import Store; "
+            "s=Store(Path(sys.argv[1])); s.recover(); "
+            "assert s.stage_row('postprocessing',int(sys.argv[2]))['state']=='complete'; s.db.close()"
+        )
+        with (
+            pipeline_lock(self.store.root),
+            lease(self.store.root, f"video:{VID}"),
+            lease(self.store.root, f"job:{job_id}"),
+        ):
+            subprocess.run(
+                [sys.executable, "-c", code, str(replacement.root), str(job_id)],
+                check=True,
+                capture_output=True,
+                timeout=20,
+            )
+            # Host clock skew must not expire another network worker's ownership.
+            with patch("time.time", return_value=time.time() + 3600):
+                self.assertTrue(replacement.owned(f"job:{job_id}"))
+        replacement.recover()
+        self.assertEqual(replacement.stage_row("postprocessing", job_id)["state"], "pending")
+
+    def test_gateway_owns_screenshots_and_summary_across_separate_scratch(self):
+        from tubescribe.agent_gateway import make_gateway
+        from tubescribe.postprocessing_worker import process_one
+
+        self.fixture.full()
+        token = "rehearsal-access-token-" + "a" * 32
+        with patch.dict(
+            os.environ, {"TUBESCRIBE_ACCESS_TOKEN": token, "TUBESCRIBE_AGENT_PROTOCOL": "durable"}
+        ):
+            gateway_store = self.replacement("gateway")
+            server = make_gateway(gateway_store.root, self.fixture.bridge)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            worker = self.replacement("gateway-worker")
+            video = worker.root / "videos" / (VID + ".mp4")
+            video.parent.mkdir()
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=blue:s=320x180:r=10:d=4",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(video),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=15,
+            )
+            self.fixture.inspect_video = True
+            worker.stage_update(
+                "postprocessing",
+                self.fixture.job["id"],
+                state="pending",
+                mode="video",
+                output_dir=None,
+                manifest_path=None,
+                attempts=0,
+            )
+            endpoint = f"http://127.0.0.1:{server.server_port}"
+            with patch("tubescribe.postprocessing_worker.cached_video", return_value=str(video)):
+                self.assertTrue(
+                    process_one(worker, self.fixture.job, bridge=endpoint, mode="video")
+                )
+            row = worker.stage_row("postprocessing", self.fixture.job["id"])
+            figure = row["output_dir"] + "/figures/frame_0001000.png"
+            self.assertTrue(worker.blobs.get(figure).startswith(b"\x89PNG"))
+            self.assertFalse(worker.exists("videos/" + video.name))
+            shutil.rmtree(worker.root)
+            with patch.dict(os.environ, {"TUBESCRIBE_WORKER_ID": "gateway-replica"}):
+                replica = make_gateway(
+                    self.replacement("gateway-replica").root, self.fixture.bridge
+                )
+            threading.Thread(target=replica.serve_forever, daemon=True).start()
+            self.addCleanup(replica.server_close)
+            self.addCleanup(replica.shutdown)
+            endpoint = f"http://127.0.0.1:{replica.server_port}"
+            cold = self.replacement("cold-summary")
+            self.assertTrue(build_one(cold, self.fixture.job["id"], "summary", bridge=endpoint))
+            self.assertEqual(self.fixture.requests, 3)
+            self.assertEqual(
+                cold.stage_row("artifact", self.fixture.job["id"], workflow="summary")["state"],
+                "complete",
+            )
+
+    def test_stage_capacity_is_independent_and_same_video_is_fenced(self):
+        with capacity(self.store.root, "gpu"):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; from tubescribe.execution import capacity; import os;\nwith capacity(Path(os.environ['SCRATCH']), 'agent'): print('independent')",
+                ],
+                env={**os.environ, "SCRATCH": str(self.store.root)},
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertIn(b"independent", result.stdout)
+        with lease(self.store.root, "video:" + VID):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; from tubescribe.execution import lease,ClaimBusy; import os;\ntry:\n with lease(Path(os.environ['SCRATCH']), 'video:' + os.environ['VIDEO']): raise AssertionError('duplicate')\nexcept ClaimBusy: print('fenced')",
+                ],
+                env={**os.environ, "SCRATCH": str(self.store.root), "VIDEO": VID},
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertIn(b"fenced", result.stdout, result.stderr.decode())
+        with pipeline_lock(self.store.root):
+            with self.assertRaises(ClaimBusy):
+                with lease(self.store.root, "archive"):
+                    pass
+
+    def test_s3_streaming_checksums_missing_keys_and_portable_database_export(self):
+        from tubescribe.database import export_sqlite
+
+        content = b"streaming media\n" * 700000
+        path = self.store.root / "input"
+        path.write_bytes(content)
+        ref = self.store.blobs.put_file("videos/test.mp4", path)
+        from boto3.exceptions import S3UploadFailedError
+
+        with (
+            patch.object(
+                self.store.blobs.client, "upload_file", side_effect=S3UploadFailedError("offline")
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.store.blobs.put_file("videos/failed.mp4", path)
+        target = self.store.root / "streamed"
+        self.store.blobs.copy_to(ref.key, target, ref.sha256)
+        self.assertEqual(target.read_bytes(), content)
+        with self.assertRaises(ValueError):
+            self.store.blobs.copy_to(ref.key, target, "0" * 64)
+        self.assertEqual(target.read_bytes(), content)
+        with self.assertRaises(FileNotFoundError):
+            self.store.blobs.get("missing")
+        self.assertEqual(self.store.blobs.keys("videos/"), [ref.key])
+        self.store.blobs.delete(ref.key)
+        self.assertFalse(self.store.exists(ref.key))
+        self.fixture.full()
+        destination = self.store.root / "export.sqlite3"
+        export_sqlite(self.store.root, destination)
+        import sqlite3
+        from contextlib import closing
+
+        with closing(sqlite3.connect(destination)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM transcripts").fetchone()[0], 1)

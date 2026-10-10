@@ -122,7 +122,9 @@ class Dispatcher:
                 return json.loads(row["result"])
             if row["state"] not in {"queued", "active"}:
                 raise ValueError("Submission cannot execute in its current state")
-            self.store.update_submission(identifier, state="active", pid=os.getpid())
+            self.store.update_submission(
+                identifier, state="active", pid=os.getpid(), worker_id=self.store.config.worker_id
+            )
             try:
                 while request.options.get("wait") and self.store.owned("archive"):
                     time.sleep(3)
@@ -160,6 +162,8 @@ def execute_cli(store, args, operation):
 def consume(store, *, once=False, poll=None, process=None):
     """Independent dispatcher; durable queued requests survive the web process."""
     process = process or LocalProcess()
+    if store.config.network:
+        return consume_network(store, once=once, poll=poll, process=process)
     completed = failed = 0
     with lease(store.root, "dispatcher", reentrant=False):
         while True:
@@ -191,3 +195,32 @@ def consume(store, *, once=False, poll=None, process=None):
             if once:
                 return {"dispatched": completed, "failed": failed}
             time.sleep(poll or store.config.worker_poll)
+
+
+def consume_network(store, *, once, poll, process):
+    """Each consumer reserves requests transactionally; PIDs remain local diagnostics."""
+    completed = failed = 0
+    with lease(store.root, "dispatcher:" + store.config.worker_id, reentrant=False):
+        while True:
+            store.reclaim_submissions()
+            row = store.claim_submission(store.config.worker_id)
+            if row is None:
+                if once:
+                    return {"dispatched": completed, "failed": failed}
+                time.sleep(poll or store.config.worker_poll)
+                continue
+            try:
+                request = JobRequest(**json.loads(row["request"]))
+                pid = process.start(store.root, request, row["id"])
+                store.update_submission(row["id"], pid=pid)
+                child = process.children.get(pid)
+                if child is not None:
+                    child.wait()
+                completed += 1
+            except BaseException as error:
+                store.update_submission(
+                    row["id"], state="interrupted", error=str(error), pid=None, worker_id=None
+                )
+                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                    raise
+                failed += 1

@@ -1,0 +1,75 @@
+# Local network-boundary rehearsal. Application services share no filesystem volumes.
+x-runtime: &runtime
+  build:
+    context: .
+    target: runtime
+  init: true
+  stop_grace_period: 45s
+  environment: &environment
+    TUBESCRIBE_DATABASE_URL: postgresql://tubescribe:local-only-rehearsal-password@database:5432/tubescribe
+    TUBESCRIBE_S3_BUCKET: tubescribe
+    TUBESCRIBE_S3_ENDPOINT: http://objects:8333
+    AWS_ACCESS_KEY_ID: tubescribe-rehearsal
+    AWS_SECRET_ACCESS_KEY: local-only-rehearsal-object-secret
+    AWS_DEFAULT_REGION: us-east-1
+    AWS_EC2_METADATA_DISABLED: 'true'
+    TUBESCRIBE_DISPATCH: queue
+    TUBESCRIBE_ACCESS_TOKEN: ${TUBESCRIBE_ACCESS_TOKEN:?Set a random archive token of at least 32 characters}
+    TUBESCRIBE_PUBLIC_ORIGIN: ${TUBESCRIBE_PUBLIC_ORIGIN:-https://tubescribe.local}
+  tmpfs:
+    - /scratch:uid=10001,gid=10001
+  depends_on:
+    database:
+      condition: service_healthy
+    initialize-objects:
+      condition: service_completed_successfully
+services:
+  database:
+    image: postgres:17-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826
+    environment:
+      POSTGRES_DB: tubescribe
+      POSTGRES_USER: tubescribe
+      POSTGRES_PASSWORD: local-only-rehearsal-password
+    volumes: ['database:/var/lib/postgresql/data']
+    ports: ['127.0.0.1::5432']
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U tubescribe -d tubescribe']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  objects:
+    image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    working_dir: /data
+    command: [server, '-dir=/data', '-ip=objects', '-s3', '-s3.port=8333', '-s3.config=/etc/seaweedfs/s3.json', '-master.volumeSizeLimitMB=1024']
+    volumes:
+      - objects:/data
+      - ./deploy/rehearsal-s3.json:/etc/seaweedfs/s3.json:ro
+    ports: ['127.0.0.1::8333']
+  initialize-objects:
+    build:
+      context: .
+      target: runtime
+    environment: *environment
+    entrypoint: [python, -m, tubescribe.initialize_objects]
+    depends_on: [objects]
+  web:
+    <<: *runtime
+    environment:
+      <<: *environment
+      TUBESCRIBE_BIND: 0.0.0.0
+    command: [dashboard, serve, --port, '8080']
+    ports: ['127.0.0.1::8080']
+  worker:
+    <<: *runtime
+    environment:
+      <<: *environment
+      TUBESCRIBE_ENDPOINT: ${TUBESCRIBE_ENDPOINT:-https://asr.invalid}
+      TUBESCRIBE_DIARIZATION_ENDPOINT: ${TUBESCRIBE_DIARIZATION_ENDPOINT:-https://diarization.invalid}
+      TUBESCRIBE_AGENTBRIDGE: ${TUBESCRIBE_AGENTBRIDGE:-https://gateway.invalid}
+      TUBESCRIBE_REMOTE_INFERENCE: '1'
+      TUBESCRIBE_INFERENCE_TOKEN: ${TUBESCRIBE_INFERENCE_TOKEN:-${TUBESCRIBE_ACCESS_TOKEN}}
+      TUBESCRIBE_AGENT_PROTOCOL: durable
+    command: [queue, serve]
+volumes:
+  database:
+  objects:

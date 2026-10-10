@@ -1,4 +1,4 @@
-"""SQLite job state and selection; content lives in the artifact store."""
+"""SQL job state and selection; content lives in the artifact store."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .database import clock as database_clock
+from .database import columns, connect, database_errors, network_database, serialize
 from .pipeline import STAGES, Plan
 
 
@@ -19,7 +21,7 @@ def now():
     return datetime.now(UTC).isoformat()
 
 
-class JobRepository:
+class SQLJobRepository:
     def __init__(self, root: Path, *, database=None):
         from .config import bind_database, database_path
         from .migrations import migrate
@@ -27,10 +29,19 @@ class JobRepository:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = bind_database(self.root, database or database_path(self.root))
-        self.database.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.database, timeout=30)
-        self.db.row_factory = sqlite3.Row
+        if not network_database():
+            self.database.parent.mkdir(parents=True, exist_ok=True)
+        self.db = connect(self.root)
         migrate(self.db)
+
+    def channels(self, channel_id=None):
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT * FROM channels" + (" WHERE id=?" if channel_id else ""),
+                (channel_id,) if channel_id else (),
+            )
+        ]
 
     def channel(self, channel: dict):
         with self.db:
@@ -58,7 +69,7 @@ class JobRepository:
                     ),
                 )
                 self.db.execute(
-                    "INSERT OR IGNORE INTO jobs(video_id,profile,updated_at) VALUES(?,?,?)",
+                    "INSERT INTO jobs(video_id,profile,updated_at) VALUES(?,?,?) ON CONFLICT DO NOTHING",
                     (v["id"], profile, now()),
                 )
             self.discovery(channel_id, kind, "complete", len(videos))
@@ -95,6 +106,8 @@ class JobRepository:
         )
         identity = json.dumps({k: health.get(k) for k in keys}, sort_keys=True)
         with self.db:
+            if getattr(self.db, "dialect", None) == "postgres":
+                serialize(self.db, "profile:" + profile)
             existing = self.db.execute(
                 "SELECT identity FROM profiles WHERE name=?", (profile,)
             ).fetchone()
@@ -102,7 +115,9 @@ class JobRepository:
                 raise ProfileChanged(
                     f"ASR model/settings changed for {profile}; use an explicit new --profile to upgrade"
                 )
-            self.db.execute("INSERT OR IGNORE INTO profiles VALUES(?,?)", (profile, identity))
+            self.db.execute(
+                "INSERT INTO profiles VALUES(?,?) ON CONFLICT DO NOTHING", (profile, identity)
+            )
 
     def retry(self, ids=None):
         sql = "UPDATE jobs SET state='pending',next_retry=0,download_attempts=0,asr_attempts=0,error=NULL,error_kind=NULL WHERE state='failed'"
@@ -165,10 +180,11 @@ class JobRepository:
         require_summary=False,
     ):
         plan = Plan(require_diarization, require_postprocessing, require_summary)
+        stamp = database_clock(self.db)
         return [
             r
             for r in self.pipeline_jobs(profile=profile, ids=ids, channel=channel)
-            if (due := plan.due(r, max_attempts)) is not None and due <= time.time()
+            if (due := plan.due(r, max_attempts)) is not None and due <= stamp
         ]
 
     def next_due(self, plan, *, max_attempts=3, **scope):
@@ -194,8 +210,8 @@ class JobRepository:
             "artifact": "artifacts",
         }
         table = tables[stage_name]
-        columns = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
-        if not set(values).issubset(columns - {"job_id", "workflow"}):
+        fields = set(columns(self.db, table))
+        if not set(values).issubset(fields - {"job_id", "workflow"}):
             raise ValueError("Unknown stage field")
         from .execution import assert_owned
 
@@ -220,6 +236,66 @@ class JobRepository:
                     "step": values.get("stage"),
                 },
             )
+
+    def status_data(self):
+        return {
+            "jobs": [
+                dict(r)
+                for r in self.db.execute(
+                    "SELECT profile,state,download_state,asr_state,count(*) AS count FROM jobs GROUP BY profile,state,download_state,asr_state"
+                )
+            ],
+            "discovery": [dict(r) for r in self.db.execute("SELECT * FROM discovery")],
+            "transcripts": dict(
+                self.db.execute(
+                    "SELECT COUNT(*) AS count, SUM(duration) AS audio_seconds,SUM(processing_seconds) AS asr_seconds FROM transcripts"
+                ).fetchone()
+            ),
+            "diarization": [
+                dict(r)
+                for r in self.db.execute(
+                    "SELECT j.profile,d.state,d.stage,COUNT(*) AS count FROM diarizations d JOIN jobs j ON j.id=d.job_id GROUP BY j.profile,d.state,d.stage"
+                )
+            ],
+            "completed_jobs": self.db.execute(
+                "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id JOIN postprocessings p ON p.job_id=j.id JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary' WHERE j.state='complete' AND d.state='complete' AND p.state='complete' AND a.state='complete'"
+            ).fetchone()[0],
+            "awaiting_diarization": self.db.execute(
+                "SELECT COUNT(*) FROM jobs j LEFT JOIN diarizations d ON d.job_id=j.id WHERE j.state='complete' AND COALESCE(d.state,'pending')!='complete'"
+            ).fetchone()[0],
+            "postprocessing": [
+                dict(r)
+                for r in self.db.execute(
+                    "SELECT j.profile,p.state,p.stage,COUNT(*) AS count FROM postprocessings p JOIN jobs j ON j.id=p.job_id GROUP BY j.profile,p.state,p.stage"
+                )
+            ],
+            "awaiting_postprocessing": self.db.execute(
+                "SELECT COUNT(*) FROM jobs j JOIN diarizations d ON d.job_id=j.id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.state='complete' AND d.state='complete' AND COALESCE(p.state,'pending')!='complete'"
+            ).fetchone()[0],
+            "artifacts": [
+                dict(r)
+                for r in self.db.execute(
+                    "SELECT j.profile,a.workflow,a.state,a.stage,COUNT(*) AS count FROM artifacts a JOIN jobs j ON j.id=a.job_id GROUP BY j.profile,a.workflow,a.state,a.stage"
+                )
+            ],
+            "awaiting_summary": self.db.execute(
+                "SELECT COUNT(*) FROM jobs j JOIN postprocessings p ON p.job_id=j.id LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary' WHERE p.state='complete' AND COALESCE(a.state,'pending')!='complete'"
+            ).fetchone()[0],
+        }
+
+    def failures(self):
+        return [
+            [dict(row) for row in self.db.execute(query)]
+            for query in (
+                "SELECT j.video_id,j.profile,a.workflow,a.stage AS failed_stage,a.error,a.attempts,a.save_attempts,a.next_retry FROM artifacts a JOIN jobs j ON j.id=a.job_id WHERE a.state='failed'",
+                "SELECT video_id,profile,failed_stage,error_kind,error,download_attempts,asr_attempts,next_retry,audio_path FROM jobs WHERE state='failed'",
+                "SELECT j.video_id,j.profile,p.stage AS failed_stage,p.error,p.download_attempts,p.attempts,p.save_attempts,p.next_retry FROM postprocessings p JOIN jobs j ON j.id=p.job_id WHERE p.state='failed'",
+                "SELECT j.video_id,j.profile,d.stage AS failed_stage,d.error,d.download_attempts,d.attempts AS diarization_attempts,d.save_attempts,d.next_retry,d.audio_path FROM diarizations d JOIN jobs j ON j.id=d.job_id WHERE d.state='failed'",
+            )
+        ]
+
+    def video_id(self, job_id):
+        return self.db.execute("SELECT video_id FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
 
     def transcript(self, job_id):
         return self.db.execute("SELECT * FROM transcripts WHERE job_id=?", (job_id,)).fetchone()
@@ -252,7 +328,7 @@ class JobRepository:
         with self.db:
             assert_owned(self.db, self.root)
             self.db.execute(
-                f"INSERT OR IGNORE INTO {table}({','.join(values)}) VALUES({','.join('?' for _ in values)})",
+                f"INSERT INTO {table}({','.join(values)}) VALUES({','.join('?' for _ in values)}) ON CONFLICT DO NOTHING",
                 tuple(values.values()),
             )
         return self.stage_row(stage_name, job_id, workflow=workflow)
@@ -294,6 +370,8 @@ class JobRepository:
 
         with self.db:
             assert_owned(self.db, self.root)
+            if getattr(self.db, "dialect", None) == "postgres":
+                serialize(self.db, "diarization-profile:" + profile)
             existing = self.db.execute(
                 "SELECT identity FROM diarization_profiles WHERE profile=?", (profile,)
             ).fetchone()
@@ -302,7 +380,8 @@ class JobRepository:
                     "Diarization model/settings changed; use an explicit new profile"
                 )
             self.db.execute(
-                "INSERT OR IGNORE INTO diarization_profiles VALUES(?,?)", (profile, identity)
+                "INSERT INTO diarization_profiles VALUES(?,?) ON CONFLICT DO NOTHING",
+                (profile, identity),
             )
 
     def stage_records(self, stage_name, *, states=None):
@@ -342,7 +421,7 @@ class JobRepository:
                 key = "id" if stage == "asr" else "job_id"
                 self.db.execute(
                     f"UPDATE {table} SET {values} WHERE state='active' AND NOT EXISTS(SELECT 1 FROM claims WHERE resource='job:'||{table}.{key} AND expires>?)",
-                    (time.time(),),
+                    (database_clock(self.db),),
                 )
 
     def stage_inputs(self, completed_stage, *, order="published", **scope):
@@ -364,9 +443,9 @@ class JobRepository:
     def enqueue(self, request, dedupe):
         import uuid
 
-        stamp = time.time()
+        stamp = database_clock(self.db)
         with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
+            serialize(self.db, "submission:" + dedupe)
             row = self.db.execute(
                 "SELECT * FROM submissions WHERE dedupe=? AND state IN ('queued','active')",
                 (dedupe,),
@@ -397,7 +476,7 @@ class JobRepository:
         return identifier, True
 
     def update_submission(self, identifier, **values):
-        if not set(values) <= {"state", "pid", "error", "result"}:
+        if not set(values) <= {"state", "pid", "error", "result", "worker_id"}:
             raise ValueError("Unknown submission field")
         with self.db:
             from .execution import assert_owned
@@ -405,10 +484,10 @@ class JobRepository:
             assert_owned(self.db, self.root)
             if "result" in values:
                 self.db.execute(
-                    "INSERT OR REPLACE INTO submission_results VALUES(?,?)",
+                    "INSERT INTO submission_results VALUES(?,?) ON CONFLICT(id) DO UPDATE SET result=excluded.result",
                     (identifier, values.pop("result")),
                 )
-            values["updated"] = time.time()
+            values["updated"] = database_clock(self.db)
             self.db.execute(
                 "UPDATE submissions SET " + ",".join(k + "=?" for k in values) + " WHERE id=?",
                 (*values.values(), identifier),
@@ -433,10 +512,10 @@ class JobRepository:
         ]
 
     def reclaim_submissions(self):
-        stamp = time.time()
+        stamp = database_clock(self.db)
         with self.db:
             result = self.db.execute(
-                "UPDATE submissions SET state='queued',pid=NULL,updated=? WHERE state IN ('active','queued') AND (state='active' OR pid IS NOT NULL) AND updated<? AND NOT EXISTS (SELECT 1 FROM claims WHERE resource='submission:' || submissions.id AND expires>?)",
+                "UPDATE submissions SET state='queued',pid=NULL,worker_id=NULL,updated=? WHERE state IN ('active','queued') AND (state='active' OR pid IS NOT NULL) AND updated<? AND NOT EXISTS (SELECT 1 FROM claims WHERE resource='submission:' || submissions.id AND expires>?)",
                 (stamp, stamp - 90, stamp),
             )
         return result.rowcount
@@ -444,7 +523,8 @@ class JobRepository:
     def owned(self, resource):
         return (
             self.db.execute(
-                "SELECT 1 FROM claims WHERE resource=? AND expires>?", (resource, time.time())
+                "SELECT 1 FROM claims WHERE resource=? AND expires>?",
+                (resource, database_clock(self.db)),
             ).fetchone()
             is not None
         )
@@ -461,7 +541,7 @@ class JobRepository:
         with self.db:
             self.db.execute(
                 "INSERT INTO runtime_events(run_id,event,created,data) VALUES(?,?,?,?)",
-                (run_id, event, time.time(), json.dumps(data, default=str)),
+                (run_id, event, database_clock(self.db), json.dumps(data, default=str)),
             )
 
     def begin_attempt(self, job_id, stage, workflow=None, run_id=None):
@@ -474,12 +554,12 @@ class JobRepository:
         with self.db:
             self.db.execute(
                 "INSERT INTO attempts(id,job_id,stage,workflow,run_id,state,started) VALUES(?,?,?,?,?,?,?)",
-                (identifier, job_id, stage, workflow, run_id, "active", time.time()),
+                (identifier, job_id, stage, workflow, run_id, "active", database_clock(self.db)),
             )
         return identifier
 
     def finish_attempt(self, identifier, state, *, metrics=None, error=None, run_id=None):
-        stamp = time.time()
+        stamp = database_clock(self.db)
         with self.db:
             self.db.execute(
                 "UPDATE attempts SET state=?,finished=?,elapsed=?-started,metrics=?,error=?,run_id=COALESCE(run_id,?) WHERE id=?",
@@ -490,13 +570,16 @@ class JobRepository:
         with self.db:
             result = self.db.execute(
                 "UPDATE attempts SET state='interrupted',finished=?,error='Owner expired' WHERE state='active' AND job_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM claims WHERE resource='job:' || attempts.job_id AND expires>?)",
-                (time.time(), time.time()),
+                (database_clock(self.db), database_clock(self.db)),
             )
         return result.rowcount
 
-    def transcript_records(self, *, ids=None, profile=None):
+    def transcript_records(self, *, ids=None, profile=None, job_id=None):
         conditions = ["j.state='complete'"]
         values = []
+        if job_id is not None:
+            conditions.append("j.id=?")
+            values.append(job_id)
         if ids:
             conditions.append("j.video_id IN (" + ",".join("?" for _ in ids) + ")")
             values.extend(ids)
@@ -516,7 +599,14 @@ class JobRepository:
         with self.db:
             assert_owned(self.db, self.root)
             self.db.execute(
-                "INSERT OR REPLACE INTO transcripts VALUES(" + ",".join("?" for _ in record) + ")",
+                "INSERT INTO transcripts VALUES("
+                + ",".join("?" for _ in record)
+                + ") ON CONFLICT(job_id) DO UPDATE SET "
+                + ",".join(
+                    name + "=excluded." + name
+                    for name in columns(self.db, "transcripts")
+                    if name != "job_id"
+                ),
                 record,
             )
             self.db.execute(
@@ -525,19 +615,66 @@ class JobRepository:
             )
 
 
-class SQLiteClaims:
+class SQLiteJobRepository(SQLJobRepository):
+    """Default embedded database adapter."""
+
+
+class PostgreSQLJobRepository(SQLJobRepository):
+    """Network database adapter with atomic claims and queue reservation."""
+
+    def claim_submission(self, worker_id):
+        with self.db:
+            row = self.db.execute(
+                "SELECT id FROM submissions WHERE state='queued' AND worker_id IS NULL ORDER BY created FOR UPDATE SKIP LOCKED LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            self.db.execute(
+                "UPDATE submissions SET state='active',worker_id=?,updated=? WHERE id=?",
+                (worker_id, database_clock(self.db), row[0]),
+            )
+            return self.submission(row[0])
+
+
+def JobRepository(root, **kwargs):
+    return (PostgreSQLJobRepository if network_database() else SQLiteJobRepository)(root, **kwargs)
+
+
+class SQLClaims:
     """Database-backed atomic ownership; independent of worker scratch paths."""
 
     def __init__(self, root):
-        from .config import database_path
         from .migrations import CLAIMS
 
-        self.db = sqlite3.connect(database_path(root), timeout=30)
-        self.db.executescript(CLAIMS)
+        self.db = connect(root)
+        if not network_database():
+            self.db.executescript(CLAIMS)
 
     def acquire(self, resource, owner, *, ttl=90, clock=None):
         stamp = time.time() if clock is None else clock
         with self.db:
+            if network_database():
+                serialize(self.db, "claim-coordination")
+                if clock is None:
+                    stamp = self.db.execute(
+                        "SELECT EXTRACT(EPOCH FROM clock_timestamp())"
+                    ).fetchone()[0]
+                    stamp = float(stamp)
+                if (
+                    resource == "archive"
+                    and self.db.execute(
+                        "SELECT 1 FROM claims WHERE resource LIKE 'worker:%' AND expires>? LIMIT 1",
+                        (stamp,),
+                    ).fetchone()
+                ):
+                    return False
+                if (
+                    resource.startswith("worker:")
+                    and self.db.execute(
+                        "SELECT 1 FROM claims WHERE resource='archive' AND expires>?", (stamp,)
+                    ).fetchone()
+                ):
+                    return False
             r = self.db.execute(
                 "INSERT INTO claims VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE claims.expires<=? OR claims.owner=?",
                 (resource, owner, stamp + ttl, stamp, owner),
@@ -547,6 +684,10 @@ class SQLiteClaims:
     def renew(self, resource, owner, *, ttl=90, clock=None):
         stamp = time.time() if clock is None else clock
         with self.db:
+            if network_database() and clock is None:
+                stamp = float(
+                    self.db.execute("SELECT EXTRACT(EPOCH FROM clock_timestamp())").fetchone()[0]
+                )
             return (
                 self.db.execute(
                     "UPDATE claims SET expires=? WHERE resource=? AND owner=? AND expires>?",
@@ -561,10 +702,18 @@ class SQLiteClaims:
 
     @staticmethod
     def fence(db, resource, owner):
+        if getattr(db, "dialect", "sqlite") == "postgres":
+            return (
+                db.execute(
+                    "UPDATE claims SET owner=owner WHERE resource=? AND owner=? AND expires>EXTRACT(EPOCH FROM clock_timestamp())",
+                    (resource, owner),
+                ).rowcount
+                == 1
+            )
         return (
             db.execute(
                 "UPDATE claims SET owner=owner WHERE resource=? AND owner=? AND expires>?",
-                (resource, owner, time.time()),
+                (resource, owner, database_clock(db)),
             ).rowcount
             == 1
         )
@@ -580,34 +729,47 @@ class ArchiveViews:
         from .config import database_path
 
         self.database = database_path(root)
+        self.root = root
 
     def _one(self, query, values):
         from contextlib import closing
 
-        with closing(
-            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
-        ) as db:
+        with closing(connect(self.root, readonly=True)) as db:
             return db.execute(query, values).fetchone()
 
     def owned(self, resource):
         try:
-            return (
-                self._one(
-                    "SELECT 1 FROM claims WHERE resource=? AND expires>?", (resource, time.time())
+            from contextlib import closing
+
+            with closing(connect(self.root, readonly=True)) as db:
+                return (
+                    db.execute(
+                        "SELECT 1 FROM claims WHERE resource=? AND expires>?",
+                        (resource, database_clock(db)),
+                    ).fetchone()
+                    is not None
                 )
+        except database_errors():
+            return False
+
+    def workers_running(self):
+        from contextlib import closing
+
+        with closing(connect(self.root, readonly=True)) as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM claims WHERE resource LIKE 'worker:%' AND expires>? LIMIT 1",
+                    (database_clock(db),),
+                ).fetchone()
                 is not None
             )
-        except sqlite3.OperationalError:
-            return False
 
     def events(self):
         from contextlib import closing
         from datetime import UTC, datetime
 
         try:
-            with closing(
-                sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
-            ) as db:
+            with closing(connect(self.root, readonly=True)) as db:
                 return [
                     {
                         **json.loads(data),
@@ -619,15 +781,13 @@ class ArchiveViews:
                         "SELECT run_id,event,created,data FROM runtime_events ORDER BY id DESC LIMIT 20"
                     )
                 ]
-        except sqlite3.OperationalError:
+        except database_errors():
             return []
 
     def resource_transcript(self, *, video_id=None, profile=None, job_id=None):
         from contextlib import closing
 
-        with closing(
-            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
-        ) as db:
+        with closing(connect(self.root, readonly=True)) as db:
             db.row_factory = sqlite3.Row
             condition, values = (
                 ("j.id=?", (job_id,))
@@ -655,9 +815,7 @@ class ArchiveViews:
     def resource_profiles(self, video_id):
         from contextlib import closing
 
-        with closing(
-            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
-        ) as db:
+        with closing(connect(self.root, readonly=True)) as db:
             return [
                 {"profile": r[0]}
                 for r in db.execute(
@@ -668,9 +826,7 @@ class ArchiveViews:
     def resource_artifacts(self, job_id):
         from contextlib import closing
 
-        with closing(
-            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
-        ) as db:
+        with closing(connect(self.root, readonly=True)) as db:
             return [
                 {"workflow": r[0], "state": r[1]}
                 for r in db.execute(
@@ -700,9 +856,7 @@ class ArchiveViews:
     def snapshot(self):
         import contextlib
 
-        with contextlib.closing(
-            sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=3)
-        ) as db:
+        with contextlib.closing(connect(self.root, readonly=True)) as db:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN")
             channels = [dict(r) for r in db.execute("SELECT * FROM channels ORDER BY title")]

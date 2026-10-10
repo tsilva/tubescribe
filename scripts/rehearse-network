@@ -1,0 +1,6 @@
+#!/bin/sh
+# Isolated PostgreSQL schemas and HTTP S3; no production data or paid inference.
+set -eu
+cd "$(dirname "$0")/.."
+export TUBESCRIBE_NETWORK_TESTS=1
+exec uv --config-file uv.toml run --frozen --inexact --extra cloud --group rehearsal python -m unittest discover -s tests -p test_network_runtime.py -v
