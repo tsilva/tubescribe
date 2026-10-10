@@ -112,6 +112,7 @@ class NetworkRuntime(unittest.TestCase):
                 "TUBESCRIBE_BIND": "127.0.0.1",
                 "TUBESCRIBE_ACCESS_TOKEN": "",
                 "TUBESCRIBE_DISPATCH": "queue",
+                "TUBESCRIBE_MIGRATIONS": "check",
                 "TUBESCRIBE_WORKER_POLL": "0.05",
                 "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID", "rehearsal"),
                 "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY", "rehearsal"),
@@ -122,6 +123,10 @@ class NetworkRuntime(unittest.TestCase):
         )
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        from tubescribe.migrations import manage
+
+        # Network services validate only. The migration role initializes each test schema.
+        manage(Path(self.base.name) / self.schema, "apply")
         boto3.client("s3", endpoint_url=self.endpoint).create_bucket(Bucket=self.bucket)
         self.fixture = pipeline.FinalStage()
         self.fixture.setUp()
@@ -138,6 +143,86 @@ class NetworkRuntime(unittest.TestCase):
         self.addCleanup(store.db.close)
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         return store
+
+    def test_explicit_postgres_upgrade_preserves_publications_and_queued_work(self):
+        from contextlib import closing
+        from urllib.parse import quote, urlencode
+
+        from psycopg import sql
+        from upgrade_fixture import load_postgres_v4, write_v4
+
+        from tubescribe.database import columns, connect
+        from tubescribe.migrations import SchemaCompatibilityError, manage, migrate
+        from tubescribe.worker import work
+
+        self.fixture.full()
+        build_one(self.store, self.fixture.job["id"], "summary", bridge=self.fixture.bridge)
+        queued = Dispatcher(self.store).submit(JobRequest("artifacts", {"workflow": "notes"}))
+        calls = self.fixture.requests
+        before = {key: self.store.read_key(key) for key in self.store.blobs.keys()}
+        old = Path(self.base.name) / (self.schema + "-v4.sqlite3")
+        self.addCleanup(old.unlink, missing_ok=True)
+        write_v4(self.store.db, old)
+        schema = "upgrade_" + uuid.uuid4().hex
+        self.admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        self.addCleanup(
+            lambda: self.admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )
+        )
+        url = (
+            self.database_url
+            + ("&" if "?" in self.database_url else "?")
+            + urlencode({"options": "-c search_path=" + schema}, quote_via=quote)
+        )
+        with patch.dict(os.environ, {"TUBESCRIBE_DATABASE_URL": url}):
+            root = self.store.root / "upgraded-worker"
+            with self.assertRaisesRegex(SchemaCompatibilityError, "requires migration"):
+                Store(root)
+            with closing(connect(root)) as db:
+                load_postgres_v4(db, old)
+            with self.assertRaisesRegex(SchemaCompatibilityError, "requires migration"):
+                Store(root)
+
+            with closing(connect(root)) as db:
+
+                class FailLedger:
+                    def execute(self, statement, *args):
+                        if statement == "INSERT INTO schema_migrations VALUES(5)":
+                            raise RuntimeError("simulated PostgreSQL migration failure")
+                        return db.execute(statement, *args)
+
+                    def __enter__(self):
+                        db.__enter__()
+                        return self
+
+                    def __exit__(self, *args):
+                        return db.__exit__(*args)
+
+                    def __getattr__(self, name):
+                        return getattr(db, name)
+
+                with self.assertRaisesRegex(RuntimeError, "simulated PostgreSQL"):
+                    migrate(FailLedger())
+                self.assertEqual(manage(root, "status")["schema_version"], 4)
+                self.assertNotIn("worker_id", columns(db, "submissions"))
+            self.assertEqual(manage(root, "apply")["previous_version"], 4)
+            self.assertEqual(manage(root, "apply")["previous_version"], 5)
+            upgraded = self.replacement("upgraded")
+            self.assertEqual(upgraded.submission(queued)["state"], "queued")
+            upgraded.recover()
+            result = work(upgraded, "http://127.0.0.1:1", bridge=self.fixture.bridge)
+            self.assertEqual(result["skipped"], 1)
+            self.assertEqual(self.fixture.requests, calls)
+            for key, data in before.items():
+                self.assertEqual(upgraded.read_key(key), data, key)
+            with upgraded.db:
+                upgraded.db.execute("INSERT INTO schema_migrations VALUES(6)")
+            with self.assertRaisesRegex(SchemaCompatibilityError, "newer"):
+                Store(root)
+            with self.assertRaisesRegex(SchemaCompatibilityError, "newer"):
+                manage(root, "apply")
+            self.assertEqual(upgraded.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
 
     def test_pipeline_and_publications_survive_all_application_scratch_deletion(self):
         from tubescribe.worker import work
@@ -329,6 +414,9 @@ class NetworkRuntime(unittest.TestCase):
         with patch.dict(
             os.environ, {"TUBESCRIBE_DATABASE_URL": url, "TUBESCRIBE_S3_BUCKET": bucket}
         ):
+            from tubescribe.migrations import manage
+
+            manage(Path(self.base.name) / "restored", "apply")
             restored = self.replacement("restored")
             restore_archive(restored, backup)
             restored.recover()

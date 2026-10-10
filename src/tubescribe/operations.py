@@ -5,14 +5,17 @@ from contextlib import closing
 from .blobs import DirectoryObjects, LocalArtifacts
 from .config import RuntimeConfig
 from .database import clock, connect
+from .migrations import check_schema
 
 
 def readiness(root):
-    checks = {"database": False, "objects": False}
+    checks = {"database": False, "schema": False, "objects": False}
     try:
         with closing(connect(root, readonly=True)) as db:
             db.execute("SELECT 1").fetchone()
-        checks["database"] = True
+            checks["database"] = True
+            check_schema(db)
+            checks["schema"] = True
     except Exception:
         pass
     try:
@@ -45,6 +48,7 @@ def readiness(root):
 
 def metrics(root):
     with closing(connect(root, readonly=True)) as db:
+        check_schema(db)
         stamp = clock(db)
         queue = db.execute(
             "SELECT state,COUNT(*),MIN(created) FROM submissions GROUP BY state"

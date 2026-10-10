@@ -13,7 +13,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "tubescribe-rehearsal-" + uuid.uuid4().hex[:8]
 RESTORE_PROJECT = PROJECT + "-restore"
-ENV = {**os.environ, "TUBESCRIBE_ACCESS_TOKEN": secrets.token_urlsafe(32)}
+ENV = {
+    **os.environ,
+    "TUBESCRIBE_ACCESS_TOKEN": secrets.token_urlsafe(32),
+    "TUBESCRIBE_RUNTIME_IMAGE": PROJECT + "-runtime",
+    "TUBESCRIBE_REHEARSAL_IMAGE": PROJECT + "-tests",
+    # Avoid exporting identical runtime layers for every role concurrently.
+    "COMPOSE_PARALLEL_LIMIT": "1",
+    "COMPOSE_BAKE": "false",
+}
 BASE = [
     "docker",
     "compose",
@@ -85,7 +93,6 @@ def restore_stack(job_id):
     source = compose("ps", "-q", "gateway-fixture").strip()
     compose(
         "up",
-        "--build",
         "-d",
         "database",
         "objects",
@@ -156,9 +163,9 @@ def main():
         )
         compose("config", "--quiet")
         print("Building isolated container stack: " + PROJECT, flush=True)
+        compose("build", "migrate", "objects", "gateway-fixture", timeout=1800)
         compose(
             "up",
-            "--build",
             "-d",
             "database",
             "objects",

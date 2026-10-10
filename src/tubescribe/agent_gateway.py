@@ -18,9 +18,10 @@ import httpx
 
 from .blobs import atomic_write
 from .config import RuntimeConfig
-from .database import clock, connect, database_errors, serialize
+from .database import clock, database_errors, serialize
 from .execution import capacity, lease
 from .inference import AgentRunner, LocalTools
+from .migrations import open_runtime
 from .storage import Store, durable_writes
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS agent_runs (
@@ -32,7 +33,7 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS agent_runs (
 class Runs:
     def __init__(self, root):
         self.root = Path(root)
-        self.db = connect(root)
+        self.db = open_runtime(root)
 
     def get(self, identifier):
         row = self.db.execute("SELECT * FROM agent_runs WHERE id=?", (identifier,)).fetchone()

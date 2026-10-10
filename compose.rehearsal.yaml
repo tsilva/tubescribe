@@ -14,6 +14,8 @@ services:
     depends_on:
       loopback:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
   worker2:
     extends:
       file: compose.network.yaml
@@ -25,7 +27,10 @@ services:
     depends_on:
       loopback:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
   gateway-fixture:
+    image: ${TUBESCRIBE_REHEARSAL_IMAGE:-tubescribe-rehearsal:local}
     extends:
       file: compose.network.yaml
       service: worker
@@ -40,3 +45,5 @@ services:
     depends_on:
       loopback:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully

@@ -1,5 +1,6 @@
 # Local network-boundary rehearsal. Application services share no filesystem volumes.
 x-runtime: &runtime
+  image: ${TUBESCRIBE_RUNTIME_IMAGE:-tubescribe-runtime:local}
   build:
     context: .
     target: runtime
@@ -15,6 +16,7 @@ x-runtime: &runtime
     AWS_DEFAULT_REGION: us-east-1
     AWS_EC2_METADATA_DISABLED: 'true'
     TUBESCRIBE_DISPATCH: queue
+    TUBESCRIBE_MIGRATIONS: check
     TUBESCRIBE_ACCESS_TOKEN: ${TUBESCRIBE_ACCESS_TOKEN:?Set a random archive token of at least 32 characters}
     TUBESCRIBE_PUBLIC_ORIGIN: ${TUBESCRIBE_PUBLIC_ORIGIN:-https://tubescribe.local}
   tmpfs:
@@ -24,7 +26,16 @@ x-runtime: &runtime
       condition: service_healthy
     initialize-objects:
       condition: service_completed_successfully
+    migrate:
+      condition: service_completed_successfully
 services:
+  migrate:
+    <<: *runtime
+    restart: 'no'
+    command: [migrate, apply]
+    depends_on:
+      database:
+        condition: service_healthy
   database:
     image: postgres:17-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826
     environment:
@@ -48,6 +59,7 @@ services:
       - objects:/data
     ports: ['127.0.0.1::8333']
   initialize-objects:
+    image: ${TUBESCRIBE_RUNTIME_IMAGE:-tubescribe-runtime:local}
     build:
       context: .
       target: runtime

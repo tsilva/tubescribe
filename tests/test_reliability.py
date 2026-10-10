@@ -123,7 +123,9 @@ class Reliability(unittest.TestCase):
             ):
                 reply = httpx.get(base + "/api/ready", headers=headers, trust_env=False)
                 self.assertEqual(reply.status_code, 503)
-                self.assertEqual(reply.json()["checks"], {"database": True, "objects": False})
+                self.assertEqual(
+                    reply.json()["checks"], {"database": True, "schema": True, "objects": False}
+                )
                 self.assertEqual(
                     httpx.get(base + "/api/health", headers=headers, trust_env=False).status_code,
                     200,

@@ -1,5 +1,125 @@
 """Numbered SQL migrations, including adoption of pre-versioned SQLite archives."""
 
+import os
+
+SCHEMA_VERSION = 5
+
+
+class SchemaCompatibilityError(ValueError):
+    """Application and archive must agree before serving or processing records."""
+
+
+def migration_mode():
+    mode = os.environ.get(
+        "TUBESCRIBE_MIGRATIONS", "check" if os.environ.get("TUBESCRIBE_DATABASE_URL") else "auto"
+    )
+    if mode not in {"auto", "check"}:
+        raise ValueError("TUBESCRIBE_MIGRATIONS must be auto or check")
+    return mode
+
+
+def has_table(db, table):
+    if getattr(db, "dialect", "sqlite") == "postgres":
+        return bool(
+            db.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema=current_schema() AND table_name=?",
+                (table,),
+            ).fetchone()
+        )
+    return bool(
+        db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+    )
+
+
+def schema_version(db):
+    if not has_table(db, "schema_migrations"):
+        return 0
+    versions = [
+        row[0] for row in db.execute("SELECT version FROM schema_migrations ORDER BY version")
+    ]
+    version = versions[-1] if versions else 0
+    if version > SCHEMA_VERSION:
+        raise SchemaCompatibilityError(
+            f"Database schema {version} is newer than this application ({SCHEMA_VERSION}); upgrade the application"
+        )
+    if versions != list(range(1, version + 1)):
+        raise SchemaCompatibilityError(
+            "Database migration ledger is incomplete; restore a verified backup"
+        )
+    return version
+
+
+def check_schema(db):
+    version = schema_version(db)
+    if version != SCHEMA_VERSION:
+        raise SchemaCompatibilityError(
+            f"Database schema {version} requires migration to {SCHEMA_VERSION}; stop services and run tubescribe migrate apply"
+        )
+    return version
+
+
+def open_runtime(root):
+    """Container/network startup only checks; local archives retain automatic setup."""
+    from .config import database_path
+    from .database import connect, network_database
+
+    mode = migration_mode()
+    if mode == "check" and not network_database() and not database_path(root).exists():
+        raise SchemaCompatibilityError("Database is uninitialized; run tubescribe migrate apply")
+    db = connect(root, must_exist=mode == "check")
+    try:
+        if mode == "auto":
+            if schema_version(db) != SCHEMA_VERSION:
+                migrate(db)
+        check_schema(db)
+        if not network_database():
+            # Connection/runtime settings still apply to current-version portable backups.
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=FULL")
+        return db
+    except BaseException:
+        db.close()
+        raise
+
+
+def manage(root, action):
+    from contextlib import closing
+    from pathlib import Path
+
+    from .config import database_path
+    from .database import connect, network_database
+
+    if action not in {"status", "apply"}:
+        raise ValueError("Migration action must be status or apply")
+    root = Path(root).resolve()
+    if action == "apply" and not network_database():
+        database_path(root).parent.mkdir(parents=True, exist_ok=True)
+    if action == "status" and not network_database() and not database_path(root).exists():
+        version = 0
+    else:
+        with closing(connect(root, readonly=action == "status")) as db:
+            version = schema_version(db)
+            if action == "apply":
+                migrate(db)
+                check_schema(db)
+    return {
+        "previous_version": version,
+        "schema_version": SCHEMA_VERSION if action == "apply" else version,
+        "required_version": SCHEMA_VERSION,
+        "compatible": action == "apply" or version == SCHEMA_VERSION,
+    }
+
+
+def ensure_idle(db, version):
+    if version < SCHEMA_VERSION and has_table(db, "claims"):
+        from .database import clock
+
+        if db.execute("SELECT 1 FROM claims WHERE expires>? LIMIT 1", (clock(db),)).fetchone():
+            raise SchemaCompatibilityError(
+                "Stop services and wait for active leases before migrating"
+            )
+
+
 BASE = """
           PRAGMA journal_mode=WAL;
           PRAGMA synchronous=FULL;
@@ -59,6 +179,7 @@ CLAIMS = "CREATE TABLE IF NOT EXISTS claims (resource TEXT PRIMARY KEY, owner TE
 
 
 def migrate(db):
+    schema_version(db)  # Refuse future/corrupt ledgers before any DDL or PRAGMA writes.
     if getattr(db, "dialect", "sqlite") == "postgres":
         return migrate_postgres(db)
     db.execute("PRAGMA journal_mode=WAL")
@@ -68,7 +189,8 @@ def migrate(db):
     db.execute("BEGIN IMMEDIATE")
     try:
         db.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)")
-        version = db.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()[0]
+        version = schema_version(db)
+        ensure_idle(db, version)
         if version < 1:
             for statement in (CLAIMS + BASE).split(";"):
                 if statement.strip() and not statement.strip().startswith("PRAGMA"):
@@ -117,9 +239,8 @@ def migrate_postgres(db):
     with db:
         serialize(db, "schema-migrations")
         db.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)")
-        version = db.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()[0]
-        if version > 5:
-            raise ValueError("Database schema is newer than this application")
+        version = schema_version(db)
+        ensure_idle(db, version)
         if version < 1:
             schema = re.sub(r"\bREAL\b", "DOUBLE PRECISION", CLAIMS + BASE)
             schema = schema.replace(

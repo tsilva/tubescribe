@@ -1,5 +1,6 @@
 # Local deployment rehearsal. Supply a token and terminate public TLS at a proxy.
 x-runtime: &runtime
+  image: ${TUBESCRIBE_RUNTIME_IMAGE:-tubescribe-runtime:local}
   build:
     context: .
     target: runtime
@@ -9,6 +10,7 @@ x-runtime: &runtime
     TUBESCRIBE_DATABASE: /state/archive.sqlite3
     TUBESCRIBE_OBJECTS: /objects
     TUBESCRIBE_DISPATCH: queue
+    TUBESCRIBE_MIGRATIONS: check
     TUBESCRIBE_ACCESS_TOKEN: ${TUBESCRIBE_ACCESS_TOKEN:?Set a random archive access token of at least 32 characters}
     TUBESCRIBE_PUBLIC_ORIGIN: ${TUBESCRIBE_PUBLIC_ORIGIN:-https://tubescribe.local}
   volumes:
@@ -16,7 +18,14 @@ x-runtime: &runtime
     - objects:/objects
   tmpfs:
     - /scratch:uid=10001,gid=10001
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
 services:
+  migrate:
+    <<: *runtime
+    command: [migrate, apply]
+    depends_on: {}
   web:
     <<: *runtime
     environment:

@@ -27,6 +27,8 @@ def main():
     p.add_argument("--endpoint", default=os.environ.get("TUBESCRIBE_ENDPOINT"))
     p.add_argument("--submission", help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="command", required=True)
+    c = sub.add_parser("migrate", help="Inspect or explicitly upgrade the database schema")
+    c.add_argument("action", choices=["status", "apply"])
     c = sub.add_parser("queue", help="Durable worker queue")
     c.add_argument("action", choices=["serve", "once", "submit", "status"])
     c.add_argument("--request", type=Path, help="JSON JobRequest for submit")
@@ -164,7 +166,21 @@ def main():
         except Exception:
             out({"error": "Durable services unavailable"})
             return 1
-    store = Store(args.data)
+    if args.command == "migrate":
+        from .migrations import manage
+
+        try:
+            result = manage(args.data, args.action)
+            out(result)
+            return int(not result["compatible"])
+        except Exception as error:
+            print(f"ERROR: {error}", file=sys.stderr, flush=True)
+            return 1
+    try:
+        store = Store(args.data)
+    except Exception as error:
+        print(f"ERROR: {error}", file=sys.stderr, flush=True)
+        return 1
 
     def stop_worker(signum, frame):
         raise KeyboardInterrupt()

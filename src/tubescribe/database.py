@@ -109,7 +109,7 @@ class PostgreSQLConnection:
         self.connection.close()
 
 
-def connect(root, *, readonly=False):
+def connect(root, *, readonly=False, must_exist=False):
     from .config import database_path
 
     if url := network_database():
@@ -118,9 +118,14 @@ def connect(root, *, readonly=False):
     db = (
         sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=3)
         if readonly
+        else sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=30)
+        if must_exist
         else sqlite3.connect(path, timeout=30)
     )
     db.row_factory = sqlite3.Row
+    # This is connection-local; schema-check startup must retain referential integrity
+    # even when it never invokes the migration runner.
+    db.execute("PRAGMA foreign_keys=ON")
     return db
 
 

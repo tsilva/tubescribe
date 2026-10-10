@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Reproduce the PR checks locally; inference is synthetic and network tests are opt-in.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# A developer may have a live archive configured in their shell. Test fixtures must
+# start from local defaults, then select their own temporary databases and objects.
+for task_setting in ${!TUBESCRIBE_@}; do
+  unset "$task_setting"
+done
+uv --config-file uv.toml run --frozen --inexact --extra cloud --group dev ruff check src tests scripts/rehearse-containers
+TUBESCRIBE_NETWORK_TESTS=0 uv --config-file uv.toml run --frozen --inexact --extra cloud --group dev python -m unittest discover -s tests -v

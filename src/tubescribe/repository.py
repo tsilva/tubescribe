@@ -24,15 +24,14 @@ def now():
 class SQLJobRepository:
     def __init__(self, root: Path, *, database=None):
         from .config import bind_database, database_path
-        from .migrations import migrate
+        from .migrations import open_runtime
 
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.database = bind_database(self.root, database or database_path(self.root))
         if not network_database():
             self.database.parent.mkdir(parents=True, exist_ok=True)
-        self.db = connect(self.root)
-        migrate(self.db)
+        self.db = open_runtime(self.root)
 
     def channels(self, channel_id=None):
         return [
@@ -644,11 +643,9 @@ class SQLClaims:
     """Database-backed atomic ownership; independent of worker scratch paths."""
 
     def __init__(self, root):
-        from .migrations import CLAIMS
+        from .migrations import open_runtime
 
-        self.db = connect(root)
-        if not network_database():
-            self.db.executescript(CLAIMS)
+        self.db = open_runtime(root)
 
     def acquire(self, resource, owner, *, ttl=90, clock=None):
         stamp = time.time() if clock is None else clock

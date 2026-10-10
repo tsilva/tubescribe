@@ -376,7 +376,7 @@ existing local archive.
 | `src/tubescribe/pipeline.py` | Stage dependencies, completion, retry eligibility, and shared final-stage execution. |
 | `src/tubescribe/repository.py` | SQLite/PostgreSQL job records, claims, read models, submissions, attempts, events, and fenced commits. `Store` composes the selected adapter. |
 | `src/tubescribe/database.py` | Database connections, PostgreSQL transaction locks, server-clock ownership, and portable SQLite export. |
-| `src/tubescribe/migrations.py` | Numbered, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–5. |
+| `src/tubescribe/migrations.py` | Explicit schema upgrades, startup compatibility checks, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–5. |
 | `src/tubescribe/blobs.py` | Confined object keys, hashes, metadata, streamed file transfer, and verified bundle publication. Local, separate-volume, and in-memory adapters share the interface. `src/tubescribe/s3.py` adds S3-compatible objects with multipart uploads and verified streaming downloads. |
 | `src/tubescribe/storage.py` | Durable checkpoint writes, scratch materialization, fresh publication versions, and recovery. |
 | `src/tubescribe/submission.py` | Deduplicated durable requests, recorded results, and local process or independent queue dispatch. |
@@ -514,6 +514,7 @@ through their tools.
 | `TUBESCRIBE_DATABASE` | `DATA/archive.sqlite3`; durable SQLite location. |
 | `TUBESCRIBE_OBJECTS` | Unset; otherwise a separate durable object directory. Mutually exclusive with S3. |
 | `TUBESCRIBE_DATABASE_URL` | Unset; PostgreSQL URI overrides the SQLite adapter. |
+| `TUBESCRIBE_MIGRATIONS` | `auto` for local SQLite, `check` for PostgreSQL. Both Compose stacks use `check`: startup validates the schema and a separate migration service applies upgrades. |
 | `TUBESCRIBE_S3_BUCKET` | Unset; selects an existing S3-compatible bucket. |
 | `TUBESCRIBE_S3_ENDPOINT` | Unset uses AWS; otherwise HTTP(S) endpoint. Plain HTTP is restricted to loopback or the local Compose `objects` service. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` | Standard SDK credentials/region; use workload credentials when deployed later. |
@@ -551,6 +552,10 @@ targets, non-root execution, digest-pinned base/uv/Node images, and frozen Pytho
 The GPU target includes locked inference extras and requires the NVIDIA container runtime.
 OS packages are installed from the base distribution's repositories. The uv setup follows
 its [Docker integration guidance](https://docs.astral.sh/uv/guides/integration/docker/).
+
+Application roles share the same `tubescribe-runtime:local` image by default;
+`TUBESCRIBE_RUNTIME_IMAGE` selects another Compose image name. The rehearsal builds
+the runtime once and a separate test image, serializing builds to limit peak disk use.
 
 `compose.yaml` separates web and worker scratch with tmpfs and retains database/objects
 in volumes. Supply the access token and **HTTPS** ASR, diarization, and durable gateway
@@ -651,7 +656,7 @@ prompt/schema fingerprints for provenance. Authenticated web endpoints expose
 `/api/ready` (200/503), `/api/metrics` (JSON), and `/metrics` (Prometheus text).
 `/api/health` remains process liveness even when durable services are unavailable.
 The gateway exposes `/ready`, `/metrics` (JSON), and `/health` behind its bearer token.
-Readiness checks database connectivity and object-store access; it does not check GPU
+Readiness checks database connectivity, schema compatibility, and object-store access; it does not check GPU
 inference or AgentBridge capacity. Metrics include queue age and states, stage failures,
 active/expired leases, elapsed stage time, and available inference time/token usage.
 Labels exclude job IDs and transcript content. Ledger-derived totals are gauges so
@@ -679,6 +684,54 @@ SQLite/WAL remains for processes on one host with a local volume, **not a databa
 network filesystem**. PostgreSQL and S3 now provide the network boundaries for multiple
 workers. Deployment still requires service supervision, TLS, backups, and deployment
 credentials. This archive-level design does not provide multi-tenant isolation or user accounts.
+
+### Schema upgrades and automated verification
+
+Container and PostgreSQL application roles validate the database at startup rather than
+applying DDL. Both Compose stacks have a one-shot `migrate` service; web and workers wait
+for it to succeed. Local SQLite retains automatic initialization and upgrades for the
+existing personal-archive workflow. Set `TUBESCRIBE_MIGRATIONS=check` to use the same
+explicit procedure locally. Future schemas and incomplete migration ledgers are rejected
+in both modes. Readiness reports a separate `schema` check and returns 503 for an
+incompatible database.
+
+Before upgrading an existing installation, stop all web, worker, and gateway processes,
+export a verified backup with the existing version, then install/build the new version.
+Keep those processes stopped while checking and applying the schema:
+
+```bash
+scripts/tubescribe migrate status  # read-only; exit 1 when initialization/upgrade is needed
+scripts/tubescribe migrate apply   # transactional, repeatable; no model or object-store calls
+scripts/tubescribe migrate status  # compatible schema exits 0
+```
+
+Use the same database settings for the migration command and application services. In
+Compose, build the new runtime, run `docker compose run --rm migrate`, then start web and
+workers. Add `-f compose.network.yaml` for the PostgreSQL/S3 stack. Wait for live leases
+from stopped/crashed services to expire before applying an upgrade; migrations refuse
+an older schema while active leases remain. A failed migration rolls back its DDL and
+ledger together. Start services only after a successful migration. Schema downgrade and
+mixed-version rolling upgrades are not supported; rollback uses the previous application
+and its pre-upgrade backup restored into an empty target.
+
+```bash
+scripts/verify                 # lint and local tests, using the frozen dependency lock
+scripts/rehearse-network       # opt-in PostgreSQL + HTTP S3 tests
+scripts/rehearse-containers    # complete disposable PostgreSQL/SeaweedFS recovery rehearsal
+```
+
+`.github/workflows/verify.yaml` runs on PRs, pushes to `main`, `v*` tags, and manual
+dispatch. Local checks cover Python 3.11, 3.12, and 3.13; the container rehearsal runs
+after they pass. Actions are pinned to commit hashes, dependencies use `uv.lock`, and
+the workflow has read-only repository permissions with no deployment or production
+credentials. Model services are synthetic, so verification consumes no inference tokens.
+`scripts/verify` clears inherited `TUBESCRIBE_*` settings before running local fixtures,
+so a shell configured for a live archive cannot redirect these checks to that archive.
+The frozen schema-4 fixture comes from commit `e7c6b4c`, independently of current
+migration code. Upgrade tests check published SRT/Markdown/figures/summary delivery,
+queued work, completed-stage reuse, repeatability, transactional failure rollback, and
+future-schema rejection. PostgreSQL first shipped with schema 5; its upgrade test uses
+the equivalent historical schema-4 layout rather than claiming an earlier PostgreSQL release.
 
 ## Verification
 
@@ -710,6 +763,14 @@ A second stack with new PostgreSQL and object volumes restores the verified back
 serves SRT, processed Markdown, screenshots, and summary while preserving queued work.
 Readiness returns 503 during durable-service outages while process liveness stays healthy.
 GPU inference containers are outside this CPU-only rehearsal.
+
+The upgrade pass adds the frozen historical archive and explicit migration checks:
+**180 local tests pass** (190 discovered, ten network cases skipped), and all **ten
+network tests pass** in the PostgreSQL/SeaweedFS container rehearsal. The separate
+migration service completes before web/worker startup, and restore into a second stack
+with fresh durable volumes preserves published content and queued work. Schema-check
+startup retains SQLite foreign-key enforcement and WAL/full-synchronous settings.
+Lint, Actions workflow validation, and both Compose configurations also pass.
 
 ### Verified full pipeline (10 October 2026)
 
