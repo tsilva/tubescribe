@@ -307,6 +307,8 @@ file, while the dashboard and backfill script read the archive claim for livenes
 Submissions survive dashboard restarts and duplicate clicks share one queued/active
 request. Failed process launches are recorded; abandoned requests can be resubmitted
 once their launch grace period and any ownership lease have expired.
+All four worker commands handle `SIGTERM` as an orderly interruption, returning the
+active stage's attempt budget, retaining checkpoints, and releasing their leases.
 
 ASR and diarization clients accept an HTTP transport, headers, endpoint policy, and
 hardware policy; the worker accepts an ASR client and diarization factory. The ASR app

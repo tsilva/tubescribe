@@ -143,6 +143,12 @@ def main():
         p.error("Counts, limits and attempt bounds must be positive")
     store = Store(args.data)
 
+    def stop_worker(signum, frame):
+        raise KeyboardInterrupt()
+
+    if args.command in {"work", "diarize", "postprocess", "artifacts"}:
+        signal.signal(signal.SIGTERM, stop_worker)
+
     def endpoint():
         if args.endpoint:
             return args.endpoint
@@ -159,10 +165,6 @@ def main():
         elif args.command == "postprocess":
             from .postprocessing_worker import run as postprocess
 
-            def stop_postprocessing(signum, frame):
-                raise KeyboardInterrupt()
-
-            signal.signal(signal.SIGTERM, stop_postprocessing)
             result = execute_cli(
                 store,
                 args,
@@ -211,10 +213,6 @@ def main():
             from .diarization_tunnel import ready
             from .diarization_worker import run as diarize
 
-            def stop_diarization(signum, frame):
-                raise KeyboardInterrupt()
-
-            signal.signal(signal.SIGTERM, stop_diarization)
             ready(store.root)
             out(
                 execute_cli(
@@ -307,11 +305,6 @@ def main():
             if errors:
                 return 1
         elif args.command == "work":
-
-            def stop(signum, frame):
-                raise KeyboardInterrupt()
-
-            signal.signal(signal.SIGTERM, stop)
             result = execute_cli(
                 store,
                 args,
