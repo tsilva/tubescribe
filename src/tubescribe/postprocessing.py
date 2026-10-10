@@ -7,25 +7,21 @@ import argparse
 import base64
 import copy
 import hashlib
-import hmac
 import html
 import json
 import math
 import re
-import secrets
 import shlex
 import subprocess
 import threading
 import time
 import zipfile
 from collections import Counter
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
 
-import httpx
-
+from .inference import AgentRunner, LocalTools
 from .storage import atomic_write
 
 TOOL = {
@@ -1018,44 +1014,12 @@ class Screenshots:
 
 
 def make_handler(screenshots: Screenshots | None, token: str, transcript: Transcript):
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_args):
-            pass
+    from .inference import tool_handler
 
-        def do_POST(self):
-            if self.path != "/tool-calls" or not hmac.compare_digest(
-                self.headers.get("Authorization", ""), "Bearer " + token
-            ):
-                self.send_error(403)
-                return
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= 65536:
-                    raise ValueError("Invalid request size")
-                request = json.loads(self.rfile.read(length))
-                handlers = {"get_full_transcript": transcript.execute}
-                if screenshots is not None:
-                    handlers.update(
-                        video_screenshots=screenshots.execute, video_search=screenshots.search
-                    )
-                if request.get("tool") not in handlers:
-                    raise ValueError("Unknown tool")
-                result = handlers[request["tool"]](request["arguments"])
-            except (ValueError, KeyError, subprocess.SubprocessError) as error:
-                result = {
-                    "success": False,
-                    "contentItems": [
-                        {"type": "inputText", "text": "Screenshot error: " + str(error)}
-                    ],
-                }
-            body = json.dumps(result).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-    return Handler
+    handlers = {"get_full_transcript": transcript.execute}
+    if screenshots is not None:
+        handlers.update(video_screenshots=screenshots.execute, video_search=screenshots.search)
+    return tool_handler(handlers, token)
 
 
 def stitch(
@@ -1217,17 +1181,30 @@ def render_preview(markdown: str, title: str) -> str:
         )
         return text
 
-    blocks, paragraphs, headings = [], [], []
+    blocks, paragraphs, headings, items = [], [], [], []
 
     def flush():
         if paragraphs:
             blocks.append("<p>" + inline(" ".join(paragraphs)) + "</p>")
             paragraphs.clear()
 
+    def flush_items():
+        if items:
+            blocks.append(
+                "<ul>" + "".join("<li>" + inline(item) + "</li>" for item in items) + "</ul>"
+            )
+            items.clear()
+
     for line in markdown.splitlines():
         heading = re.fullmatch(r"(#{1,4})\s+(.+)", line)
         figure = re.fullmatch(r"!\[([^\]]*)\]\((figures/[A-Za-z0-9_-]+\.png)\)", line.strip())
-        if heading:
+        bullet = re.fullmatch(r"[-*]\s+(.+)", line)
+        if not bullet:
+            flush_items()
+        if bullet:
+            flush()
+            items.append(bullet[1])
+        elif heading:
             flush()
             level = len(heading[1])
             anchor = f"section-{len(blocks)}"
@@ -1247,6 +1224,7 @@ def render_preview(markdown: str, title: str) -> str:
         else:
             paragraphs.append(line)
     flush()
+    flush_items()
     navigation = " ".join(f'<a href="#{anchor}">{inline(label)}</a>' for anchor, label in headings)
     return f"""<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1360,6 +1338,7 @@ def process(
     defer_transcript=False,
     resume=False,
     on_response=None,
+    agent_runner=None,
 ):
     """Generate or recover one validated Markdown bundle; caller owns queue/state."""
     args = SimpleNamespace(
@@ -1453,10 +1432,6 @@ def process(
     screenshots = (
         Screenshots(args.video, args.output, source["duration"], budgets) if args.video else None
     )
-    token = secrets.token_urlsafe(32)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(screenshots, token, transcript))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
     video_url = source["source_url"] or "Unavailable; use plain timestamps"
     payload = {
         "model": "codex/gpt-6.1-sol",
@@ -1473,10 +1448,6 @@ def process(
         + transcript_input(srt, args.defer_transcript, compact),
         "tools": ([copy.deepcopy(TOOL), copy.deepcopy(SEARCH_TOOL)] if screenshots else [])
         + ([TRANSCRIPT_TOOL] if args.defer_transcript or screenshots is None else []),
-        "tool_executor": {
-            "url": f"http://127.0.0.1:{server.server_port}/tool-calls",
-            "token": token,
-        },
         "output_schema": OUTPUT_SCHEMA,
         "max_tool_calls": budgets["tool_calls"],
         "timeout_seconds": 1800,
@@ -1488,35 +1459,28 @@ def process(
     context = {"source_sha256": checkpoint_hash, "srt_sha256": srt_hash, "signature": signature}
     write_json(context_path, context)
     started = time.monotonic()
-    try:
-        with httpx.Client(timeout=1850, trust_env=False) as client:
-            response = client.post(args.bridge.rstrip("/") + "/api/v1/agent/runs", json=payload)
-            response.raise_for_status()
-            result = response.json()
-        write_json(args.output / "response.json", result)
-        context.update(
-            response_sha256=hashlib.sha256(
-                (args.output / "response.json").read_bytes()
-            ).hexdigest(),
-            transcript_reads=transcript.reads,
-            elapsed_seconds=round(time.monotonic() - started, 2),
-        )
-        write_json(context_path, context)
-        if on_response:
-            on_response()
-        return finish_run(
-            args,
-            source,
-            result,
-            screenshots,
-            transcript.reads,
-            context["elapsed_seconds"],
-            checkpoint_hash,
-            srt_hash,
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
+    result = (agent_runner or AgentRunner(args.bridge)).run(
+        payload, LocalTools(lambda token: make_handler(screenshots, token, transcript))
+    )
+    write_json(args.output / "response.json", result)
+    context.update(
+        response_sha256=hashlib.sha256((args.output / "response.json").read_bytes()).hexdigest(),
+        transcript_reads=transcript.reads,
+        elapsed_seconds=round(time.monotonic() - started, 2),
+    )
+    write_json(context_path, context)
+    if on_response:
+        on_response()
+    return finish_run(
+        args,
+        source,
+        result,
+        screenshots,
+        transcript.reads,
+        context["elapsed_seconds"],
+        checkpoint_hash,
+        srt_hash,
+    )
 
 
 def finish_run(

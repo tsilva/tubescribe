@@ -64,6 +64,7 @@ function processingDetails(job) {
     `ASR: ${human(job.asr_state)}`,
     `Speakers: ${human(job.diarization_state || "pending")}${job.speaker_count != null ? ` (${job.speaker_count})` : ""}`,
     `Postprocessing: ${human(job.postprocessing_state || "pending")}${job.figures != null ? ` (${job.figures} figures)` : ""}`,
+    `Summary: ${human(job.summary_state || "pending")}`,
   ];
   details.append(node("div", stages.join(" · "), "stage-line"));
   const provenance = [job.profile, job.model, job.language].filter(Boolean);
@@ -74,7 +75,7 @@ function processingDetails(job) {
   if (job.completed_at) details.append(node("div", `ASR saved ${date(job.completed_at)}`, "muted"));
   if (job.error) {
     details.append(node("div", `${human(job.failed_stage || "job")}: ${job.error}`, "job-error"));
-    const retry = [`Attempts: download ${job.download_attempts || 0} · ASR ${job.asr_attempts || 0} · speakers ${job.diarization_attempts || 0}`];
+    const retry = [`Attempts: download ${job.download_attempts || 0} · ASR ${job.asr_attempts || 0} · speakers ${job.diarization_attempts || 0} · summary ${job.summary_attempts || 0}`];
     if (job.next_retry) retry.push(`Retry ${date(job.next_retry)}`);
     details.append(node("div", retry.join(" · "), "muted"));
   }
@@ -93,17 +94,18 @@ function videoRow(jobs) {
     const status = node("div", undefined, "video-status");
     status.append(node("span", human(job.stage), `badge ${job.stage}`));
     if (jobs.length > 1) status.append(node("div", job.profile || "No profile", "muted"));
-    if (!archive.worker.running && ["downloading", "transcribing", "diarizing", "postprocessing"].includes(job.stage)) {
+    if (!archive.worker.running && ["downloading", "transcribing", "diarizing", "postprocessing", "summarizing"].includes(job.stage)) {
       status.append(node("div", "Worker stopped", "muted"));
     }
     const action = node("div", undefined, "transcript-action");
     const files = transcriptFiles(job);
     if (files.length) {
-      const button = node(job.processed_url ? "a" : "button", "Transcript", "transcript-button");
+      const artifactUrl = job.summary_url || job.processed_url;
+      const button = node(artifactUrl ? "a" : "button", job.summary_url ? "Summary" : "Transcript", "transcript-button");
       button.dataset.job = String(job.job_id);
-      button.setAttribute("aria-label", `Read transcript: ${video.title}${jobs.length > 1 ? ` (${job.profile})` : ""}`);
-      if (job.processed_url) {
-        button.href = job.processed_url;
+      button.setAttribute("aria-label", `Read ${job.summary_url ? "summary" : "transcript"}: ${video.title}${jobs.length > 1 ? ` (${job.profile})` : ""}`);
+      if (artifactUrl) {
+        button.href = artifactUrl;
         button.target = "_blank";
         button.rel = "noopener noreferrer";
       } else button.addEventListener("click", () => openTranscript(job, files));
@@ -149,7 +151,7 @@ function renderChannels() {
     if (videos.size) {
       const labels = node("div", undefined, "column-labels");
       labels.setAttribute("aria-hidden", "true");
-      labels.append(node("span", "Video"), node("span", "Status"), node("span", "Processing details"), node("span", "Transcript"));
+      labels.append(node("span", "Video"), node("span", "Status"), node("span", "Processing details"), node("span", "Artifact"));
       const list = node("ul", undefined, "video-list");
       list.append(...Array.from(videos.values(), videoRow));
       section.append(labels, list);

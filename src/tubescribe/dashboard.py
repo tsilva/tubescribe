@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import html
 import json
 import os
 import re
@@ -12,15 +13,18 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
+from .pipeline import status as stage
 from .storage import atomic_write, now
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
@@ -43,6 +47,17 @@ CONTENT_TYPES = {
 
 
 def lock_status(root: Path, name: str) -> dict:
+    if name == "worker.lock" and (root / "archive.sqlite3").is_file():
+        with contextlib.closing(sqlite3.connect(root / "archive.sqlite3")) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='claims'").fetchone():
+                owned = db.execute(
+                    "SELECT 1 FROM claims WHERE resource='archive' AND expires>?", (time.time(),)
+                ).fetchone()
+                try:
+                    pid = int((root / name).read_text()) if owned else None
+                except (OSError, ValueError):
+                    pid = None
+                return {"running": bool(owned), "pid": pid}
     try:
         with (root / name).open() as handle:
             try:
@@ -56,34 +71,6 @@ def lock_status(root: Path, name: str) -> dict:
                 return {"running": True, "pid": pid}
     except FileNotFoundError:
         return {"running": False, "pid": None}
-
-
-def stage(job: dict) -> str:
-    if job["state"] == "complete":
-        if job.get("diarization_state") == "complete":
-            if job.get("postprocessing_state") == "complete":
-                return "complete"
-            if job.get("postprocessing_state") == "failed":
-                return "failed"
-            if job.get("postprocessing_state") == "active":
-                return (
-                    "downloading"
-                    if job.get("postprocessing_stage") == "download"
-                    else "postprocessing"
-                )
-            return "awaiting_postprocessing"
-        if job.get("diarization_state") == "failed":
-            return "failed"
-        if job.get("diarization_state") == "active":
-            return "downloading" if job.get("diarization_stage") == "download" else "diarizing"
-        return "awaiting_diarization"
-    if job["state"] == "failed":
-        return "failed"
-    if job["asr_state"] == "active":
-        return "transcribing"
-    if job["download_state"] == "active":
-        return "downloading"
-    return "queued" if job["state"] else "indexed"
 
 
 def allowed_file(root: Path, relative: str) -> Path:
@@ -189,11 +176,15 @@ def snapshot(root: Path) -> dict:
                        ,p.state AS postprocessing_state,p.stage AS postprocessing_stage,
                        p.error AS postprocessing_error,p.next_retry AS postprocessing_next_retry,
                        p.updated_at AS postprocessing_updated_at,p.attempts AS postprocessing_attempts,
-                       p.figures,p.agent_seconds,p.output_dir AS postprocessing_dir
+                       p.figures,p.agent_seconds,p.output_dir AS postprocessing_dir,
+                       a.state AS summary_state,a.stage AS summary_stage,a.error AS summary_error,
+                       a.next_retry AS summary_next_retry,a.updated_at AS summary_updated_at,
+                       a.attempts AS summary_attempts,a.output_dir AS summary_dir
                 FROM videos v LEFT JOIN jobs j ON j.video_id=v.id
                 LEFT JOIN transcripts t ON t.job_id=j.id
                 LEFT JOIN diarizations d ON d.job_id=j.id
                 LEFT JOIN postprocessings p ON p.job_id=j.id
+                LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow='summary'
                 ORDER BY COALESCE(v.published_at,'') DESC,v.discovered_at DESC,v.id,j.id
             """)
         ]
@@ -209,6 +200,8 @@ def snapshot(root: Path) -> dict:
             "awaiting_diarization",
             "awaiting_postprocessing",
             "postprocessing",
+            "awaiting_summary",
+            "summarizing",
             "complete",
             "failed",
             "indexed",
@@ -230,6 +223,11 @@ def snapshot(root: Path) -> dict:
             job["error"] = job["postprocessing_error"] or job["error"]
             job["next_retry"] = job["postprocessing_next_retry"]
             job["failed_stage"] = "postprocessing " + (job["postprocessing_stage"] or "")
+        if job.get("summary_state") in ("active", "failed") or job.get("summary_error"):
+            job["updated_at"] = job["summary_updated_at"]
+            job["error"] = job["summary_error"] or job["error"]
+            job["next_retry"] = job["summary_next_retry"]
+            job["failed_stage"] = "summary " + (job["summary_stage"] or "")
         counts[job["stage"]] += 1
         job["channel_title"] = names.get(job["channel_id"], job["channel_id"])
         paths = []
@@ -249,6 +247,12 @@ def snapshot(root: Path) -> dict:
                 job["processed_path"] = processed
                 job["processed_url"] = f"/processed/{job['job_id']}/preview.html"
                 paths.extend([processed, (directory / "processed-with-figures.zip").as_posix()])
+        if job.get("summary_state") == "complete" and job.get("summary_dir"):
+            from .artifacts import artifact_path
+
+            directory = artifact_path(SimpleNamespace(root=root), job["summary_dir"])
+            if (directory / "artifact.md").is_file():
+                job["summary_url"] = f"/artifacts/{job['job_id']}/summary/"
         for key in ("asr_path", "prediction_path", "diarization_audio_path"):
             if job.get(key):
                 paths.append(job[key])
@@ -286,6 +290,7 @@ def snapshot(root: Path) -> dict:
 def make_server(root: Path, port: int = 0, instance: str | None = None) -> ThreadingHTTPServer:
     root = root.resolve()
     instance = instance or uuid.uuid4().hex
+    children_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -316,18 +321,23 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             self.send_headers(status, CONTENT_TYPES[".json"], len(data))
             self.wfile.write(data)
 
-        def do_GET(self):
+        def trusted(self):
             port = self.server.server_port
             hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
             if self.headers.get("Host") not in hosts:
                 self.send_json({"error": "Use the local dashboard address"}, 403)
-                return
+                return False
             origin = self.headers.get("Origin")
             if origin and origin not in {f"http://{h}" for h in hosts}:
                 self.send_json({"error": "Cross-origin access is disabled"}, 403)
-                return
+                return False
             if self.headers.get("Sec-Fetch-Site") == "cross-site":
                 self.send_json({"error": "Cross-site access is disabled"}, 403)
+                return False
+            return True
+
+        def do_GET(self):
+            if not self.trusted():
                 return
             url = urlsplit(self.path)
             query = parse_qs(url.query)
@@ -343,6 +353,98 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                     )
                 elif url.path == "/api/snapshot":
                     self.send_json(snapshot(root))
+                elif match := re.fullmatch(
+                    r"/artifacts/(\d+)/([a-z][a-z0-9_-]{0,63})(?:/(artifact\.md|figures/frame_\d+\.png))?/?",
+                    url.path,
+                ):
+                    from .artifacts import artifact_path, workflow
+
+                    if not match[3] and not url.path.endswith("/"):
+                        self.send_response(302)
+                        self.send_header("Location", url.path + "/")
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    definition = workflow(root, match[2])
+                    with contextlib.closing(sqlite3.connect(root / "archive.sqlite3")) as db:
+                        row = db.execute(
+                            "SELECT v.title,p.state,a.state,a.output_dir,a.error,a.run_pid FROM jobs j "
+                            "JOIN videos v ON v.id=j.video_id JOIN postprocessings p ON p.job_id=j.id "
+                            "LEFT JOIN artifacts a ON a.job_id=j.id AND a.workflow=? WHERE j.id=?",
+                            (match[2], int(match[1])),
+                        ).fetchone()
+                    if not row or row[1] != "complete":
+                        raise FileNotFoundError()
+                    if row[2] == "complete" and row[3]:
+                        # Published pages are read-only; the worker validates manifests on reruns.
+                        directory = artifact_path(SimpleNamespace(root=root), row[3])
+                        path = directory / (match[3] or "preview.html")
+                        if not path.resolve().is_relative_to(directory):
+                            raise FileNotFoundError()
+                        if (directory / "references.json").is_file() and (
+                            not match[3] or match[3] == "artifact.md"
+                        ):
+                            from .publication import render_bundle
+
+                            data = render_bundle(directory, markdown=bool(match[3])).encode()
+                        else:
+                            data = path.read_bytes()
+                        self.send_headers(
+                            200,
+                            CONTENT_TYPES.get(path.suffix, "text/plain; charset=utf-8"),
+                            len(data),
+                            generated_html=path.suffix == ".html",
+                        )
+                        self.wfile.write(data)
+                    elif match[3]:
+                        raise FileNotFoundError()
+                    else:
+                        state = row[2] or "ready"
+                        pending = state in {"pending", "active"}
+                        interrupted = False
+                        if pending and row[5]:
+                            try:
+                                os.kill(row[5], 0)
+                            except ProcessLookupError:
+                                state, pending, interrupted = "interrupted", False, True
+                            except PermissionError:
+                                pass
+                        refresh = '<meta http-equiv="refresh" content="5">' if pending else ""
+                        form = (
+                            ""
+                            if pending
+                            else (
+                                f'<form data-artifact method="post" action="/artifacts/{match[1]}/{match[2]}/run">'
+                                f'<input type="hidden" name="token" value="{instance}">'
+                                '<button type="submit">Build artifact</button></form>'
+                            )
+                        )
+                        data = (
+                            '<!doctype html><html lang="en"><meta charset="utf-8">'
+                            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                            f"{refresh}<title>{html.escape(definition['title'])}</title>"
+                            '<link rel="stylesheet" href="/style.css"><script src="/artifact.js" defer></script><main>'
+                            f"<h1>{html.escape(definition['title'])}</h1><p>{html.escape(row[0])}</p>"
+                            f'<p class="artifact-status">{html.escape(state.capitalize())}</p>'
+                            + (
+                                "<p>Generating artifact. This page refreshes automatically.</p>"
+                                if state == "active"
+                                else "<p>The workflow will start when the archive worker is available. This page refreshes automatically.</p>"
+                                if pending
+                                else ""
+                            )
+                            + (f'<p role="alert">{html.escape(row[4])}</p>' if row[4] else "")
+                            + (
+                                "<p>Worker interrupted. Build again to resume saved progress.</p>"
+                                if interrupted
+                                else ""
+                            )
+                            + '<p role="alert" data-artifact-error></p>'
+                            + form
+                            + f'<p><a href="/processed/{match[1]}/preview.html">Full transcript</a></p></main></html>'
+                        ).encode()
+                        self.send_headers(200, CONTENT_TYPES[".html"], len(data))
+                        self.wfile.write(data)
                 elif match := re.fullmatch(r"/transcripts/(\d+)/srt", url.path):
                     from .srt_viewer import render_srt
 
@@ -381,6 +483,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                         raise FileNotFoundError()
                     filename = match[2]
                     if filename == "preview.html":
+                        from .artifacts import workflows
                         from .postprocessing import render_preview
 
                         path = allowed_file(root, (Path(row[0]) / "processed.md").as_posix())
@@ -390,6 +493,15 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                                 '<a href="processed.md" download>Download Markdown</a>',
                                 '<a href="processed.md" download>Download Markdown</a> · <a href="processed-with-figures.zip" download>Download with figures</a> · <a href="source.srt" download>Source SRT</a>'
                                 f' · <a href="/transcripts/{match[1]}/srt">View SRT</a>',
+                            )
+                            .replace(
+                                "</header>",
+                                " · "
+                                + " · ".join(
+                                    f'<a href="/artifacts/{match[1]}/{w["name"]}/">{html.escape(w["title"])}</a>'
+                                    for w in workflows(root)
+                                )
+                                + "</header>",
                             )
                             .encode()
                         )
@@ -440,7 +552,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                                 disposition=f"{disposition}; filename*=UTF-8''{quote(path.name)}",
                             )
                             shutil.copyfileobj(handle, self.wfile)
-                elif url.path in ("/", "/app.js", "/style.css"):
+                elif url.path in ("/", "/app.js", "/artifact.js", "/style.css"):
                     path = ASSETS / ("index.html" if url.path == "/" else url.path[1:])
                     data = path.read_bytes()
                     self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
@@ -459,10 +571,74 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                 self.send_json({"error": "Output file is temporarily unavailable"}, 503)
 
         def do_POST(self):
-            self.send_json(
-                {"error": "Dashboard is read-only; use the CLI to change the archive"},
-                HTTPStatus.METHOD_NOT_ALLOWED,
+            if not self.trusted():
+                return
+            match = re.fullmatch(
+                r"/artifacts/(\d+)/([a-z][a-z0-9_-]{0,63})/run", urlsplit(self.path).path
             )
+            if not match:
+                self.send_json(
+                    {"error": "Only artifact workflows can be triggered here"},
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                )
+                return
+            try:
+                from .artifacts import inputs
+                from .storage import Store
+
+                length = int(self.headers.get("Content-Length", "0"))
+                if (
+                    not 0 < length <= 1024
+                    or self.headers.get("Content-Type", "").split(";")[0]
+                    != "application/x-www-form-urlencoded"
+                ):
+                    raise ValueError("Use the artifact workflow form")
+                fields = parse_qs(self.rfile.read(length).decode())
+                if fields.get("token") != [instance]:
+                    self.send_json({"error": "Refresh the workflow page before triggering it"}, 403)
+                    return
+                with children_lock:
+                    store = Store(root)
+                    try:
+                        from .submission import Dispatcher, JobRequest, LocalProcess
+
+                        source = inputs(store, int(match[1]), match[2])[0]
+                        key = (int(match[1]), match[2])
+                        with store.db:
+                            store.db.execute(
+                                "INSERT OR IGNORE INTO artifacts(job_id,workflow,updated_at) VALUES(?,?,?)",
+                                (*key, now()),
+                            )
+                        request = JobRequest(
+                            "artifacts",
+                            {
+                                "video": [source["video_id"]],
+                                "profile": source["profile"],
+                                "workflow": match[2],
+                                "wait": True,
+                            },
+                        )
+                        identifier = Dispatcher(
+                            store, process=LocalProcess(spawn=subprocess.Popen)
+                        ).submit(request, background=True)
+                        pid = store.db.execute(
+                            "SELECT pid FROM submissions WHERE id=?", (identifier,)
+                        ).fetchone()[0]
+                        with store.db:
+                            store.db.execute(
+                                "UPDATE artifacts SET run_pid=? WHERE job_id=? AND workflow=?",
+                                (pid, *key),
+                            )
+                    finally:
+                        store.db.close()
+                self.send_response(303)
+                self.send_header("Location", f"/artifacts/{match[1]}/{match[2]}/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except (ValueError, FileNotFoundError, KeyError) as error:
+                self.send_json({"error": str(error)}, 400)
+            except (OSError, sqlite3.Error, RuntimeError):
+                self.send_json({"error": "Artifact worker could not start"}, 503)
 
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 

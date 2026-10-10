@@ -1,6 +1,6 @@
 # TubeScribe
 
-A local personal YouTube transcript archive. This Mac owns channel discovery, the SQLite queue, cached media, and durable transcripts. Beast-3 runs Whisper ASR and Nemotron speaker diarization on its RTX 4090 over loopback SSH tunnels. AgentBridge/Codex produces cleaned Markdown with inspected video figures and evidence-backed speaker names as the final stage. A local dashboard lists channels and videos and opens the processed transcript when available; the CLI manages ingestion.
+A local personal YouTube transcript archive. This Mac owns channel discovery, the SQLite queue, cached media, and durable transcripts. Beast-3 runs Whisper ASR and Nemotron speaker diarization on its RTX 4090 over loopback SSH tunnels. AgentBridge/Codex produces cleaned Markdown with inspected video figures and evidence-backed speaker names, then generates a one-page summary as the final artifact. A local dashboard lists channels and videos and opens the summary when available, with the full transcript linked from it; the CLI manages ingestion.
 
 ## Install
 
@@ -132,7 +132,7 @@ tail -f data/diarization-backfill.log
 scripts/backfill.py stop --diarize                 # safe stop; source/checkpoints retained
 ```
 
-Both modes use the same exclusive archive lock and separately verified process-group state. Stop the matching mode before switching. Like the normal import, detached enrichment uses `caffeinate` on macOS and survives chat completion, but requires restarting after a reboot. The normal import remains stopped during enrichment.
+Both modes use the same exclusive archive capacity lease and separately verified process-group state. Stop the matching mode before switching. Like the normal import, detached enrichment uses `caffeinate` on macOS and survives chat completion, but requires restarting after a reboot. The normal import remains stopped during enrichment.
 
 ## Archive commands
 
@@ -147,6 +147,7 @@ scripts/tubescribe status --failures
 scripts/tubescribe work --video hKBjZBiw62U --video LhuSxhCNa5g --video BkNzS8Ia-7k
 scripts/tubescribe work --limit 3
 scripts/tubescribe work --postprocessing text        # full speech cleanup without video inspection
+scripts/tubescribe work --no-summary                 # finish Markdown without the final summary
 scripts/tubescribe work --postprocessing off         # explicitly stop after diarization
 scripts/tubescribe work --video VIDEO_ID --keep-audio # retain successful source for quality review
 scripts/tubescribe retry --video VIDEO_ID           # reset failed job attempt counters/backoff
@@ -154,7 +155,7 @@ scripts/tubescribe retry                           # reset all failed jobs
 scripts/tubescribe work --wait                     # drain pending work and wait for bounded automatic retries
 scripts/tubescribe diarize --wait                  # enrich already saved ASR; no repeat ASR
 scripts/tubescribe diarize --video VIDEO_ID         # enrich one saved transcript
-scripts/tubescribe postprocess --video VIDEO_ID      # finish a saved diarized transcript; no ASR/diarization
+scripts/tubescribe postprocess --video VIDEO_ID      # finish Markdown and summary; no ASR/diarization
 scripts/tubescribe postprocess --limit 3 --wait      # bounded final-stage batch/retries
 scripts/tubescribe postprocess --video VIDEO_ID --force # new model run; retain previous bundles
 scripts/backfill.py start --postprocess             # detached final-stage batch; no earlier service/tunnel startup
@@ -167,7 +168,7 @@ Jordi Visser's stable channel ID is **UCSLOw8JrFTBb3qF-p4v0v_w**. Discovery chec
 
 Downloads prefer audio-only HLS (`bestaudio[protocol^=m3u8]/bestaudio`), because direct DASH audio returned HTTP 403 for two smoke-test videos. Normal ingestion uses one fragment at a time; redownloading for saved-ASR enrichment uses two concurrent fragments. Both process only one video at a time, retain request/download sleeps, and use two bounded yt-dlp network retries. Unavailable HLS fragments cause failure rather than a silently truncated transcript. Decoded duration is checked against video metadata. Stage attempts default to three total attempts, with exponential cooldowns starting at one minute. Rate limits/bot checks pause the entire worker for 30 minutes with `--wait`, or stop the current run without it. No cookies or authenticated YouTube account are required by default; inaccessible/private/member-only videos are recorded as failures when encountered. Discovery reflects currently accessible public listings and cannot enumerate hidden/private/deleted content.
 
-Each video/profile pair has a unique job. Download, ASR, diarization, and postprocessing have independent states; discovery is tracked per channel/tab. `work` defaults to download → ASR → diarization → AgentBridge postprocessing. Raw speaker-labelled formats commit before the final step. Failed diarization resumes from ASR, and failed postprocessing resumes from the diarized source without either earlier inference call, even if an earlier stage succeeded on its last allowed attempt. Only one worker can hold the archive lock. Operator interruptions do not consume stage retry budgets. Jobs with intact transcripts, completed diarization, and a valid processed bundle are skipped. Missing/corrupt saved JSON/text is repaired from ASR and diarization checkpoints when available. Raw formats are atomically written and fsynced before SQLite commits; audio is removed **only after diarization completion commits** (unless `--keep-audio` is requested). A later postprocessing failure preserves those raw formats and the separate video cache. `status` reports all three inference stages; `status --failures` and `retry` include postprocessing. Overall completion requires the final bundle; old diarized videos appear as awaiting postprocessing until finished. `--postprocessing off` explicitly preserves the earlier ASR/diarization-only worker behavior.
+Each video/profile pair has a unique job. Download, ASR, diarization, postprocessing, and summary have independent states; discovery is tracked per channel/tab. `work` defaults to download → ASR → diarization → AgentBridge postprocessing → one-page summary. Raw speaker-labelled formats commit before the final step. Failed diarization resumes from ASR, and failed postprocessing resumes from the diarized source without either earlier inference call, even if an earlier stage succeeded on its last allowed attempt. Only one worker can hold the archive capacity lease. Operator interruptions do not consume stage retry budgets. Jobs with intact transcripts, completed diarization, a valid processed bundle, and a valid summary are skipped. Summary failures resume from the finished Markdown and saved figures without earlier inference or a video download; model/save attempts and retry backoff are tracked separately. `retry` resets failed artifact budgets too. Missing/corrupt saved JSON/text is repaired from ASR and diarization checkpoints when available. Raw formats are atomically written and fsynced before SQLite commits; audio is removed **only after diarization completion commits** (unless `--keep-audio` is requested). A later postprocessing failure preserves those raw formats and the separate video cache. `status` reports all four inference stages; `status --failures` and `retry` include summaries. Overall completion requires both the processed bundle and the summary; completed older transcripts await a summary until the next scoped worker run. `--no-summary` explicitly stops after processed Markdown. Old diarized videos appear as awaiting postprocessing until finished. `--postprocessing off` explicitly preserves the earlier ASR/diarization-only worker behavior.
 
 **SubRip (`.srt`)** is the default subtitle format: plain UTF-8, numbered cues and `HH:MM:SS,mmm` timestamps. Diarized cues are split at speaker changes and kept short for subtitles, with a speaker prefix; older ASR-only cues retain their original segment boundaries. No video title or metadata is inserted into subtitle cues; JSON retains full provenance. Existing archives gain SRT files through `subtitles` or on the next worker run, using saved JSON without downloading or transcribing again. Missing/corrupt SRT and Markdown files are regenerated from that authoritative JSON. Stop an active backfill before `subtitles` or backup/export to obtain the archive lock, then restart it. Subtitle exports can reuse a destination directory; matching video/profile filenames are updated, while unrelated files remain untouched. CLI output lists both formats and counts all generated files.
 
@@ -197,13 +198,13 @@ tail -f data/backfill.log
 scripts/backfill.py stop
 ```
 
-The worker starts in a separate process session and survives this chat/terminal finishing. On macOS, `caffeinate -i` prevents idle sleep for the worker's lifetime. It does not survive a reboot; run `start` again afterward. The worker checks both inference services before downloading and reconnects recorded forwards after a lost connection. If reconnection requires fresh SSH authorization or a service is unavailable, it stops the queue and retains audio and checkpoints. Authorize/reconnect, inspect failures, retry, and restart. A PID alone is not trusted for stopping: the script checks the live archive lock and process group before signaling its supervisor group. Download subprocesses and their ffmpeg children are stopped before the worker releases its lock. Stop requests retain recoverable stage state; wait until `status` reports stopped before taking a backup.
+The worker starts in a separate process session and survives this chat/terminal finishing. On macOS, `caffeinate -i` prevents idle sleep for the worker's lifetime. It does not survive a reboot; run `start` again afterward. The worker checks both inference services before downloading and reconnects recorded forwards after a lost connection. If reconnection requires fresh SSH authorization or a service is unavailable, it stops the queue and retains audio and checkpoints. Authorize/reconnect, inspect failures, retry, and restart. A PID alone is not trusted for stopping: the script checks the live archive lease and process group before signaling its supervisor group. Download subprocesses and their ffmpeg children are stopped before the worker releases its lease. Stop requests retain recoverable stage state; wait until `status` reports stopped before taking a backup.
 
 ```bash
 scripts/tubescribe export /absolute/path/to/a/new/tubescribe-backup
 ```
 
-Export holds the worker lock, uses SQLite's backup API, and copies JSON, text, SRT, and Markdown transcripts, original ASR/diarization checkpoints and retained retry audio into a **new** directory outside the live archive. It generates SRT and Markdown from saved JSON for older completed transcripts before copying. Stop an active worker first. Restore by selecting the exported directory with `--data`, creating/reconnecting both forwards, and resuming `work`. The export deliberately omits SSH control sockets and host-specific tunnel state. Copy the export to your normal backup storage; a local copy alone does not protect against disk loss.
+Export holds the archive lease, uses SQLite's backup API, and copies JSON, text, SRT, and Markdown transcripts, original ASR/diarization checkpoints and retained retry audio into a **new** directory outside the live archive. It generates SRT and Markdown from saved JSON for older completed transcripts before copying. Stop an active worker first. Restore by selecting the exported directory with `--data`, creating/reconnecting both forwards, and resuming `work`. The export deliberately omits SSH control sockets and host-specific tunnel state. Copy the export to your normal backup storage; a local copy alone does not protect against disk loss.
 
 ## Admin dashboard
 
@@ -219,11 +220,111 @@ The dashboard binds only to `127.0.0.1`. The default `--port auto` asks the OS f
 
 The dashboard is a single channel → videos page. Each channel lists its videos newest first, with title, source link, publish date, duration, status, download/ASR/speaker progress, model/profile, processing times, and any failure or retry details directly in the row. A video appears once; multiple model profiles are shown together within that video’s row. Search matches channel names/IDs and video titles/IDs. Empty channels and discovery errors remain visible. There are no separate overview, files, or video-details views.
 
-Each saved transcript has a **Transcript** button in its row, including ASR transcripts that are still awaiting speaker diarization. It opens a preview with Markdown, text, SRT, or JSON format selection and download. Markdown previews display speaker turns. Previews are limited to 2 MiB; downloads contain the complete file.
+A completed pipeline has a **Summary** button in its row. The summary links to the illustrated full transcript. Until a summary is available, each saved transcript has a **Transcript** button, including ASR transcripts that are still awaiting speaker diarization. It opens a preview with Markdown, text, SRT, or JSON format selection and download. Markdown previews display speaker turns. Previews are limited to 2 MiB; downloads contain the complete file.
 
-The dashboard reads SQLite in short transactions and does not acquire the worker's archive lock or run inference. It refreshes every five seconds while visible, preserves search and open previews, and only rebuilds the video list when its data changes. `Awaiting diarization` means ASR is saved but speakers are pending. `Complete` requires both saved ASR and completed diarization. Status reflects recorded state; a stopped worker may leave a stage recorded as active until the next worker recovers it. Worker liveness is shown in the header and beside any interrupted active stage.
+The dashboard reads SQLite in short transactions. Its monitoring endpoints do not acquire the worker's archive lock or run inference. It refreshes every five seconds while visible, preserves search and open previews, and only rebuilds the video list when its data changes. `Awaiting diarization` means ASR is saved but speakers are pending. Final completion requires saved ASR, diarization, a processed bundle, and its summary. `Awaiting summary` and `Summarizing` distinguish the final step; summary failures appear directly in the row. Status reflects recorded state; a stopped worker may leave a stage recorded as active until the next worker recovers it. Worker liveness is shown in the header and beside any interrupted active stage.
 
-This is a read-only local monitor. Use the CLI for adding channels, discovery, retries, and worker control. File access is restricted to recognized transcript/review outputs and audio inside the archive; it does not expose SQLite, SSH configuration, sockets, or arbitrary local files. No external frontend assets or JavaScript packages are required.
+The processed transcript header links to available artifact workflows. Open **One-page summary**, then **Build artifact** to launch a background worker; its status page refreshes until completion. This same-origin form is the dashboard's only write action, and repeated clicks share one worker. Use the CLI for adding channels, discovery, retries, and other worker control. File access is restricted to recognized transcript/review/artifact outputs and audio inside the archive; it does not expose SQLite, SSH configuration, sockets, or arbitrary local files. No external frontend assets or JavaScript packages are required.
+
+## Artifact workflows
+
+Artifact workflows consume the completed, illustrated Markdown through AgentBridge with
+`codex/gpt-6.1-sol` at **high** reasoning. The built-in summary runs automatically as
+the final step of both `work` and `postprocess`. Other workflows run on demand after
+postprocessing; `--no-summary` skips the default final step. The built-in `summary` targets 450–600 words
+with a hard 650-word limit: central thesis, major insights, mechanisms, consequential
+numbers, and caveats. Delivering roughly 95% of useful insight is an editorial objective,
+not a measured accuracy claim. Summaries link to at most three saved screenshots instead
+of embedding them, and their preview includes a compact A4 print layout.
+
+```bash
+scripts/tubescribe artifacts --video VIDEO_ID                    # build/retry summary directly
+scripts/tubescribe artifacts --workflow summary --limit 3 --wait # bounded batch; wait for archive lock
+scripts/tubescribe artifacts --list-workflows
+scripts/tubescribe artifacts --video VIDEO_ID --force            # regenerate; preserve previous bundle
+```
+
+`--video` is repeatable; `--profile`, `--bridge`, and `--max-attempts` select the source
+profile, saved/explicit bridge URL, and retry budget. Omitting `--video` selects completed
+processed transcripts in the profile. No source-video download or earlier inference is
+needed. The agent receives final Markdown, unresolved source issues, and a saved figure
+index. An optional tool supplies real saved pixels in batches of up to four images,
+with at most three calls and six distinct images per run. Text-only transcripts work too.
+The caller validates image IDs, copies referenced figures, and stitches their links into
+Markdown. Evidence quotes for main claims must occur in the source; this validates quote
+provenance, not semantic correctness of every claim.
+
+Additional Markdown workflows are JSON definitions in `data/workflows/NAME.json`
+(or the selected archive root). Names use lowercase letters, numbers, underscores, and
+hyphens and start with a letter; `summary` is reserved for the built-in workflow. For
+example, `data/workflows/study-guide.json`:
+
+```json
+{
+  "title": "Study guide",
+  "instructions": "Explain the central concepts, their relationships, and five questions for checking understanding. Link saved figures when useful. Preserve source uncertainty.",
+  "max_words": 1200
+}
+```
+
+Run it with `scripts/tubescribe artifacts --workflow study-guide --video VIDEO_ID`, or
+select its link in the processed transcript header. Definitions require exactly these
+three fields; `max_words` ranges from 50 to 10,000. This extension point currently
+produces Markdown and HTML previews, rather than arbitrary binary document formats.
+
+The `artifacts` table tracks each job/workflow's state, source and definition fingerprints,
+attempts, retry backoff, active PID, errors, and latest completed output. Bundles live separately in
+`artifacts/CHANNEL/VIDEO/PROFILE/WORKFLOW/RUN_ID/` with canonical `artifact.md`, portable `read.md`, `preview.html`, logical `references.json`,
+referenced `figures/`, request/response checkpoints, evidence/usage report, and a hashed
+manifest. Intact completed outputs skip inference; changed source or workflow definitions
+generate a new run on the next invocation. Save failures resume from the validated model
+response without another inference call. Artifact failures preserve completed transcript stages while keeping overall pipeline completion
+pending until the summary succeeds. All runs use the shared archive capacity lease. Export includes artifact bundles and
+custom workflow definitions alongside the transcript archive.
+
+## Local runtime and future cloud adapters
+
+The runtime remains local. No cloud infrastructure, credentials, service migration, or
+new dependency is required. Existing completed bundles and checkpoints stay readable.
+
+| Module | Responsibility |
+| --- | --- |
+| `src/tubescribe/pipeline.py` | Stage dependencies, completion, retry eligibility, dashboard status, and shared final-stage execution with typed inputs/results. |
+| `src/tubescribe/repository.py` | SQLite schema/migrations, indexed jobs, stage records, scoped selection, and fenced state updates. Inference workers use these methods rather than executing SQL. `Store` coordinates archive content and recovery. |
+| `src/tubescribe/blobs.py` | Storage keys and SHA-256 references, durable writes, verified bundle publication. Local filesystem and in-memory adapters exercise the same interface. |
+| `src/tubescribe/submission.py` | Durable, deduplicated requests shared by CLI and dashboard. CLI executes inline; dashboard dispatches a local process with the saved submission ID. |
+| `src/tubescribe/execution.py` | Atomic archive/job claims, ownership expiry, heartbeat renewal, and conditional state commits. |
+| `src/tubescribe/inference.py` | AgentBridge transport, callback lifecycle/authentication, timeouts, endpoint policy, and hardware policy. Domain screenshot/transcript tools supply functions rather than HTTP handling. |
+| `src/tubescribe/publication.py` | Logical transcript/figure references resolved into dashboard URLs or portable export links. |
+
+SQLite gains `claims` and `submissions` tables automatically. Claims last **90 seconds**
+and renew every **30 seconds** during long inference calls and queue waits. A crashed
+worker's claims expire; recovery resets interrupted stage state only when no live job
+claim owns it. Stale owners cannot renew/release replacement claims or commit stage
+state. The archive claim preserves concurrency of **one worker**; per-video claims
+cover all stages and separate stage invocations. `worker.lock` is now a PID display
+file, while the dashboard and backfill script read the archive claim for liveness.
+Submissions survive dashboard restarts and duplicate clicks share one queued/active
+request. Failed process launches are recorded; abandoned requests can be resubmitted
+once their launch grace period and any ownership lease have expired.
+
+ASR and diarization clients accept an HTTP transport, headers, endpoint policy, and
+hardware policy; the worker accepts an ASR client and diarization factory. The ASR app
+factory and Nemotron engine accept the same hardware policy while retaining CUDA execution. Model stages
+accept an AgentBridge runner. Defaults still require loopback HTTP and RTX 4090 CUDA.
+An explicit HTTPS endpoint policy and hardware policy can support a separately configured
+runtime later. `RemoteTools` is a transport seam for a separately hosted tool executor;
+the current AgentBridge server still requires local callbacks, so cloud use also needs
+corresponding server support. File/media extraction remains local scratch work.
+A future cloud migration must supply shared database/claims, object storage with staging,
+a durable worker dispatcher, and compatible remote inference/tool adapters.
+
+New canonical artifact Markdown keeps `transcript:JOB_ID` and `figure:IMAGE_ID` links
+with a `references.json` map. The dashboard resolves these at delivery time; downloaded
+Markdown has usable links. Standalone previews and `read.md` use relative archive paths.
+Export resolves both new and legacy bundles, regenerates manifests only in the exported
+copy, and clears copied live claims/PIDs. Completed live bundles are not rewritten.
+Changing the serving hostname therefore does not require another model call.
 
 ## Verification
 
@@ -293,8 +394,8 @@ With `--force --limit N`, only the N attempted videos are reset; other completed
 keep their completion pointers. A successful final model attempt can still retry packaging
 within its separate save budget.
 
-The dashboard keeps Channel → Videos and one Transcript action per row. Completed
-postprocessing opens the illustrated version, with downloads for Markdown, figures ZIP,
+The dashboard keeps Channel → Videos and one artifact action per row. Completed
+pipelines open the summary, which links to the illustrated version, with downloads for Markdown, figures ZIP,
 and the original SRT. View SRT opens a simple cue-by-cue reader; clicking a start timestamp
 opens the original YouTube video at that second. The reader also links to YouTube and the
 SRT download. Earlier raw transcripts remain readable while this stage is pending, with

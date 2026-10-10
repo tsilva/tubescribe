@@ -9,21 +9,20 @@ import tempfile
 import time
 import wave
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 
+from .inference import EndpointPolicy, HardwarePolicy, health_request
 from .storage import now
 
 MODEL = "nvidia/Nemotron-3-Diarization"
 REVISION = "f667ed73aee57d40cc39428eb768b4fd87a0a29e"
 
 
-def validate(result):
+def validate(result, *, hardware=HardwarePolicy()):
     if result.get("model") != MODEL or result.get("revision") != REVISION:
         raise ValueError("Unexpected diarization model/revision; upgrade explicitly")
-    if result.get("device") != "cuda:0" or "RTX 4090" not in result.get("gpu", ""):
-        raise ValueError("Diarization requires beast-3 RTX 4090")
+    hardware.check(result.get("device"), result.get("gpu"))
     for field in ("duration", "processing_seconds"):
         if (
             not isinstance(result.get(field), (int, float))
@@ -169,14 +168,22 @@ def assign_speakers(asr, prediction):
 
 
 class Client:
-    def __init__(self, endpoint):
-        url = urlparse(endpoint)
-        if url.scheme != "http" or url.hostname != "127.0.0.1":
-            raise ValueError("Diarization endpoint must be loopback HTTP through SSH")
-        self.endpoint = endpoint.rstrip("/")
+    def __init__(
+        self,
+        endpoint,
+        *,
+        policy=EndpointPolicy(),
+        hardware=HardwarePolicy(),
+        headers=None,
+        transport=None,
+    ):
+        self.endpoint = policy.check(endpoint)
+        self.hardware = hardware
+        self.headers = headers or {}
+        self.transport = transport
 
     def health(self):
-        response = httpx.get(self.endpoint + "/health", timeout=10, trust_env=False)
+        response = health_request(self.endpoint, headers=self.headers, transport=self.transport)
         response.raise_for_status()
         health = response.json()
         if (
@@ -185,8 +192,7 @@ class Client:
             or health.get("revision") != REVISION
         ):
             raise ValueError("Unexpected diarization service/model")
-        if health.get("device") != "cuda:0" or "RTX 4090" not in health.get("gpu", ""):
-            raise ValueError("Diarization service must use RTX 4090 CUDA")
+        self.hardware.check(health.get("device"), health.get("gpu"))
         if not health.get("ready"):
             raise RuntimeError("Diarization model is not ready")
         return health
@@ -194,7 +200,12 @@ class Client:
     def diarize(self, path):
         with (
             path.open("rb") as audio,
-            httpx.Client(timeout=httpx.Timeout(7200, connect=10), trust_env=False) as client,
+            httpx.Client(
+                timeout=httpx.Timeout(7200, connect=10),
+                trust_env=False,
+                headers=self.headers,
+                transport=self.transport,
+            ) as client,
         ):
             response = client.post(
                 self.endpoint + "/diarize",
@@ -205,16 +216,18 @@ class Client:
                 },
             )
             response.raise_for_status()
-            return validate(response.json())
+            return validate(response.json(), hardware=self.hardware)
 
 
 class Nemotron:
-    def __init__(self):
+    def __init__(self, *, hardware=HardwarePolicy()):
         import torch
         from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
-        if not torch.cuda.is_available() or "RTX 4090" not in torch.cuda.get_device_name(0):
-            raise RuntimeError("Requires RTX 4090 CUDA; no CPU fallback")
+        if not torch.cuda.is_available():
+            raise RuntimeError("Requires CUDA; no CPU fallback")
+        self.hardware = hardware
+        hardware.check("cuda", torch.cuda.get_device_name(0))
         if torch.cuda.mem_get_info(0)[0] < 2 * 1024**3:
             raise RuntimeError("Wait for at least 2 GiB free GPU memory")
         torch.set_num_threads(4)
@@ -340,5 +353,6 @@ class Nemotron:
                 "speaker_count": len({t["speaker"] for t in turns}),
                 "peak_allocated_mib": torch.cuda.max_memory_allocated() / 1024**2,
                 "overlapping_speech_seconds": int(((active.sum(dim=-1) > 1) & valid).sum()) * frame,
-            }
+            },
+            hardware=self.hardware,
         )

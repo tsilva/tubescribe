@@ -7,11 +7,12 @@ import re
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import httpx
 
 from . import postprocessing as engine
+from .execution import job_stage
+from .inference import PostprocessingUnavailable, ready
 from .storage import atomic_write, now, worker_lock
 from .youtube import YouTubeError, download_video
 
@@ -19,15 +20,9 @@ COUNTERS = {"download": "download_attempts", "process": "attempts", "save": "sav
 
 
 def retryable(row, max_attempts):
-    return all(
-        row[counter] < max_attempts
-        for stage, counter in COUNTERS.items()
-        if stage != "process" or row["stage"] != "save"
-    )
+    from .pipeline import retryable as can_retry
 
-
-class PostprocessingUnavailable(RuntimeError):
-    pass
+    return row is None or can_retry(dict(row), max_attempts, download=True)
 
 
 def log(event, **data):
@@ -45,38 +40,8 @@ def bridge_endpoint(root):
     )
 
 
-def ready(bridge):
-    parsed = urlsplit(bridge)
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        raise PostprocessingUnavailable(
-            "Use the loopback HTTP AgentBridge base URL; callbacks run on this machine"
-        )
-    try:
-        response = httpx.get(bridge.rstrip("/") + "/openapi.json", timeout=10, trust_env=False)
-        response.raise_for_status()
-        if "/api/v1/agent/runs" not in response.json().get("paths", {}):
-            raise ValueError("This AgentBridge does not expose /api/v1/agent/runs")
-    except Exception as error:
-        raise PostprocessingUnavailable(
-            f"AgentBridge unavailable: {error}; start a build supporting native agent tools"
-        ) from error
-
-
 def update(store, job_id, **values):
-    values["updated_at"] = now()
-    with store.db:
-        store.db.execute(
-            f"UPDATE postprocessings SET {','.join(k + '=?' for k in values)} WHERE job_id=?",
-            (*values.values(), job_id),
-        )
+    store.stage_update("postprocessing", job_id, **values)
 
 
 def digest(path):
@@ -121,9 +86,7 @@ def cleanup_video(store, video_id):
 
 
 def recover(store):
-    for row in store.db.execute(
-        "SELECT p.*,j.video_id FROM postprocessings p JOIN jobs j ON j.id=p.job_id WHERE p.state='complete'"
-    ).fetchall():
+    for row in store.stage_records("postprocessing", states=("complete",)):
         source_changed = False
         try:
             source = archive_path(store, row["source_path"])
@@ -162,23 +125,14 @@ def recover(store):
 
 
 def initialize(store, job, mode):
-    source = store.db.execute("SELECT * FROM transcripts WHERE job_id=?", (job["id"],)).fetchone()
-    diarization = store.db.execute(
-        "SELECT state FROM diarizations WHERE job_id=?", (job["id"],)
-    ).fetchone()
-    if not source or not diarization or diarization[0] != "complete":
+    source = store.transcript(job["id"])
+    diarization = store.stage_row("diarization", job["id"])
+    if not source or not diarization or diarization["state"] != "complete":
         raise ValueError("Postprocessing requires a completed diarized transcript")
     path = archive_path(store, source["json_path"])
     if digest(path) != source["json_sha256"]:
         raise ValueError("Authoritative transcript is corrupt; repair it before postprocessing")
-    with store.db:
-        store.db.execute(
-            "INSERT OR IGNORE INTO postprocessings(job_id,mode,updated_at) VALUES(?,?,?)",
-            (job["id"], mode, now()),
-        )
-    return dict(
-        store.db.execute("SELECT * FROM postprocessings WHERE job_id=?", (job["id"],)).fetchone()
-    ), path
+    return store.ensure_stage("postprocessing", job["id"], mode=mode), path
 
 
 def cached_video(store, job, cache):
@@ -204,7 +158,8 @@ def cached_video(store, job, cache):
     return str(path)
 
 
-def process_one(store, job, *, bridge=None, mode="video", video_cache=None):
+@job_stage
+def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agent_runner=None):
     if mode not in {"video", "text"}:
         raise ValueError("Postprocessing mode must be video or text")
     row, source = initialize(store, job, mode)
@@ -226,7 +181,8 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None):
         video = None
         if not checkpoint:
             stage = "process"
-            ready(bridge)
+            if agent_runner is None:
+                ready(bridge)
             if mode == "video":
                 stage = "download"
                 update(
@@ -275,28 +231,16 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None):
             video=video,
             resume=bool(checkpoint),
             on_response=saving_response,
+            agent_runner=agent_runner,
         )
         stage = "save"
         update(store, job["id"], stage=stage, save_attempts=row["save_attempts"] + 1)
-        # Fsync every checkpoint/output before publishing the SQLite completion pointer.
-        files = {}
-        for path in output.rglob("*"):
-            if path.is_file() and path.name != "manifest.json" and not path.name.endswith(".tmp"):
-                with path.open("rb") as handle:
-                    os.fsync(handle.fileno())
-                files[path.relative_to(output).as_posix()] = digest(path)
+        from .blobs import publish_bundle
+
         manifest = output / "manifest.json"
-        for directory in [p for p in output.rglob("*") if p.is_dir()] + [
-            output,
-            output.parent,
-            source.parent,
-        ]:
-            fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        atomic_write(manifest, json.dumps({"version": 1, "files": files}, sort_keys=True).encode())
+        publish_bundle(
+            store.blobs, output, str(output.relative_to(store.root)), writer=atomic_write
+        )
         update(
             store,
             job["id"],
@@ -393,31 +337,26 @@ def run(
     mode="video",
     video_cache=None,
     force=False,
+    summary=True,
 ):
+    from .artifacts import retryable as artifact_retryable
+    from .artifacts import summary_row
+
     completed = failed = skipped = 0
     with worker_lock(store.root):
         store.recover()
-        where = ["j.profile=?", "j.state='complete'", "d.state='complete'"]
-        values = [profile]
-        if ids:
-            where.append(f"j.video_id IN ({','.join('?' for _ in ids)})")
-            values.extend(ids)
-        if channel:
-            where.append("v.channel_id=?")
-            values.append(channel)
-        jobs = [
-            dict(r)
-            for r in store.db.execute(
-                f"SELECT j.*,v.channel_id,v.title,v.url,v.kind FROM jobs j JOIN videos v ON v.id=j.video_id JOIN diarizations d ON d.job_id=j.id WHERE {' AND '.join(where)} ORDER BY COALESCE(v.published_at,'') DESC,j.id",
-                values,
-            )
-        ]
+        jobs = store.stage_inputs("diarization", profile=profile, ids=ids, channel=channel)
         if ids and set(ids) != {r["video_id"] for r in jobs}:
             raise ValueError("Requested videos must have completed diarization in this profile")
         forced = set()
         for job in jobs:
             row, _ = initialize(store, job, mode)
-            if not force and row["state"] == "complete":
+            artifact = summary_row(store, job["id"])
+            if (
+                not force
+                and row["state"] == "complete"
+                and (not summary or (artifact is not None and artifact["state"] == "complete"))
+            ):
                 skipped += 1
         while True:
             due = None
@@ -437,34 +376,59 @@ def run(
                         completed_at=None,
                     )
                     forced.add(job["id"])
-                row = dict(
-                    store.db.execute(
-                        "SELECT * FROM postprocessings WHERE job_id=?", (job["id"],)
-                    ).fetchone()
-                )
-                if row["state"] == "complete" or not retryable(row, max_attempts):
+                row = store.stage_row("postprocessing", job["id"])
+                if row["state"] != "complete" and not retryable(row, max_attempts):
                     continue
-                if row["next_retry"] > time.time():
+                if row["state"] != "complete" and row["next_retry"] > time.time():
                     due = min(due or row["next_retry"], row["next_retry"])
                     continue
+                artifact = summary_row(store, job["id"])
+                if row["state"] == "complete":
+                    if not summary or not artifact_retryable(artifact, max_attempts):
+                        continue
+                    if artifact is not None and artifact["next_retry"] > time.time():
+                        due = min(due or artifact["next_retry"], artifact["next_retry"])
+                        continue
+                stage = "postprocessing"
                 try:
-                    completed += int(
-                        process_one(store, job, bridge=bridge, mode=mode, video_cache=video_cache)
+                    from .pipeline import finish as finish_pipeline
+
+                    def entered(name):
+                        nonlocal stage
+                        stage = name
+
+                    changed = any(
+                        result.changed
+                        for result in finish_pipeline(
+                            store,
+                            job,
+                            bridge=bridge,
+                            mode=mode,
+                            video_cache=video_cache,
+                            summary=summary,
+                            max_attempts=max_attempts,
+                            on_stage=entered,
+                        )
                     )
+                    completed += int(changed)
                 except Exception as error:
                     failed += 1
-                    if isinstance(error, (PostprocessingUnavailable, httpx.TransportError)) or (
-                        isinstance(error, YouTubeError) and error.kind == "rate_limit"
-                    ):
+                    if isinstance(
+                        error,
+                        (PostprocessingUnavailable, httpx.TransportError, httpx.HTTPStatusError),
+                    ) or (isinstance(error, YouTubeError) and error.kind == "rate_limit"):
                         return {
                             "completed": completed,
                             "failed": failed,
                             "skipped": skipped,
                             "paused": str(error),
                         }
-                    row = store.db.execute(
-                        "SELECT * FROM postprocessings WHERE job_id=?", (job["id"],)
-                    ).fetchone()
+                    if stage == "summary":
+                        artifact = summary_row(store, job["id"])
+                        if artifact_retryable(artifact, max_attempts):
+                            due = min(due or artifact["next_retry"], artifact["next_retry"])
+                        continue
+                    row = store.stage_row("postprocessing", job["id"])
                     if retryable(row, max_attempts):
                         due = min(due or row["next_retry"], row["next_retry"])
             if not wait or due is None:

@@ -7,6 +7,7 @@ import time
 import httpx
 
 from .diarization import Client, assign_speakers, validate
+from .execution import job_stage
 from .storage import ProfileChanged, atomic_write, now, worker_lock
 from .youtube import YouTubeError, download
 
@@ -18,12 +19,7 @@ def log(event, **data):
 
 
 def update(store, job_id, **values):
-    values["updated_at"] = now()
-    with store.db:
-        store.db.execute(
-            f"UPDATE diarizations SET {','.join(k + '=?' for k in values)} WHERE job_id=?",
-            (*values.values(), job_id),
-        )
+    store.stage_update("diarization", job_id, **values)
 
 
 def read_checkpoint(store, row, field):
@@ -35,45 +31,13 @@ def read_checkpoint(store, row, field):
 
 
 def bind_profile(store, profile, health):
-    identity = json.dumps(
-        {
-            k: health.get(k)
-            for k in (
-                "model",
-                "revision",
-                "backend",
-                "backend_version",
-                "torch_version",
-                "compute_type",
-                "options",
-                "exclusive_policy",
-            )
-        },
-        sort_keys=True,
-    )
-    existing = store.db.execute(
-        "SELECT identity FROM diarization_profiles WHERE profile=?", (profile,)
-    ).fetchone()
-    if existing and existing[0] != identity:
-        raise ProfileChanged("Diarization model/settings changed; use an explicit new profile")
-    with store.db:
-        store.db.execute(
-            "INSERT OR IGNORE INTO diarization_profiles VALUES(?,?)", (profile, identity)
-        )
+    store.bind_diarization_profile(profile, health)
 
 
 def initialize(store, job):
-    with store.db:
-        store.db.execute(
-            "INSERT OR IGNORE INTO diarizations(job_id,updated_at) VALUES(?,?)", (job["id"], now())
-        )
-    row = dict(
-        store.db.execute("SELECT * FROM diarizations WHERE job_id=?", (job["id"],)).fetchone()
-    )
+    row = store.ensure_stage("diarization", job["id"])
     if not row["asr_path"]:
-        transcript = store.db.execute(
-            "SELECT * FROM transcripts WHERE job_id=?", (job["id"],)
-        ).fetchone()
+        transcript = store.transcript(job["id"])
         source = store.root / transcript["json_path"]
         raw = source.read_bytes()
         if hashlib.sha256(raw).hexdigest() != transcript["json_sha256"]:
@@ -86,9 +50,7 @@ def initialize(store, job):
             asr_path=str(backup.relative_to(store.root)),
             asr_sha256=hashlib.sha256(raw).hexdigest(),
         )
-        row = dict(
-            store.db.execute("SELECT * FROM diarizations WHERE job_id=?", (job["id"],)).fetchone()
-        )
+        row = store.stage_row("diarization", job["id"])
     return row
 
 
@@ -100,10 +62,8 @@ def prepare(store, job):
             return row, None
         asr = read_checkpoint(store, row, "asr")
     except Exception as error:
-        existing = store.db.execute(
-            "SELECT save_attempts FROM diarizations WHERE job_id=?", (job["id"],)
-        ).fetchone()
-        attempts = (existing[0] if existing else 0) + 1
+        existing = store.stage_row("diarization", job["id"])
+        attempts = (existing["save_attempts"] if existing else 0) + 1
         update(
             store,
             job["id"],
@@ -118,6 +78,7 @@ def prepare(store, job):
     return row, asr
 
 
+@job_stage
 def enrich_one(store, job, client, *, keep_audio=False):
     row, asr = prepare(store, job)
     if row["state"] == "complete":
@@ -130,7 +91,12 @@ def enrich_one(store, job, client, *, keep_audio=False):
     try:
         prediction = None
         if row["prediction_path"]:
-            prediction = validate(read_checkpoint(store, row, "prediction"))
+            from .inference import HardwarePolicy
+
+            prediction = validate(
+                read_checkpoint(store, row, "prediction"),
+                hardware=getattr(client, "hardware", HardwarePolicy()),
+            )
         if prediction is None:
             for relative in (row["audio_path"], job.get("audio_path")):
                 if relative and (store.root / relative).is_file():
@@ -281,15 +247,7 @@ def run(store, endpoint, *, ids=None, profile="turbo-v1", max_attempts=3, wait=F
     with worker_lock(store.root):
         store.recover()
         client.health()
-        conditions = ["j.state='complete'", "j.profile=?"]
-        args = [profile]
-        if ids:
-            conditions.append(f"j.video_id IN ({','.join('?' for _ in ids)})")
-            args.extend(ids)
-        scope = store.db.execute(
-            f"SELECT j.*,v.channel_id,v.title,v.url,v.kind FROM jobs j JOIN videos v ON v.id=j.video_id WHERE {' AND '.join(conditions)} ORDER BY j.id",
-            args,
-        ).fetchall()
+        scope = store.stage_inputs("asr", profile=profile, ids=ids, order="id")
         if ids and set(ids) != {r["video_id"] for r in scope}:
             raise ValueError("Requested video is not transcribed in this profile")
         for job in scope:
@@ -298,21 +256,13 @@ def run(store, endpoint, *, ids=None, profile="turbo-v1", max_attempts=3, wait=F
             except Exception:
                 failed += 1
         skipped = sum(
-            store.db.execute(
-                "SELECT state FROM diarizations WHERE job_id=?", (job["id"],)
-            ).fetchone()[0]
-            == "complete"
-            for job in scope
+            store.stage_row("diarization", job["id"])["state"] == "complete" for job in scope
         )
         while True:
             due = None
             ran = False
             for job in scope:
-                row = dict(
-                    store.db.execute(
-                        "SELECT * FROM diarizations WHERE job_id=?", (job["id"],)
-                    ).fetchone()
-                )
+                row = store.stage_row("diarization", job["id"])
                 if row["state"] == "complete":
                     continue
                 if any(
@@ -354,9 +304,7 @@ def run(store, endpoint, *, ids=None, profile="turbo-v1", max_attempts=3, wait=F
                 break
             pending = [
                 dict(r)
-                for r in store.db.execute(
-                    "SELECT * FROM diarizations WHERE state IN ('pending','failed')"
-                ).fetchall()
+                for r in store.stage_records("diarization", states=("pending", "failed"))
                 if r["job_id"] in {j["id"] for j in scope}
                 and r["download_attempts"] < max_attempts
                 and r["attempts"] < max_attempts
