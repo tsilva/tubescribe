@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -89,8 +90,40 @@ def archive_path(store, relative):
     return path
 
 
+def cleanup_video(store, video_id):
+    """Remove only archive-owned media after durable completion; failures are retryable."""
+    directory = store.root / "videos"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return
+    try:
+        if not directory.exists():
+            return
+        if not directory.resolve().is_relative_to(store.root):
+            raise ValueError("Video cache points outside the archive")
+        removed = []
+        for suffix in (".mp4", ".webm", ".mkv"):
+            path = directory / (video_id + suffix)
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except FileNotFoundError:
+                pass
+        if removed:
+            fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            log("video_cleanup_complete", video_id=video_id, files=removed)
+    except (OSError, ValueError) as error:
+        # A cleanup failure must never invalidate a completed bundle or rerun inference.
+        log("video_cleanup_failed", video_id=video_id, error=str(error))
+
+
 def recover(store):
-    for row in store.db.execute("SELECT * FROM postprocessings WHERE state='complete'").fetchall():
+    for row in store.db.execute(
+        "SELECT p.*,j.video_id FROM postprocessings p JOIN jobs j ON j.id=p.job_id WHERE p.state='complete'"
+    ).fetchall():
         source_changed = False
         try:
             source = archive_path(store, row["source_path"])
@@ -109,6 +142,7 @@ def recover(store):
                     for path, checksum in entries.items()
                 )
             if valid:
+                cleanup_video(store, row["video_id"])
                 continue
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -277,13 +311,6 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None):
             agent_seconds=report["agent_elapsed_seconds"],
             total_tokens=report["usage"]["total"]["totalTokens"],
         )
-        log(
-            "postprocessing_complete",
-            video_id=job["video_id"],
-            figures=report["figures"],
-            agent_seconds=report["agent_elapsed_seconds"],
-        )
-        return True
     except (KeyboardInterrupt, SystemExit):
         update(
             store,
@@ -342,6 +369,15 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None):
         )
         log("postprocessing_failed", video_id=job["video_id"], stage=stage, error=str(error))
         raise
+    # Post-commit work sits outside failure handling, including interruption handling.
+    log(
+        "postprocessing_complete",
+        video_id=job["video_id"],
+        figures=report["figures"],
+        agent_seconds=report["agent_elapsed_seconds"],
+    )
+    cleanup_video(store, job["video_id"])
+    return True
 
 
 def run(

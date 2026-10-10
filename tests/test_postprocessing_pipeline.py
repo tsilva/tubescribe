@@ -15,7 +15,7 @@ import httpx
 from test_pipeline import CID, DIARIZATION, RESULT, VID
 
 from tubescribe.dashboard import make_server, snapshot
-from tubescribe.postprocessing_worker import cached_video, run
+from tubescribe.postprocessing_worker import cached_video, cleanup_video, process_one, recover, run
 from tubescribe.storage import Store, atomic_write
 from tubescribe.worker import work
 
@@ -209,6 +209,11 @@ class FinalStage(unittest.TestCase):
         self.assertEqual(len(bundle.read_bytes()), len(original))
 
     def test_failure_after_model_response_resumes_without_another_model_call(self):
+        folder = self.store.root / "videos"
+        folder.mkdir()
+        video = folder / (VID + ".mp4")
+        video.write_bytes(b"cached source")
+
         def fail_manifest(path, content):
             if path.name == "manifest.json":
                 raise OSError("disk busy")
@@ -218,8 +223,63 @@ class FinalStage(unittest.TestCase):
             self.assertEqual(self.full()["failed"], 1)
         self.assertEqual(self.row()["stage"], "save")
         self.assertEqual(self.requests, 1)
+        self.assertTrue(video.exists())
         self.store.retry([VID])
         self.assertEqual(self.full()["completed"], 1)
+        self.assertEqual(self.requests, 1)
+        self.assertFalse(video.exists())
+
+    def test_cleanup_failure_keeps_completion_and_recovery_retries_without_inference(self):
+        folder = self.store.root / "videos"
+        folder.mkdir()
+        video = folder / (VID + ".webm")
+        video.write_bytes(b"cached source")
+        unrelated = folder / "other-video.mp4"
+        unrelated.write_bytes(b"unprocessed")
+        original_unlink = Path.unlink
+
+        def fail_cleanup(path, *args, **kwargs):
+            if path == video:
+                raise OSError("media busy")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", fail_cleanup):
+            self.assertEqual(self.full()["completed"], 1)
+        self.assertEqual(self.row()["state"], "complete")
+        self.assertIsNone(self.row()["error"])
+        self.assertTrue(video.exists())
+        self.assertEqual(self.full()["skipped"], 1)
+        self.assertFalse(video.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertEqual(self.requests, 1)
+        self.assertEqual(self.transcribe.call_count, 1)
+
+    def test_cleanup_never_follows_external_cache_directory_or_video_symlinks(self):
+        with tempfile.TemporaryDirectory() as external:
+            directory = Path(external)
+            video = directory / (VID + ".mp4")
+            video.write_bytes(b"caller-owned source")
+            folder = self.store.root / "videos"
+            folder.symlink_to(directory, target_is_directory=True)
+            cleanup_video(self.store, VID)
+            self.assertTrue(video.exists())
+            folder.unlink()
+            folder.mkdir()
+            (folder / video.name).symlink_to(video)
+            cleanup_video(self.store, VID)
+            self.assertTrue(video.exists())
+            self.assertFalse((folder / video.name).is_symlink())
+            cleanup_video(self.store, "../" + VID)
+            self.assertTrue(video.exists())
+
+    def test_interrupted_cleanup_does_not_undo_durable_completion(self):
+        work(self.store, "http://127.0.0.1:1", ids=[VID], postprocessing="off")
+        with patch("tubescribe.postprocessing_worker.cleanup_video", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                process_one(self.store, self.job, bridge=self.bridge, mode="text")
+        self.assertEqual(self.row()["state"], "complete")
+        self.assertIsNone(self.row()["error"])
+        self.assertEqual(self.full()["skipped"], 1)
         self.assertEqual(self.requests, 1)
 
     def test_existing_diarized_source_runs_without_asr_and_force_preserves_previous_bundle(self):
@@ -369,6 +429,10 @@ class FinalStage(unittest.TestCase):
         self.assertEqual(self.requests, 1)
 
     def test_rejected_model_output_does_not_consume_save_budget(self):
+        folder = self.store.root / "videos"
+        folder.mkdir()
+        video = folder / (VID + ".mkv")
+        video.write_bytes(b"cached source")
         self.invalid_output = True
         for attempts in (1, 2):
             self.assertEqual(self.full()["failed"], 1)
@@ -376,12 +440,14 @@ class FinalStage(unittest.TestCase):
             self.assertEqual(self.row()["attempts"], attempts)
             self.assertEqual(self.row()["save_attempts"], 0)
             self.assertIsNone(self.row()["output_dir"])
+            self.assertTrue(video.exists())
             with self.store.db:
                 self.store.db.execute("UPDATE postprocessings SET next_retry=0")
         self.invalid_output = False
         self.assertEqual(self.full()["completed"], 1)
         self.assertEqual(self.row()["attempts"], 3)
         self.assertEqual(self.requests, 3)
+        self.assertFalse(video.exists())
 
     def test_wrong_channel_video_is_quarantined_before_cache_reuse(self):
         folder = self.store.root / "videos"
@@ -424,6 +490,13 @@ class FinalStage(unittest.TestCase):
         result = work(self.store, "http://127.0.0.1:1", ids=[VID], bridge=self.bridge)
         self.assertEqual(result["completed"], 1)
         self.assertEqual(self.row()["figures"], 1)
+        self.assertFalse((folder / (VID + ".mp4")).exists())
+        source = self.store.root / self.row()["source_path"]
+        self.assertEqual(json.loads(source.read_text())["source_url"], self.job["url"])
+        self.assertEqual(
+            self.store.db.execute("SELECT url FROM videos WHERE id=?", (VID,)).fetchone()[0],
+            self.job["url"],
+        )
         server = make_server(self.store.root)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -436,6 +509,7 @@ class FinalStage(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("figures/frame_0001000.png", response.text)
             self.assertIn("Source SRT", response.text)
+            self.assertIn(f"/transcripts/{job['job_id']}/srt", response.text)
             self.assertIn("script-src 'none'", response.headers["content-security-policy"])
             prefix = f"/processed/{job['job_id']}/"
             image = httpx.get(base + prefix + "figures/frame_0001000.png", trust_env=False)
@@ -461,6 +535,20 @@ class FinalStage(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+        # Bundle repair reuses persisted images even though the source video is gone.
+        bundle = self.store.root / self.row()["output_dir"] / "processed-with-figures.zip"
+        bundle.write_bytes(b"corrupt")
+        retained = folder / (VID + ".mp4")
+        retained.write_bytes(b"retained until bundle is repaired")
+        recover(self.store)
+        self.assertEqual(self.row()["state"], "pending")
+        self.assertTrue(retained.exists())
+        result = run(self.store, bridge="http://127.0.0.1:1", ids=[VID])
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(self.requests, 1)
+        self.assertEqual(self.row()["figures"], 1)
+        self.assertFalse(retained.exists())
 
 
 if __name__ == "__main__":

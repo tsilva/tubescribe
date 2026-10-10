@@ -238,6 +238,8 @@ def snapshot(root: Path) -> dict:
             paths.extend(
                 base.with_suffix(ext).as_posix() for ext in (".md", ".srt", ".txt", ".json")
             )
+            if base.with_suffix(".srt").as_posix() in by_path:
+                job["srt_url"] = f"/transcripts/{job['job_id']}/srt"
         if job["audio_path"]:
             paths.append(job["audio_path"])
         if job.get("postprocessing_state") == "complete" and job.get("postprocessing_dir"):
@@ -341,6 +343,31 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                     )
                 elif url.path == "/api/snapshot":
                     self.send_json(snapshot(root))
+                elif match := re.fullmatch(r"/transcripts/(\d+)/srt", url.path):
+                    from .srt_viewer import render_srt
+
+                    with contextlib.closing(sqlite3.connect(root / "archive.sqlite3")) as db:
+                        row = db.execute(
+                            "SELECT t.json_path,v.title,v.id,p.state FROM transcripts t "
+                            "JOIN jobs j ON j.id=t.job_id JOIN videos v ON v.id=j.video_id "
+                            "LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.id=?",
+                            (int(match[1]),),
+                        ).fetchone()
+                    if not row:
+                        raise FileNotFoundError()
+                    relative = Path(row[0]).with_suffix(".srt").as_posix()
+                    path = allowed_file(root, relative)
+                    data = render_srt(
+                        path.read_text(encoding="utf-8"),
+                        title=row[1],
+                        video_id=row[2],
+                        download_url="/api/file?path=" + quote(relative, safe="") + "&download=1",
+                        processed_url=f"/processed/{match[1]}/preview.html"
+                        if row[3] == "complete"
+                        else None,
+                    ).encode()
+                    self.send_headers(200, CONTENT_TYPES[".html"], len(data), generated_html=True)
+                    self.wfile.write(data)
                 elif match := re.fullmatch(
                     r"/processed/(\d+)/(preview\.html|processed\.md|source\.srt|processed-with-figures\.zip|figures/frame_\d+\.png)",
                     url.path,
@@ -361,7 +388,8 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                             render_preview(path.read_text(), row[2])
                             .replace(
                                 '<a href="processed.md" download>Download Markdown</a>',
-                                '<a href="processed.md" download>Download Markdown</a> · <a href="processed-with-figures.zip" download>Download with figures</a> · <a href="source.srt" download>Source SRT</a>',
+                                '<a href="processed.md" download>Download Markdown</a> · <a href="processed-with-figures.zip" download>Download with figures</a> · <a href="source.srt" download>Source SRT</a>'
+                                f' · <a href="/transcripts/{match[1]}/srt">View SRT</a>',
                             )
                             .encode()
                         )

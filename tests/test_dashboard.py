@@ -118,6 +118,33 @@ class Dashboard(unittest.TestCase):
         (self.root / file["path"]).unlink()
         self.assertEqual(self.client.get(file["url"]).status_code, 404)
 
+    def test_srt_viewer_is_available_before_postprocessing_and_links_exact_youtube_seconds(self):
+        job = next(j for j in snapshot(self.root)["jobs"] if j["video_id"] == "saved")
+        path = (self.root / job["json_path"]).with_suffix(".srt")
+        original = (
+            b"1\n00:00:00,125 --> 00:00:02,000\nSpeaker 1: <script>alert(1)</script>\n\n"
+            b"2\n01:02:03,999 --> 01:02:05,010\nSpeaker 2: Hello\nSecond line\n"
+        )
+        path.write_bytes(original)
+        response = self.client.get(job["srt_url"])
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("https://www.youtube.com/watch?v=saved&amp;t=0s", response.text)
+        self.assertIn("https://www.youtube.com/watch?v=saved&amp;t=3723s", response.text)
+        self.assertIn("01:02:03,999", response.text)
+        self.assertIn("Speaker 2: Hello\nSecond line", response.text)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", response.text)
+        self.assertIn("Saved &lt;script&gt; video", response.text)
+        self.assertNotIn("<script>", response.text)
+        self.assertNotIn("Processed transcript", response.text)
+        self.assertIn('rel="noopener noreferrer"', response.text)
+        self.assertIn("script-src 'none'", response.headers["content-security-policy"])
+        self.assertIn("Open on YouTube", response.text)
+        srt_file = next(f for f in job["files"] if f["format"] == "srt")
+        self.assertEqual(self.client.get(srt_file["url"]).content, original)
+        self.assertEqual(self.client.get("/transcripts/99999/srt").status_code, 404)
+        path.unlink()
+        self.assertEqual(self.client.get(job["srt_url"]).status_code, 404)
+
     def test_asr_saved_but_diarization_incomplete_is_not_shown_as_complete(self):
         with self.store.db:
             self.store.db.execute(

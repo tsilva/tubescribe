@@ -265,10 +265,15 @@ The dedicated `postprocess` command stops on YouTube rate limits even with `--wa
 the retry remains queued with a 30-minute cooldown.
 
 Video mode reuses `data/videos/VIDEO_ID.mp4` (also `.webm`/`.mkv`) or downloads a stream
-at up to 720p with one concurrent fragment. The separate cache survives failures and
-completion for reuse. `--video-cache /path/to/cache` or
+at up to 720p with one concurrent fragment. The archive's cached video is deleted only
+after the processed bundle and its manifest are durably committed. Failed/interrupted runs
+keep the video for retries; saved figures, transcripts, checkpoints, and the YouTube URL
+remain. Cleanup failures leave completion intact and retry during worker recovery after
+validating the bundle. Forced video-mode reprocessing downloads the source again when needed.
+`--video-cache /path/to/cache` or
 `--video-cache ssh://HOST/absolute/cache/directory` selects a read-only existing cache;
-remote entries are `VIDEO_ID.mp4`, and only frames are transferred. Missing custom-cache
+remote entries are `VIDEO_ID.mp4`, and only frames are transferred. Caller-owned caches
+outside the archive are never deleted. Missing custom-cache
 entries fail rather than silently downloading elsewhere. Use `work --postprocessing text`
 or `postprocess --mode text` when video inspection is unnecessary; no figures are invented.
 
@@ -290,7 +295,11 @@ within its separate save budget.
 
 The dashboard keeps Channel → Videos and one Transcript action per row. Completed
 postprocessing opens the illustrated version, with downloads for Markdown, figures ZIP,
-and the original SRT. Earlier raw transcripts remain readable while this stage is pending.
+and the original SRT. View SRT opens a simple cue-by-cue reader; clicking a start timestamp
+opens the original YouTube video at that second. The reader also links to YouTube and the
+SRT download. Earlier raw transcripts remain readable while this stage is pending, with
+the same View SRT action. The original YouTube URL stays in the video record and transcript
+JSON even after local media cleanup.
 The generated preview escapes source text and executes no scripts. Archive export includes
 processed outputs and their checkpoints under `transcripts/`; it does not copy the video cache.
 

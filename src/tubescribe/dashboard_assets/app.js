@@ -165,6 +165,8 @@ function renderChannels() {
 }
 function openTranscript(job, files) {
   previewFiles = files;
+  $("preview-srt").classList.toggle("hidden", !job.srt_url);
+  if (job.srt_url) $("preview-srt").href = job.srt_url;
   $("preview-title").textContent = job.title;
   $("preview-format").replaceChildren(...files.map((file) => new Option(file.format.toUpperCase(), file.path)));
   if (!$("transcript-preview").open) $("transcript-preview").showModal();
