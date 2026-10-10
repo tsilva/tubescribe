@@ -43,3 +43,12 @@ The test source is the first ten minutes of [Jordi Visser’s TFTC interview wit
 Review writes `evaluation.json` plus `<run-label>.json`, `.txt`, `.srt`, and `.md` under ignored `data/diarization/`. Nemotron’s label is `nemotron_automatic`; pyannote’s labels are `automatic` and `known_two_speakers`. Each word is assigned by temporal overlap, then cues split on speaker changes. Unmatched words remain `UNKNOWN`. Names are reference-guided for this recording; no person identification or cross-video voice recognition is inferred. Original archive transcripts remain unchanged.
 
 Markdown merges consecutive cues from the same voice into turns with a speaker-name prefix. The known names come from the reference-guided mapping; unidentified voices keep their recorded IDs. It preserves the ASR text and omits cue timestamps for reading.
+
+## Dependency security blocker
+
+The historical Pyannote comparison remains on its old paired Torch/audio stack
+and has open Torch security alerts. Do not restore or run it until that stack
+passes a fresh security review. The available torchaudio 2.11 requires Torch
+2.11, which still lacks the future-callback fix and constrains setuptools below
+its patched release. Forcing torchaudio onto Torch 2.13 would break the supported
+binary pairing. The independent production environment uses patched Torch 2.13.
