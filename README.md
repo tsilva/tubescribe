@@ -99,7 +99,7 @@ scripts/tubescribe work --profile turbo-v2 --wait
 
 ## Remote speaker diarization
 
-The production diarizer is **NVIDIA Nemotron-3-Diarization**, pinned to revision `f667ed73aee57d40cc39428eb768b4fd87a0a29e`, using Transformers 5.18.0 / PyTorch 2.8.0+cu128, float32 on **RTX 4090 device 0**. It is ungated and needs no Hugging Face token. The isolated environment is `/home/tsilva/.local/share/tubescribe/diarization-service`; it shares cached model weights but does not change the ASR environment or other running models.
+The production diarizer is **NVIDIA Nemotron-3-Diarization**, pinned to revision `f667ed73aee57d40cc39428eb768b4fd87a0a29e`, with the configured new-install baseline Transformers 5.18.0 / PyTorch 2.13.0+cu130, float32 on **RTX 4090 device 0**. It is ungated and needs no Hugging Face token. The locked Linux Torch wheel requires a CUDA 13-compatible NVIDIA driver. The running service was last verified on Torch 2.8.0+cu128. Updating the repository does not restart or upgrade it; redeploy its isolated environment explicitly. The isolated environment is `/home/tsilva/.local/share/tubescribe/diarization-service`; it shares cached model weights but does not change the ASR environment or other running models.
 
 ```bash
 scripts/tubescribe tunnel start                    # authorize/reuse the main SSH connection
