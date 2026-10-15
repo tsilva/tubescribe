@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fcntl
+import gzip
+import hashlib
 import html
 import json
 import os
@@ -77,7 +79,7 @@ def lock_status(root: Path, name: str) -> dict:
         return {"running": False, "pid": None}
 
 
-def allowed_file(root: Path, relative: str) -> Path:
+def allowed_file(root: Path, relative: str, *, archive=None) -> Path:
     """Only archive outputs/audio; never expose configuration, sockets or arbitrary files."""
     root = root.resolve()
     rel = Path(relative)
@@ -95,11 +97,13 @@ def allowed_file(root: Path, relative: str) -> Path:
         raise FileNotFoundError("Not an archive output")
     from .storage import Store
 
-    archive = Store(root)
+    owned = archive is None
+    archive = archive or Store(root)
     try:
         archive.materialize(relative)
     finally:
-        archive.db.close()
+        if owned:
+            archive.db.close()
     if not path.is_file():
         raise FileNotFoundError("File is no longer available")
     return path
@@ -137,28 +141,32 @@ def output_files(root: Path) -> list[dict]:
             return files
     finally:
         archive.db.close()
-    files = []
-    for category in ("transcripts", "subtitles", "diarization", "quality", "audio"):
-        for path in sorted((root / category).rglob("*")):
-            relative = path.relative_to(root).as_posix()
-            try:
-                allowed_file(root, relative)
-                stat = path.stat()
-            except (OSError, ValueError):
-                continue
-            files.append(
-                {
-                    "path": relative,
-                    "name": path.name,
-                    "format": path.suffix[1:],
-                    "category": category,
-                    "bytes": stat.st_size,
-                    "modified_at": stat.st_mtime,
-                    "previewable": path.suffix in TEXT_FORMATS,
-                    "url": "/api/file?path=" + quote(relative, safe=""),
-                }
-            )
-    return files
+    archive = Store(root)
+    try:
+        files = []
+        for category in ("transcripts", "subtitles", "diarization", "quality", "audio"):
+            for path in sorted((root / category).rglob("*")):
+                relative = path.relative_to(root).as_posix()
+                try:
+                    allowed_file(root, relative, archive=archive)
+                    stat = path.stat()
+                except (OSError, ValueError):
+                    continue
+                files.append(
+                    {
+                        "path": relative,
+                        "name": path.name,
+                        "format": path.suffix[1:],
+                        "category": category,
+                        "bytes": stat.st_size,
+                        "modified_at": stat.st_mtime,
+                        "previewable": path.suffix in TEXT_FORMATS,
+                        "url": "/api/file?path=" + quote(relative, safe=""),
+                    }
+                )
+        return files
+    finally:
+        archive.db.close()
 
 
 def _events_in_file(path: Path) -> list[dict]:
@@ -305,11 +313,66 @@ def snapshot(root: Path) -> dict:
     }
 
 
+class FeedChanges:
+    """Small UI records and bounded revision history; snapshots remain authoritative."""
+
+    fields = frozenset(
+        "video_id channel_id title url duration published_at job_id profile stage scheduled "
+        "channel_title download_state asr_state download_attempts asr_attempts next_retry "
+        "failed_stage error updated_at completed_at model language processing_seconds "
+        "diarization_state diarization_attempts speaker_count diarization_seconds "
+        "postprocessing_state figures postprocessing_dir summary_state summary_attempts summary_dir "
+        "summary_updated_at transcript_url processed_url cover_url summary_url srt_url".split()
+    )
+
+    def __init__(self, root):
+        self.root = root
+        self.history = {}
+        self.lock = threading.Lock()
+
+    def get(self, revision=None):
+        with self.lock:
+            data = snapshot(self.root)
+            jobs = {}
+            for source in data["jobs"]:
+                key = (
+                    str(source["job_id"])
+                    if source["job_id"] is not None
+                    else "video:" + source["video_id"]
+                )
+                jobs[key] = {k: v for k, v in source.items() if k in self.fields and v is not None}
+                jobs[key]["key"] = key
+            fingerprints = {
+                key: hashlib.sha256(json.dumps(job, sort_keys=True).encode()).hexdigest()
+                for key, job in jobs.items()
+            }
+            metadata = {k: data[k] for k in ("channels", "summary", "worker")}
+            current = hashlib.sha256(
+                json.dumps([metadata, fingerprints], sort_keys=True).encode()
+            ).hexdigest()
+            previous = self.history.get(revision)
+            result = {
+                **metadata,
+                "generated_at": data["generated_at"],
+                "revision": current,
+                "full": previous is None,
+                "jobs": list(jobs.values())
+                if previous is None
+                else [job for key, job in jobs.items() if previous.get(key) != fingerprints[key]],
+                "removed": [] if previous is None else [key for key in previous if key not in jobs],
+            }
+            self.history[current] = fingerprints
+            while len(self.history) > 8:
+                del self.history[next(iter(self.history))]
+            return result
+
+
 def make_server(root: Path, port: int = 0, instance: str | None = None) -> ThreadingHTTPServer:
     root = root.resolve()
     config = RuntimeConfig.load(root)
     instance = instance or uuid.uuid4().hex
     children_lock = threading.Lock()
+    feed_changes = FeedChanges(root)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -317,13 +380,23 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             pass
 
         def send_headers(
-            self, status, content_type, length, *, disposition=None, generated_html=False
+            self,
+            status,
+            content_type,
+            length,
+            *,
+            disposition=None,
+            generated_html=False,
+            content_encoding=None,
+            vary_encoding=False,
         ):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(length))
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Vary", "Accept")
+            self.send_header("Vary", "Accept, Accept-Encoding" if vary_encoding else "Accept")
+            if content_encoding:
+                self.send_header("Content-Encoding", content_encoding)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header(
@@ -367,9 +440,20 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             if self.command != "HEAD":
                 self.wfile.write(data)
 
-        def send_json(self, value, status=200):
+        def send_json(self, value, status=200, *, compress=False):
             data = json.dumps(value, ensure_ascii=False).encode()
-            self.send_headers(status, CONTENT_TYPES[".json"], len(data))
+            encoded = compress and re.search(
+                r"(?:^|,)\s*gzip\s*(?:,|$)", self.headers.get("Accept-Encoding", "")
+            )
+            if encoded:
+                data = gzip.compress(data, compresslevel=4, mtime=0)
+            self.send_headers(
+                status,
+                CONTENT_TYPES[".json"],
+                len(data),
+                content_encoding="gzip" if encoded else None,
+                vary_encoding=compress,
+            )
             self.write_data(data)
 
         def trusted(self):
@@ -503,6 +587,10 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                         self.write_data(data)
                 elif url.path == "/api/snapshot":
                     self.send_json(snapshot(root))
+                elif url.path == "/api/feed":
+                    self.send_json(
+                        feed_changes.get(query.get("revision", [None])[0]), compress=True
+                    )
                 elif match := re.fullmatch(
                     r"/artifacts/(\d+)/([a-z][a-z0-9_-]{0,63})(?:/(artifact\.md|figures/frame_\d+\.png))?/?",
                     url.path,

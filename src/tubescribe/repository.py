@@ -888,6 +888,44 @@ class ArchiveViews:
                     ORDER BY COALESCE(v.published_at,'') DESC,v.discovered_at DESC,v.id,j.id
                 """)
             ]
+            scheduled = set()
+            for submission in db.execute(
+                "SELECT request FROM submissions WHERE state='queued' AND pid IS NULL"
+            ):
+                try:
+                    request = json.loads(submission[0])
+                    if request.get("command") != "work":
+                        continue
+                    options = request["options"]
+                    profile = options.get("profile", "turbo-v1")
+                    plan = Plan(
+                        True,
+                        options.get("postprocessing", "video") != "off",
+                        not options.get("no_summary", False)
+                        and options.get("postprocessing", "video") != "off",
+                    )
+                    stamp = database_clock(db)
+                    candidates = [
+                        job
+                        for job in jobs
+                        if job["job_id"] is not None
+                        and job["profile"] == profile
+                        and (not options.get("video") or job["video_id"] in options["video"])
+                        and (not options.get("channel") or job["channel_id"] == options["channel"])
+                        and (due := plan.due(job, options.get("max_attempts", 3))) is not None
+                        and (due <= stamp or options.get("wait"))
+                    ]
+                    candidates.sort(key=lambda job: job["job_id"])
+                    candidates.sort(key=lambda job: job["published_at"] or "", reverse=True)
+                    limit = options.get("limit")
+                    if limit is not None:
+                        candidates = candidates[: max(0, int(limit))]
+                    scheduled.update(job["job_id"] for job in candidates)
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    # Invalid requests cannot promise processing in the library.
+                    continue
+            for job in jobs:
+                job["scheduled"] = job["job_id"] in scheduled
             db.rollback()
 
         return channels, discovery, profiles, jobs

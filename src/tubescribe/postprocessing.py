@@ -1042,11 +1042,20 @@ def stitch(
         raise ValueError("Output references unissued images or inconsistent image IDs")
     expected = 1
     previous_heading = -1
+    # Agents may append a source timestamp link to an otherwise matching heading.
+    # Keep cue coverage and heading order strict, without rejecting that navigation.
+    timestamp_link = (
+        r"(?:[ \t]+\[\d{1,3}:[0-5]\d(?::[0-5]\d)?\]"
+        r"\(https://(?:www\.)?youtube\.com/watch\?v=[A-Za-z0-9_-]{11}&t=\d+s?\))?"
+    )
     for section in output["sections"]:
         if section["first_cue"] != expected or section["last_cue"] < expected:
             raise ValueError("Source cue coverage has a gap or overlap")
         expected = section["last_cue"] + 1
-        heading = re.search(r"(?m)^#{1,4}\s+" + re.escape(section["heading"]) + r"\s*$", markdown)
+        heading = re.search(
+            r"(?m)^#{1,4}[ \t]+" + re.escape(section["heading"]) + timestamp_link + r"[ \t]*$",
+            markdown,
+        )
         if heading is None or heading.start() <= previous_heading:
             raise ValueError("Section coverage is missing or out of order in Markdown")
         previous_heading = heading.start()

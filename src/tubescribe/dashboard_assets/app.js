@@ -10,8 +10,17 @@ let selectedVideo = null;
 let selectedProfile = null;
 let readerSignature = "";
 let readerController = null;
+let readerIdentity = "";
+let readerTab = "summary";
 const readingCache = new Map();
-const collapsedChannels = new Set();
+const rowCache = new Map();
+const feedRecords = new Map();
+const feedCacheKey = "tubescribe.feed.v1";
+let feedRevision = "";
+let feedLimit = 50;
+let feedSearch = "";
+let feedObserver = null;
+const dateFormatter = new Intl.DateTimeFormat(undefined, {day: "numeric", month: "short", year: "numeric"});
 const expandedVideos = new Set();
 const narrowReader = window.matchMedia("(max-width: 900px)");
 
@@ -23,7 +32,7 @@ function node(tag, text, className) {
 }
 function human(value) {
   if (value === "asr") return "ASR";
-  if (value === "indexed") return "Indexed only";
+  if (value === "not_processed") return "Not Processed";
   return value ? (value[0].toUpperCase() + value.slice(1)).replaceAll("_", " ") : "—";
 }
 function duration(seconds) {
@@ -31,14 +40,18 @@ function duration(seconds) {
   const minutes = Math.floor(seconds / 60);
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m ${Math.floor(seconds % 60)}s`;
 }
-function date(value, dateOnly = false) {
-  if (!value) return "";
+function parsedDate(value) {
+  if (!value) return new Date(NaN);
   const timestamp = /^\d{8}$/.test(String(value))
     ? `${String(value).slice(0, 4)}-${String(value).slice(4, 6)}-${String(value).slice(6, 8)}T00:00:00`
     : /^\d+(\.\d+)?$/.test(String(value)) ? Number(value) * 1000 : value;
-  const parsed = new Date(timestamp);
+  return new Date(timestamp);
+}
+function date(value, dateOnly = false) {
+  if (!value) return "";
+  const parsed = parsedDate(value);
   return Number.isNaN(parsed.getTime()) ? String(value)
-    : dateOnly ? parsed.toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"}) : parsed.toLocaleString();
+    : dateOnly ? dateFormatter.format(parsed) : parsed.toLocaleString();
 }
 function externalLink(label, url, className) {
   const link = node("a", label, className);
@@ -110,8 +123,12 @@ function bestJob(jobs) {
 function quality(job) {
   return job.summary_url ? 4 : job.processed_url ? 3 : job.transcript_url ? 2 : job.job_id != null ? 1 : 0;
 }
+function displayStage(job) {
+  return ["queued", "indexed"].includes(job.stage) && !job.scheduled ? "not_processed" : job.stage;
+}
 function statusBadge(job) {
-  return node("span", human(job.stage), `badge ${job.stage}`);
+  const stage = displayStage(job);
+  return node("span", human(stage), `badge ${stage}`);
 }
 function selectVideo(jobs, job = bestJob(jobs), open = true) {
   selectedVideo = jobs[0].video_id;
@@ -124,33 +141,16 @@ function selectVideo(jobs, job = bestJob(jobs), open = true) {
   renderReader(jobs, job);
   if (open) setReaderOpen(true);
 }
-function rowActions(jobs, job) {
-  const actions = node("div", undefined, "row-actions");
-  if (job.summary_url) {
-    const summary = node("button", "Summary", "summary-action");
-    summary.dataset.focus = `summary-${job.job_id}`;
-    summary.setAttribute("aria-label", `Read summary: ${job.title}`);
-    summary.addEventListener("click", () => selectVideo(jobs, job));
-    actions.append(summary);
-  }
-  const transcriptUrl = job.processed_url || job.transcript_url;
-  if (transcriptUrl) actions.append(resourceLink("Transcript", transcriptUrl));
-  else if (transcriptFiles(job).length) {
-    const transcript = node("button", "Transcript");
-    transcript.addEventListener("click", () => openTranscript(job, transcriptFiles(job)));
-    actions.append(transcript);
-  }
-  const youtube = externalLink("YouTube", job.url);
-  youtube.append(icon("arrow-top-right-on-square"));
-  actions.append(youtube);
-  return actions;
-}
 function videoRow(jobs) {
   const job = bestJob(jobs);
   const video = jobs[0];
   const row = node("li", undefined, "video-row");
   row.dataset.video = video.video_id;
   row.classList.toggle("selected", video.video_id === selectedVideo);
+  row.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.target.closest("a, button, input, select, textarea, details")) return;
+    selectVideo(jobs);
+  });
   const main = node("div", undefined, "video-main");
   if (job.cover_url) {
     const art = node("button", undefined, "video-art");
@@ -171,9 +171,10 @@ function videoRow(jobs) {
   title.dataset.focus = `title-${video.video_id}`;
   title.setAttribute("aria-pressed", String(video.video_id === selectedVideo));
   title.addEventListener("click", () => selectVideo(jobs));
-  const meta = [date(video.published_at, true), !job.cover_url && duration(video.duration)].filter(Boolean);
+  const channel = video.channel_title || archive.channels.find((source) => source.id === video.channel_id)?.title || video.channel_id;
+  const meta = [channel, date(video.published_at, true), !job.cover_url && duration(video.duration)].filter(Boolean);
   const bottom = node("div", undefined, "video-bottom");
-  bottom.append(statusBadge(job), rowActions(jobs, job));
+  bottom.append(statusBadge(job));
   description.append(title, node("p", meta.join(" · "), "video-meta"), bottom);
   if (!archive.worker.running && ["downloading", "transcribing", "diarizing", "postprocessing", "summarizing"].includes(job.stage)) {
     description.append(node("p", "Processing paused · worker stopped", "muted"));
@@ -188,84 +189,119 @@ function videoRow(jobs) {
       if (details.open) expandedVideos.add(video.video_id);
       else expandedVideos.delete(video.video_id);
     });
-    for (const run of jobs) {
-      const block = node("div", undefined, "profile-run");
-      if (jobs.length > 1) block.append(node("strong", `${run.profile} · ${human(run.stage)}`));
-      block.append(processingDetails(run));
-      if (jobs.length > 1) block.append(rowActions(jobs, run));
-      details.append(block);
-    }
+    const populate = () => {
+      if (details.childElementCount > 1) return;
+      for (const run of jobs) {
+        const block = node("div", undefined, "profile-run");
+        if (jobs.length > 1) block.append(node("strong", `${run.profile} · ${human(displayStage(run))}`));
+        block.append(processingDetails(run));
+        details.append(block);
+      }
+    };
+    if (details.open) populate();
+    details.addEventListener("toggle", () => { if (details.open) populate(); });
     description.append(details);
   }
   main.append(description);
   row.append(main);
   return row;
 }
-function renderChannels() {
+function renderFeed() {
   if (!archive) return;
   const search = $("video-search").value.trim().toLowerCase();
   const signature = JSON.stringify([search, archive.channels, archive.jobs, archive.worker.running]);
   if (signature === rendered) return;
   rendered = signature;
   const focused = document.activeElement?.dataset.focus;
-  const byChannel = new Map(archive.channels.map((channel) => [channel.id, new Map()]));
   const allVideos = new Map();
   for (const job of archive.jobs) {
     if (!allVideos.has(job.video_id)) allVideos.set(job.video_id, []);
     allVideos.get(job.video_id).push(job);
-    const videos = byChannel.get(job.channel_id);
-    if (!videos) continue;
-    if (!search || `${job.channel_title} ${job.channel_id} ${job.title} ${job.video_id}`.toLowerCase().includes(search)) {
-      if (!videos.has(job.video_id)) videos.set(job.video_id, []);
-      videos.get(job.video_id).push(job);
-    }
   }
+  const videos = Array.from(allVideos.values(), (jobs) => ({
+    jobs,
+    published: parsedDate(jobs[0].published_at).getTime(),
+  })).sort((a, b) => {
+    const first = Number.isFinite(a.published) ? a.published : -Infinity;
+    const second = Number.isFinite(b.published) ? b.published : -Infinity;
+    return (first === second ? 0 : second - first) || a.jobs[0].video_id.localeCompare(b.jobs[0].video_id);
+  });
   if (!allVideos.has(selectedVideo)) {
-    const initial = Array.from(allVideos.values()).find((jobs) => bestJob(jobs).summary_url) || allVideos.values().next().value;
+    const initial = videos.find(({jobs}) => bestJob(jobs).summary_url)?.jobs || videos[0]?.jobs;
     selectedVideo = initial?.[0].video_id;
     selectedProfile = initial && bestJob(initial).profile;
   }
-  let count = 0;
-  const sections = [];
-  for (const channel of archive.channels) {
-    const videos = byChannel.get(channel.id);
-    if (search && !videos.size && !`${channel.title} ${channel.id}`.toLowerCase().includes(search)) continue;
-    count += videos.size;
-    const section = node("section", undefined, "channel");
-    const heading = node("div", undefined, "channel-heading");
-    const toggle = node("button", undefined, "channel-toggle");
-    const title = node("div");
-    title.append(node("h2", channel.title), node("span", `${videos.size} video${videos.size === 1 ? "" : "s"}`, "muted"));
-    const expanded = !collapsedChannels.has(channel.id) || Boolean(search);
-    toggle.setAttribute("aria-expanded", String(expanded));
-    const content = node("div");
-    content.id = `channel-${channel.id}`;
-    toggle.setAttribute("aria-controls", content.id);
-    toggle.dataset.focus = `channel-${channel.id}`;
-    toggle.append(title, icon("chevron-up"));
-    toggle.addEventListener("click", () => {
-      const next = toggle.getAttribute("aria-expanded") !== "true";
-      toggle.setAttribute("aria-expanded", String(next));
-      content.hidden = !next;
-      if (next) collapsedChannels.delete(channel.id);
-      else collapsedChannels.add(channel.id);
-    });
-    content.hidden = !expanded;
-    heading.append(toggle);
-    section.append(heading, content);
-    for (const discovery of channel.discovery || []) {
-      if (discovery.error) content.append(node("p", `${human(discovery.kind)} discovery: ${discovery.error}`, "discovery-error"));
-    }
-    if (videos.size) {
-      const list = node("ul", undefined, "video-list");
-      list.append(...Array.from(videos.values(), videoRow));
-      content.append(list);
-    } else content.append(node("p", "No videos indexed yet.", "empty"));
-    sections.push(section);
+  const matches = videos.filter(({jobs}) => !search || jobs.some((job) =>
+    `${job.channel_title} ${job.channel_id} ${job.title} ${job.video_id}`.toLowerCase().includes(search)));
+  const sources = new Set(matches.map(({jobs}) => jobs[0].channel_id));
+  if (search !== feedSearch) {
+    feedSearch = search;
+    feedLimit = 50;
   }
-  $("channels").replaceChildren(...(sections.length ? sections : [node("p", search ? "No videos match this search. Try a different title or channel." : "Your library is empty. Add a channel to start collecting transcripts.", "empty")]));
-  $("result-count").textContent = `${count} video${count === 1 ? "" : "s"}${search ? " found" : ""}`;
-  if (focused) Array.from(document.querySelectorAll("[data-focus]")).find((element) => element.dataset.focus === focused)?.focus({preventScroll:true});
+  const feed = $("feed");
+  if (!$("feed-list")) {
+    const errors = node("div");
+    errors.id = "feed-errors";
+    const list = node("ul", undefined, "video-list");
+    list.id = "feed-list";
+    list.setAttribute("aria-label", "Videos, newest first");
+    const empty = node("p", undefined, "empty");
+    empty.id = "feed-empty";
+    const more = node("button", "Load older videos", "feed-more");
+    more.id = "feed-more";
+    more.addEventListener("click", () => {
+      feedLimit += 50;
+      rendered = "";
+      renderFeed();
+    });
+    feed.replaceChildren(errors, list, empty, more);
+    if ("IntersectionObserver" in window) {
+      feedObserver = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting) && !more.hidden) more.click();
+      }, {rootMargin: "600px"});
+      feedObserver.observe(more);
+    }
+  }
+  const errors = [];
+  for (const channel of archive.channels) {
+    if (search && !sources.has(channel.id) && !`${channel.title} ${channel.id}`.toLowerCase().includes(search)) continue;
+    for (const discovery of channel.discovery || []) {
+      if (discovery.error) errors.push(node("p", `${channel.title} · ${human(discovery.kind)} discovery: ${discovery.error}`, "discovery-error"));
+    }
+  }
+  $("feed-errors").replaceChildren(...errors);
+  const list = $("feed-list");
+  const visible = matches.slice(0, feedLimit);
+  const rows = visible.map(({jobs}) => {
+    const id = jobs[0].video_id;
+    const signature = JSON.stringify([jobs, archive.worker.running]);
+    let cached = rowCache.get(id);
+    if (!cached || cached.signature !== signature) {
+      cached = {signature, row: videoRow(jobs)};
+      rowCache.set(id, cached);
+    }
+    const selected = id === selectedVideo;
+    cached.row.classList.toggle("selected", selected);
+    cached.row.querySelector(".video-title").setAttribute("aria-pressed", String(selected));
+    return cached.row;
+  });
+  let cursor = list.firstElementChild;
+  for (const row of rows) {
+    if (row === cursor) cursor = cursor.nextElementSibling;
+    else list.insertBefore(row, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextElementSibling;
+    cursor.remove();
+    cursor = next;
+  }
+  for (const id of rowCache.keys()) if (!allVideos.has(id)) rowCache.delete(id);
+  $("feed-empty").hidden = matches.length > 0;
+  $("feed-empty").textContent = search ? "No videos match this search. Try a different title or channel." : "Your library is empty. Add a channel to start collecting transcripts.";
+  $("feed-more").hidden = visible.length >= matches.length;
+  $("feed-more").textContent = `Load older videos (${visible.length} of ${matches.length})`;
+  $("result-count").textContent = `${matches.length} video${matches.length === 1 ? "" : "s"}${search ? " found" : ""}`;
+  if (focused) Array.from(list.querySelectorAll("[data-focus]")).find((element) => element.dataset.focus === focused)?.focus({preventScroll:true});
   const jobs = allVideos.get(selectedVideo);
   if (jobs) renderReader(jobs, jobs.find((job) => job.profile === selectedProfile) || bestJob(jobs));
   else resetReader();
@@ -277,12 +313,19 @@ function copyReadingContent(source, baseUrl) {
   if (source.nodeType !== Node.ELEMENT_NODE) return document.createDocumentFragment();
   const tag = source.tagName.toLowerCase();
   if (["script", "style", "iframe", "object", "form", "input", "button", "h1"].includes(tag)) return document.createDocumentFragment();
-  const allowed = ["h2", "h3", "h4", "p", "ul", "ol", "li", "strong", "em", "code", "pre", "blockquote", "br", "a", "figure", "figcaption", "img"];
+  const allowed = ["h2", "h3", "h4", "p", "div", "span", "ul", "ol", "li", "strong", "em", "code", "pre", "blockquote", "br", "a", "figure", "figcaption", "img"];
   const target = allowed.includes(tag) ? node(tag) : document.createDocumentFragment();
+  if (allowed.includes(tag)) {
+    for (const name of ["srt-cues", "srt-cue", "srt-time", "srt-text"]) {
+      if (source.classList.contains(name)) target.classList.add(name);
+    }
+    if (source.hasAttribute("aria-label")) target.setAttribute("aria-label", source.getAttribute("aria-label"));
+  }
   if (tag === "a" || tag === "img") {
     try {
       const url = new URL(source.getAttribute(tag === "a" ? "href" : "src"), baseUrl);
-      if (url.origin !== location.origin || !["http:", "https:"].includes(url.protocol)) {
+      const youtube = tag === "a" && url.protocol === "https:" && ["youtube.com", "www.youtube.com"].includes(url.hostname) && url.pathname === "/watch";
+      if ((!youtube && url.origin !== location.origin) || !["http:", "https:"].includes(url.protocol)) {
         if (tag === "img") return document.createDocumentFragment();
       } else if (tag === "a") {
         target.href = url.href;
@@ -321,16 +364,26 @@ function backToLibrary() {
 function resetReader() {
   readerController?.abort();
   readerSignature = "";
+  readerIdentity = "";
   const empty = node("div", undefined, "reader-empty");
   const title = node("h2", "Find your next idea.");
   title.id = "reader-title";
-  empty.append(node("p", "YOUR READING SPACE", "eyebrow"), title, node("p", "Select a video to read its summary or preview its transcript."));
+  empty.append(node("p", "YOUR READING SPACE", "eyebrow"), title, node("p", "Select a video to read its summary or transcript."));
   $("reader").replaceChildren(empty);
   setReaderOpen(false);
 }
 async function renderReader(jobs, job) {
-  const sourceUrl = job.summary_url || job.processed_url || job.transcript_url;
-  const signature = JSON.stringify([job.video_id, job.profile, sourceUrl, job.stage, job.updated_at, job.summary_updated_at, job.summary_dir, job.postprocessing_dir]);
+  const tabs = [
+    {key: "summary", label: "Summary", url: job.summary_url},
+    {key: "transcript", label: "Transcript", url: job.processed_url || job.transcript_url},
+    {key: "srt", label: "SRT timestamps", url: job.srt_url},
+  ].filter((tab) => tab.url);
+  const identity = `${job.video_id}|${job.profile}`;
+  if (identity !== readerIdentity || !tabs.some((tab) => tab.key === readerTab)) readerTab = tabs[0]?.key || "";
+  readerIdentity = identity;
+  const activeTab = tabs.find((tab) => tab.key === readerTab);
+  const sourceUrl = activeTab?.url;
+  const signature = JSON.stringify([identity, readerTab, tabs, job.stage, job.scheduled, job.updated_at, job.summary_updated_at, job.summary_dir, job.postprocessing_dir]);
   if (signature === readerSignature) return;
   readerSignature = signature;
   readerController?.abort();
@@ -353,59 +406,144 @@ async function renderReader(jobs, job) {
   }
   const title = node("h2", job.title || job.video_id);
   title.id = "reader-title";
-  parts.push(title, node("p", [job.channel_title, date(job.published_at, true), duration(job.duration)].filter(Boolean).join(" · "), "reader-meta"), statusBadge(job));
+  const statusRow = node("div", undefined, "reader-status-row");
+  const youtube = externalLink("View on YouTube", job.url, "reader-youtube");
+  youtube.prepend(icon("arrow-top-right-on-square"));
+  statusRow.append(statusBadge(job), youtube);
+  parts.push(title, node("p", [job.channel_title, date(job.published_at, true), duration(job.duration)].filter(Boolean).join(" · "), "reader-meta"), statusRow);
   if (jobs.length > 1) {
     const label = node("label", "Transcript version", "profile-picker");
     const select = node("select");
     select.setAttribute("aria-label", "Transcript version");
     select.replaceChildren(...jobs.map((run) => new Option(run.profile, run.profile)));
     select.value = job.profile;
-    select.addEventListener("change", () => selectVideo(jobs, jobs.find((run) => run.profile === select.value), false));
+    select.addEventListener("change", () => {
+      selectVideo(jobs, jobs.find((run) => run.profile === select.value), false);
+      pane.querySelector(".profile-picker select")?.focus({preventScroll: true});
+    });
     label.append(select);
     parts.push(label);
   }
+  const chooseTab = (index) => {
+    readerTab = tabs[index].key;
+    renderReader(jobs, job);
+    $(`reader-tab-${readerTab}`)?.focus({preventScroll: true});
+  };
   const actions = node("div", undefined, "reader-actions");
-  if (job.summary_url) actions.append(resourceLink("Full summary", job.summary_url, "clipboard-document", "primary"));
-  const transcriptUrl = job.processed_url || job.transcript_url;
-  if (transcriptUrl) actions.append(resourceLink("Transcript", transcriptUrl, "document-text"));
-  actions.append(externalLink("View on YouTube", job.url));
-  actions.lastChild.prepend(icon("arrow-top-right-on-square"));
-  if (job.srt_url) actions.append(resourceLink("SRT timestamps", job.srt_url));
+  const shareStatus = node("div", undefined, "reader-share-status");
+  shareStatus.setAttribute("role", "status");
+  if (activeTab) {
+    const tools = node("div", undefined, "reader-document-actions");
+    const fullPage = resourceLink("", sourceUrl, "arrow-top-right-on-square", "document-button");
+    fullPage.title = `Open ${activeTab.label} full page`;
+    fullPage.setAttribute("aria-label", fullPage.title);
+    const share = node("button", undefined, "document-button");
+    share.title = `Copy ${activeTab.label} link`;
+    share.setAttribute("aria-label", share.title);
+    share.append(icon("clipboard-document"));
+    share.addEventListener("click", async () => {
+      const url = new URL(sourceUrl, location.href).href;
+      share.disabled = true;
+      try {
+        await navigator.clipboard.writeText(url);
+        shareStatus.textContent = "Link copied.";
+      } catch {
+        const field = node("input");
+        field.type = "url";
+        field.readOnly = true;
+        field.value = url;
+        field.setAttribute("aria-label", "Full-page link");
+        shareStatus.replaceChildren(node("span", "Copy this link: "), field);
+        field.select();
+      } finally {
+        share.disabled = false;
+      }
+    });
+    tools.append(fullPage, share);
+    actions.append(tools);
+  }
+  const tabList = node("div", undefined, "reader-tabs");
+  tabList.setAttribute("role", "tablist");
+  tabList.setAttribute("aria-label", "Video content");
+  tabs.forEach((tab, index) => {
+    const button = node("button", tab.label, "reader-tab");
+    button.id = `reader-tab-${tab.key}`;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(tab.key === readerTab));
+    button.setAttribute("aria-controls", "reader-panel");
+    button.tabIndex = tab.key === readerTab ? 0 : -1;
+    button.addEventListener("click", () => chooseTab(index));
+    button.addEventListener("keydown", (event) => {
+      let next;
+      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      if (next !== undefined) {
+        event.preventDefault();
+        chooseTab(next);
+      }
+    });
+    tabList.append(button);
+  });
   const body = node("div", undefined, "reader-body");
+  body.id = "reader-panel";
   body.setAttribute("aria-live", "polite");
-  const label = node("p", job.summary_url ? "SUMMARY" : sourceUrl ? "TRANSCRIPT PREVIEW" : "IN YOUR LIBRARY", "eyebrow");
+  if (activeTab) {
+    body.setAttribute("role", "tabpanel");
+    body.setAttribute("aria-labelledby", `reader-tab-${readerTab}`);
+    body.tabIndex = 0;
+  }
   const content = node("div", undefined, "reading-content");
-  body.append(label, content);
-  parts.push(actions, body);
+  if (activeTab) body.append(actions, shareStatus);
+  body.append(content);
+  content.addEventListener("click", (event) => {
+    const link = event.target.closest("a[href]");
+    if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    const url = new URL(link.href);
+    const index = tabs.findIndex((tab) => new URL(tab.url, location.href).href === url.href);
+    if (index !== -1) {
+      event.preventDefault();
+      chooseTab(index);
+    }
+  });
+  if (tabs.length) parts.push(tabList);
+  parts.push(body);
   pane.replaceChildren(...parts);
   pane.scrollTop = 0;
   if (!sourceUrl) {
     content.append(node("h3", "The transcript is not ready yet."), node("p", job.stage === "failed" ? "Processing needs attention. The details in the video row show what happened." : "This video is in your library. Its transcript will appear here once processing finishes."));
     return;
   }
-  content.append(node("p", job.summary_url ? "Loading summary…" : "Loading transcript…", "muted"));
+  content.append(node("p", `Loading ${activeTab.label.toLowerCase()}…`, "muted"));
   try {
     const cacheKey = sourceUrl + "|" + signature;
-    let html = readingCache.get(cacheKey);
-    if (!html) {
+    let documentData = readingCache.get(cacheKey);
+    if (!documentData) {
       const response = await fetch(sourceUrl, {signal: controller.signal});
       if (!response.ok) throw new Error("This document is temporarily unavailable.");
-      html = await response.text();
-      if (controller.signal.aborted) return;
+      documentData = {text: await response.text(), type: response.headers.get("Content-Type") || ""};
     }
     if (controller.signal.aborted || readerSignature !== signature) return;
-    const documentSource = new DOMParser().parseFromString(html, "text/html");
-    const article = documentSource.querySelector("article");
-    if (!article) throw new Error("Open the full document to read this transcript.");
+    if (documentData.type.includes("text/html")) {
+      const documentSource = new DOMParser().parseFromString(documentData.text, "text/html");
+      const source = documentSource.querySelector(readerTab === "srt" ? ".srt-cues" : "article");
+      if (!source) throw new Error("This document could not be displayed. Use the full-page button to open it.");
+      const baseUrl = new URL(sourceUrl, location.href).href;
+      if (readerTab === "srt") content.replaceChildren(copyReadingContent(source, baseUrl));
+      else content.replaceChildren(...Array.from(source.children).filter((element) =>
+        element.tagName !== "H1" && !(readerTab === "transcript" && element.tagName === "P"
+          && /^Source:\s*YouTube\s*$/i.test(element.textContent.trim())))
+        .map((element) => copyReadingContent(element, baseUrl)));
+    } else {
+      content.replaceChildren(node("pre", documentData.text, "raw-transcript"));
+    }
     if (!readingCache.has(cacheKey)) {
-      readingCache.set(cacheKey, html);
+      readingCache.set(cacheKey, documentData);
       if (readingCache.size > 8) readingCache.delete(readingCache.keys().next().value);
     }
-    const elements = Array.from(article.children).filter((element) => element.tagName !== "H1");
-    const shown = job.summary_url ? elements : elements.slice(0, 6);
-    content.replaceChildren(...shown.map((element) => copyReadingContent(element, new URL(sourceUrl, location.href).href)));
-    if (!content.textContent.trim()) content.append(node("p", "Open the full document to read this transcript."));
-    body.append(node("p", job.summary_url ? "Generated from this video’s transcript. The summary reflects the speaker’s views; figures link to saved source screenshots." : "An excerpt of the saved transcript. Open the full transcript for all speaker turns, figures, and downloads.", "reader-note"));
+    if (!content.textContent.trim()) content.append(node("p", "This document has no content."));
+    if (readerTab === "summary") body.append(node("p", "Generated from this video’s transcript. The summary reflects the speaker’s views; figures link to saved source screenshots.", "reader-note"));
   } catch (error) {
     if (controller.signal.aborted || readerSignature !== signature) return;
     content.replaceChildren(node("p", error.message, "muted"));
@@ -414,6 +552,7 @@ async function renderReader(jobs, job) {
     content.append(retry);
   }
 }
+
 function openTranscript(job, files) {
   previewFiles = files;
   $("preview-srt").classList.toggle("hidden", !job.srt_url);
@@ -447,25 +586,59 @@ async function preview(file) {
     if (request === previewRequest) $("preview-content").replaceChildren(node("p", error.message, "empty"));
   }
 }
+function applyFeed(data) {
+  if (data.full) feedRecords.clear();
+  else if (!archive) throw new Error("The library needs a fresh snapshot.");
+  for (const key of data.removed || []) feedRecords.delete(key);
+  for (const job of data.jobs) feedRecords.set(job.key, job);
+  archive = {
+    channels: data.channels,
+    summary: data.summary,
+    worker: data.worker,
+    generated_at: data.generated_at,
+    jobs: Array.from(feedRecords.values()),
+  };
+  feedRevision = data.revision;
+}
+function showArchive(cached = false) {
+  $("archive-summary").textContent = `${archive.summary.channels} channel${archive.summary.channels === 1 ? "" : "s"} · ${archive.summary.videos} video${archive.summary.videos === 1 ? "" : "s"}`;
+  $("worker-status").textContent = cached ? "Checking for updates…" : `Worker ${archive.worker.running ? "running" : "stopped"}`;
+  $("updated").textContent = cached ? "Cached library" : `Updated ${new Date(archive.generated_at).toLocaleTimeString()}`;
+  renderFeed();
+}
+function restoreFeed() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(feedCacheKey));
+    if (!saved || !Number.isFinite(saved.savedAt) || Date.now() - saved.savedAt > 86400000 || !Array.isArray(saved.jobs)
+        || !saved.jobs.every((job) => typeof job.key === "string")
+        || !Array.isArray(saved.channels) || !saved.summary || !saved.worker || !saved.revision) return;
+    applyFeed({...saved, full: true});
+    showArchive(true);
+  } catch { /* Storage can be disabled or contain an obsolete cache. */ }
+}
 async function refresh() {
   if (refreshing) return;
   refreshing = true;
   $("refresh").disabled = true;
   try {
-    const response = await fetch("/api/snapshot", {cache: "no-store"});
+    const response = await fetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`, {cache: "no-store"});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Archive unavailable");
-    archive = data;
-    $("archive-summary").textContent = `${data.summary.channels} channel${data.summary.channels === 1 ? "" : "s"} · ${data.summary.videos} video${data.summary.videos === 1 ? "" : "s"}`;
-    $("worker-status").textContent = `Worker ${data.worker.running ? "running" : "stopped"}`;
-    $("updated").textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
+    const previous = feedRevision;
+    applyFeed(data);
     $("error").classList.add("hidden");
-    renderChannels();
+    showArchive();
+    if (previous !== feedRevision || data.full) {
+      try {
+        sessionStorage.setItem(feedCacheKey, JSON.stringify({...archive, revision: feedRevision, savedAt: Date.now()}));
+      } catch { /* Live updates still work without session storage. */ }
+    }
   } catch (error) {
     $("error").textContent = `${error.message}. ${archive ? "Showing the last available snapshot." : "Could not load the archive."} Refresh will retry.`;
     $("error").classList.remove("hidden");
     $("updated").textContent = "Connection unavailable";
-    if (!archive) $("channels").replaceChildren(node("p", "Channels are unavailable until the archive reconnects.", "empty"));
+    $("worker-status").textContent = "Worker status unavailable";
+    if (!archive) $("feed").replaceChildren(node("p", "Videos are unavailable until the archive reconnects.", "empty"));
   } finally {
     refreshing = false;
     $("refresh").disabled = false;
@@ -484,7 +657,7 @@ document.addEventListener("keydown", (event) => {
 });
 narrowReader.addEventListener("change", () => setReaderOpen($("reader").classList.contains("is-open")));
 $("today").textContent = new Date().toLocaleDateString(undefined, {weekday:"short", day:"numeric", month:"long", year:"numeric"});
-$("video-search").addEventListener("input", renderChannels);
+$("video-search").addEventListener("input", renderFeed);
 $("refresh").addEventListener("click", refresh);
 $("close-preview").addEventListener("click", () => $("transcript-preview").close());
 $("transcript-preview").addEventListener("close", () => previewRequest++);
@@ -492,6 +665,7 @@ $("preview-format").addEventListener("change", () => {
   const file = previewFiles.find((file) => file.path === $("preview-format").value);
   if (file) preview(file);
 });
+restoreFeed();
 refresh();
 setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });

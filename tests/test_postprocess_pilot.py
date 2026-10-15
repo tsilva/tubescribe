@@ -342,6 +342,32 @@ class GeneralizationTests(unittest.TestCase):
                 annotations=["[Untranscribed speech detected.]"],
             )
 
+    def test_timestamp_heading_links_preserve_navigation_and_coverage_checks(self):
+        result = PostprocessPilotTests().output()
+        first = "Opening [00:06](https://www.youtube.com/watch?v=JFF71e0pJTk&t=6s)"
+        second = "Interruption [1:02:03](https://www.youtube.com/watch?v=JFF71e0pJTk&t=3723)"
+        body = "![Chart](image:frame_0001000)\n[Untranscribed speech detected.]"
+        result["output"]["markdown"] = f"## {first}\n## {second}\n{body}"
+        assets = {"frame_0001000": {"path": "figures/frame_0001000.png"}}
+        notes = ["[Untranscribed speech detected.]"]
+        markdown, _ = pilot.stitch(result, assets, 3, annotations=notes)
+        self.assertIn(first, markdown)
+        self.assertIn(second, markdown)
+        result["output"]["markdown"] = f"## {second}\n## {first}\n{body}"
+        with self.assertRaisesRegex(ValueError, "out of order"):
+            pilot.stitch(result, assets, 3, annotations=notes)
+        result["output"]["markdown"] = f"## {first}\n## {second}\n{body}"
+        result["output"]["sections"][0]["first_cue"] = 2
+        with self.assertRaisesRegex(ValueError, "gap or overlap"):
+            pilot.stitch(result, assets, 3, annotations=notes)
+        result["output"]["sections"][0]["first_cue"] = 1
+        result["output"]["markdown"] = (
+            f"## Opening [00:06](https://example.com/watch?v=JFF71e0pJTk&t=6s)\n"
+            f"## {second}\n{body}"
+        )
+        with self.assertRaisesRegex(ValueError, "missing or out of order"):
+            pilot.stitch(result, assets, 3, annotations=notes)
+
     def test_unknown_is_not_one_identifiable_voice(self):
         with self.assertRaisesRegex(ValueError, "Unassigned"):
             pilot.fill_speaker_names(

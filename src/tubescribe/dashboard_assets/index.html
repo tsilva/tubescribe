@@ -8,7 +8,7 @@
   <script src="/app.js" defer></script>
 </head>
 <body class="library-app">
-  <a class="skip-link" href="#channels">Skip to videos</a>
+  <a class="skip-link" href="#feed">Skip to videos</a>
   <header class="app-bar">
     <a class="brand" href="/" aria-label="TubeScribe library">TubeScribe</a>
     <div class="live"><span id="worker-status">Connecting…</span><span id="updated"></span><button id="refresh" class="icon-button" aria-label="Refresh library" title="Refresh library"><img src="/icons/arrow-path.svg" alt=""></button></div>
@@ -19,11 +19,11 @@
       <header class="page-heading"><h1>Your library</h1><p id="archive-summary">Connecting to your library…</p></header>
       <div id="error" class="error hidden" role="alert"></div>
       <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search channels, video titles, or IDs…"></div><span id="result-count" role="status"></span></div>
-      <div id="channels" tabindex="-1" aria-label="Channels and videos"><p class="empty">Loading your videos…</p></div>
+      <div id="feed" class="video-feed" tabindex="-1" aria-label="Video feed"><p class="empty">Loading your videos…</p></div>
       <footer>Transcripts, context, and the ideas worth keeping.<span>Library updates automatically</span></footer>
     </div>
     <aside id="reader" class="reader" aria-labelledby="reader-title">
-      <div class="reader-empty"><p class="eyebrow">YOUR READING SPACE</p><h2 id="reader-title">Find your next idea.</h2><p>Select a video to read its summary or preview its transcript.</p></div>
+      <div class="reader-empty"><p class="eyebrow">YOUR READING SPACE</p><h2 id="reader-title">Find your next idea.</h2><p>Select a video to read its summary or transcript.</p></div>
     </aside>
   </main>
   <dialog id="transcript-preview" aria-labelledby="preview-title">

@@ -106,6 +106,81 @@ class Dashboard(unittest.TestCase):
         self.assertEqual(result["summary"]["channels"], 2)
         self.assertEqual(next(c for c in result["channels"] if c["id"] == "empty")["videos"], 0)
 
+    def test_backlog_is_only_scheduled_by_a_waiting_work_submission(self):
+        from tubescribe.submission import JobRequest
+
+        self.assertFalse(any(job["scheduled"] for job in snapshot(self.root)["jobs"]))
+        self.store.index(
+            "channel",
+            "upload",
+            [
+                {
+                    "id": "newer",
+                    "title": "Newer",
+                    "url": "https://youtube.com/watch?v=newer",
+                    "published_at": "100",
+                }
+            ],
+            "turbo-v1",
+        )
+        self.store.index(
+            "channel",
+            "upload",
+            [{"id": "pending", "title": "Pending", "url": "https://youtube.com/watch?v=pending"}],
+            "other-profile",
+        )
+        request = JobRequest("work", {"video": ["pending", "newer"], "limit": 1})
+        identifier, _ = self.store.enqueue(request.encode(), request.dedupe)
+        queued = snapshot(self.root)["jobs"]
+        self.assertEqual(
+            {(job["video_id"], job["profile"]) for job in queued if job["scheduled"]},
+            {("newer", "turbo-v1")},
+        )
+        self.store.update_submission(identifier, state="complete")
+        self.assertFalse(any(job["scheduled"] for job in snapshot(self.root)["jobs"]))
+
+    def test_unrelated_channel_request_does_not_schedule_the_backlog(self):
+        from tubescribe.submission import JobRequest
+
+        request = JobRequest("work", {"channel": "another-channel"})
+        self.store.enqueue(request.encode(), request.dedupe)
+        self.assertFalse(any(job["scheduled"] for job in snapshot(self.root)["jobs"]))
+
+    def test_feed_changes_only_transmit_changed_records_and_remove_old_keys(self):
+        first = self.client.get("/api/feed").json()
+        self.assertTrue(first["full"])
+        self.assertEqual(len(first["jobs"]), 4)
+        self.assertNotIn("files", first)
+        self.assertNotIn("files", first["jobs"][0])
+        unchanged = self.client.get("/api/feed", params={"revision": first["revision"]}).json()
+        self.assertFalse(unchanged["full"])
+        self.assertEqual(unchanged["jobs"], [])
+        self.assertEqual(unchanged["removed"], [])
+        self.assertEqual(unchanged["revision"], first["revision"])
+        with self.store.db:
+            self.store.db.execute("UPDATE videos SET title='Updated title' WHERE id='pending'")
+        changed = self.client.get("/api/feed", params={"revision": first["revision"]}).json()
+        self.assertEqual([job["video_id"] for job in changed["jobs"]], ["pending"])
+        self.assertEqual(changed["jobs"][0]["title"], "Updated title")
+        old_key = changed["jobs"][0]["key"]
+        with self.store.db:
+            self.store.db.execute("DELETE FROM jobs WHERE video_id='pending'")
+        removed = self.client.get("/api/feed", params={"revision": changed["revision"]}).json()
+        self.assertEqual(removed["removed"], [old_key])
+        self.assertEqual(removed["jobs"][0]["key"], "video:pending")
+        reset = self.client.get("/api/feed", params={"revision": "unknown-server-revision"}).json()
+        self.assertTrue(reset["full"])
+        self.assertEqual(len(reset["jobs"]), 4)
+
+    def test_feed_compresses_only_when_the_client_accepts_gzip(self):
+        response = self.client.get("/api/feed", headers={"Accept-Encoding": "gzip"})
+        self.assertEqual(response.headers["Content-Encoding"], "gzip")
+        self.assertIn("Accept-Encoding", response.headers["Vary"])
+        self.assertTrue(response.json()["full"])
+        plain = self.client.get("/api/feed", headers={"Accept-Encoding": "identity"})
+        self.assertNotIn("Content-Encoding", plain.headers)
+        self.assertEqual(len(plain.json()["jobs"]), 4)
+
     def test_preview_download_and_removed_file(self):
         file = next(f for f in snapshot(self.root)["files"] if f["format"] == "md")
         response = self.client.get("/api/preview", params={"path": file["path"]})
