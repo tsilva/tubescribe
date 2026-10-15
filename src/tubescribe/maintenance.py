@@ -26,11 +26,19 @@ def reconcile(store, *, retention_days=7, purge=False):
             for r in store.stage_records(stage)
             if r["output_dir"]
         }
+        referenced.update(
+            r[0]
+            for r in store.db.execute(
+                "SELECT output_dir FROM rolling_summaries WHERE output_dir IS NOT NULL"
+            )
+        )
         groups = set()
         for key in store.blobs.keys():
             parts = Path(key).parts
             if parts[0] == "transcripts" and "postprocessing" in parts:
                 groups.add("/".join(parts[: parts.index("postprocessing") + 2]))
+            elif len(parts) >= 5 and parts[:2] == ("artifacts", "rolling"):
+                groups.add("/".join(parts[:4]))
             elif len(parts) >= 6 and parts[0] == "artifacts":
                 groups.add("/".join(parts[:6]))
         orphaned = []

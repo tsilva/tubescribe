@@ -12,6 +12,10 @@ let readerSignature = "";
 let readerController = null;
 let readerIdentity = "";
 let readerTab = "summary";
+let libraryScope = "";
+let readerLevel = "digest";
+let digests = null;
+let digestRefreshing = false;
 const readingCache = new Map();
 const rowCache = new Map();
 const feedRecords = new Map();
@@ -131,6 +135,8 @@ function statusBadge(job) {
   return node("span", human(stage), `badge ${stage}`);
 }
 function selectVideo(jobs, job = bestJob(jobs), open = true) {
+  readerLevel = "video";
+  $("rolling-summary").setAttribute("aria-pressed", "false");
   selectedVideo = jobs[0].video_id;
   selectedProfile = job.profile;
   for (const row of document.querySelectorAll(".video-row")) {
@@ -209,7 +215,7 @@ function videoRow(jobs) {
 function renderFeed() {
   if (!archive) return;
   const search = $("video-search").value.trim().toLowerCase();
-  const signature = JSON.stringify([search, archive.channels, archive.jobs, archive.worker.running]);
+  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, archive.worker.running]);
   if (signature === rendered) return;
   rendered = signature;
   const focused = document.activeElement?.dataset.focus;
@@ -231,8 +237,8 @@ function renderFeed() {
     selectedVideo = initial?.[0].video_id;
     selectedProfile = initial && bestJob(initial).profile;
   }
-  const matches = videos.filter(({jobs}) => !search || jobs.some((job) =>
-    `${job.channel_title} ${job.channel_id} ${job.title} ${job.video_id}`.toLowerCase().includes(search)));
+  const matches = videos.filter(({jobs}) => (!libraryScope || jobs[0].channel_id === libraryScope) && (!search || jobs.some((job) =>
+    `${job.channel_title} ${job.channel_id} ${job.title} ${job.video_id}`.toLowerCase().includes(search))));
   const sources = new Set(matches.map(({jobs}) => jobs[0].channel_id));
   if (search !== feedSearch) {
     feedSearch = search;
@@ -303,7 +309,8 @@ function renderFeed() {
   $("result-count").textContent = `${matches.length} video${matches.length === 1 ? "" : "s"}${search ? " found" : ""}`;
   if (focused) Array.from(list.querySelectorAll("[data-focus]")).find((element) => element.dataset.focus === focused)?.focus({preventScroll:true});
   const jobs = allVideos.get(selectedVideo);
-  if (jobs) renderReader(jobs, jobs.find((job) => job.profile === selectedProfile) || bestJob(jobs));
+  if (readerLevel === "digest") renderDigest();
+  else if (jobs) renderReader(jobs, jobs.find((job) => job.profile === selectedProfile) || bestJob(jobs));
   else resetReader();
 }
 // Rebuild allowed text elements rather than injecting server HTML. Source content cannot
@@ -396,7 +403,7 @@ async function renderReader(jobs, job) {
   close.append(icon("x-mark"));
   close.addEventListener("click", backToLibrary);
   closeBar.append(node("span", "Your library"), close);
-  const parts = [closeBar];
+  const parts = [closeBar, digestBreadcrumbs(job.channel_id)];
   if (job.cover_url) {
     const cover = node("img", undefined, "reader-cover");
     cover.src = job.cover_url;
@@ -604,6 +611,7 @@ function showArchive(cached = false) {
   $("archive-summary").textContent = `${archive.summary.channels} channel${archive.summary.channels === 1 ? "" : "s"} · ${archive.summary.videos} video${archive.summary.videos === 1 ? "" : "s"}`;
   $("worker-status").textContent = cached ? "Checking for updates…" : `Worker ${archive.worker.running ? "running" : "stopped"}`;
   $("updated").textContent = cached ? "Cached library" : `Updated ${new Date(archive.generated_at).toLocaleTimeString()}`;
+  syncScopes();
   renderFeed();
 }
 function restoreFeed() {
@@ -628,6 +636,7 @@ async function refresh() {
     applyFeed(data);
     $("error").classList.add("hidden");
     showArchive();
+    refreshDigests();
     if (previous !== feedRevision || data.full) {
       try {
         sessionStorage.setItem(feedCacheKey, JSON.stringify({...archive, revision: feedRevision, savedAt: Date.now()}));
@@ -669,3 +678,167 @@ restoreFeed();
 refresh();
 setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+function syncScopes() {
+  const picker = $("channel-scope");
+  const signature = JSON.stringify(archive.channels.map((c) => [c.id, c.title]));
+  if (picker.dataset.signature === signature) return;
+  picker.dataset.signature = signature;
+  picker.replaceChildren(new Option("All channels", ""), ...archive.channels.map((c) => new Option(c.title, c.id)));
+  if (!archive.channels.some((c) => c.id === libraryScope)) libraryScope = "";
+  picker.value = libraryScope;
+}
+function chooseScope(channel = "") {
+  libraryScope = channel;
+  $("channel-scope").value = channel;
+  feedLimit = 50;
+  readerLevel = "digest";
+  readerSignature = "";
+  $("rolling-summary").setAttribute("aria-pressed", "true");
+  renderFeed();
+  renderDigest();
+}
+function digestBreadcrumbs(channel) {
+  const nav = node("nav", undefined, "digest-breadcrumbs");
+  nav.setAttribute("aria-label", "Summary levels");
+  const all = node("button", "All channels");
+  all.addEventListener("click", () => chooseScope());
+  nav.append(all);
+  if (channel) {
+    const name = archive?.channels.find((c) => c.id === channel)?.title || channel;
+    const button = node("button", name);
+    button.addEventListener("click", () => chooseScope(channel));
+    nav.append(node("span", "/"), button);
+  }
+  return nav;
+}
+async function refreshDigests() {
+  if (digestRefreshing) return;
+  digestRefreshing = true;
+  try {
+    const response = await fetch("/api/summaries", {cache: "no-store"});
+    if (!response.ok) throw new Error("Seven-day summaries are temporarily unavailable.");
+    digests = await response.json();
+    if (readerLevel === "digest") renderDigest();
+  } catch (error) {
+    if (readerLevel === "digest") {
+      readerSignature = "";
+      const heading = node("h2", "Seven-day summary");
+      heading.id = "reader-title";
+      $("reader").replaceChildren(heading, node("p", error.message, "error"));
+    }
+  } finally { digestRefreshing = false; }
+}
+async function renderDigest() {
+  const scope = libraryScope ? "channel:" + libraryScope : "all";
+  const entry = digests?.items.find((e) => e.scope === scope);
+  if (!entry) {
+    if (!digests) $("reader").replaceChildren(node("h2", "Seven-day summary"), node("p", "Loading summaries…"));
+    return;
+  }
+  const signature = JSON.stringify([scope, entry, digests.waiting_for_videos]);
+  if (readerSignature === signature) return;
+  readerSignature = signature;
+  readerController?.abort();
+  const controller = new AbortController();
+  readerController = controller;
+  const title = node("h2", entry.title);
+  title.id = "reader-title";
+  const closeBar = node("div", undefined, "reader-close");
+  const close = node("button", undefined, "icon-button");
+  close.setAttribute("aria-label", "Back to library");
+  close.append(icon("x-mark"));
+  close.addEventListener("click", backToLibrary);
+  closeBar.append(node("span", "Seven-day summary"), close);
+  const coverage = entry.coverage;
+  const meta = node("p", `Last 7 days · ${date(digests.since, true)} – ${date(digests.until, true)}`, "reader-meta");
+  const note = node("p", `${coverage.summarized} of ${coverage.videos} indexed videos summarized${coverage.undated ? ` · ${coverage.undated} undated videos excluded` : ""}.`, "digest-coverage");
+  const body = node("div", undefined, "reader-body");
+  const pane = $("reader");
+  pane.replaceChildren(closeBar, digestBreadcrumbs(libraryScope), node("p", "ROLLING OVERVIEW", "eyebrow"), title, meta, note, body);
+  const browse = node("div", undefined, "digest-browse");
+  if (!libraryScope) {
+    browse.append(node("h3", "Explore channels"));
+    for (const channel of archive?.channels || []) {
+      const button = node("button", channel.title, "button");
+      button.addEventListener("click", () => chooseScope(channel.id));
+      browse.append(button);
+    }
+  } else {
+    browse.append(node("h3", "Videos in this window"));
+    const seen = new Set();
+    const recent = (archive?.jobs || []).filter((job) => {
+      const stamp = parsedDate(job.published_at).getTime();
+      if (seen.has(job.video_id) || job.channel_id !== libraryScope || stamp < Date.parse(digests.since) || stamp > Date.parse(digests.until) || !Number.isFinite(stamp)) return false;
+      seen.add(job.video_id);
+      return true;
+    }).sort((a, b) => parsedDate(b.published_at) - parsedDate(a.published_at));
+    for (const job of recent) {
+      const button = node("button", job.title, "digest-video");
+      button.addEventListener("click", () => selectVideo(archive.jobs.filter((j) => j.video_id === job.video_id)));
+      browse.append(button);
+    }
+    if (!recent.length) browse.append(node("p", "No indexed videos were published in this window.", "muted"));
+  }
+  pane.append(browse);
+  if (entry.state !== "ready") {
+    body.append(node("p", digests.waiting_for_videos ? "Waiting for video processing to finish before refreshing this summary…" : entry.state === "failed" ? "Summary generation needs attention. Automatic retries are limited to three attempts." : "Updating the seven-day summary…", "muted"));
+    if (entry.error) body.append(node("p", entry.error, "muted"));
+    return;
+  }
+  const actions = node("div", undefined, "reader-actions");
+  const full = node("a", undefined, "document-button");
+  full.href = entry.url;
+  full.target = "_blank";
+  full.rel = "noopener noreferrer";
+  full.title = "Open summary full page";
+  full.setAttribute("aria-label", full.title);
+  full.append(icon("arrow-top-right-on-square"));
+  const share = node("button", undefined, "document-button");
+  share.title = "Copy summary link";
+  share.setAttribute("aria-label", share.title);
+  share.append(icon("clipboard-document"));
+  const status = node("span", "", "reader-share-status");
+  status.setAttribute("role", "status");
+  share.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(new URL(entry.url, location.href).href); status.textContent = "Link copied."; }
+    catch { status.textContent = new URL(entry.url, location.href).href; }
+  });
+  actions.append(full, share, status);
+  body.append(actions);
+  const content = node("div");
+  body.append(content);
+  try {
+    const key = entry.url + entry.input_hash + entry.generated_at;
+    let text = readingCache.get(key)?.text;
+    if (!text) {
+      const response = await fetch(entry.url, {signal: controller.signal});
+      if (!response.ok) throw new Error("This summary is being refreshed. It will appear automatically.");
+      text = await response.text();
+      readingCache.set(key, {text});
+      if (readingCache.size > 8) readingCache.delete(readingCache.keys().next().value);
+    }
+    if (controller.signal.aborted || readerSignature !== signature || readerLevel !== "digest") return;
+    const article = new DOMParser().parseFromString(text, "text/html").querySelector("article");
+    if (!article) throw new Error("This summary could not be displayed.");
+    content.replaceChildren(...Array.from(article.children).filter((e) => e.tagName !== "H1").map((e) => copyReadingContent(e, new URL(entry.url, location.href).href)));
+    content.addEventListener("click", (event) => {
+      const anchor = event.target.closest("a");
+      if (!anchor) return;
+      const target = new URL(anchor.href);
+      if (target.origin !== location.origin) return;
+      const channel = target.pathname.match(/^\/channels\/([^/]+)\/summary\/$/);
+      const video = target.pathname.match(/^\/videos\/([^/]+)\/transcripts\/([^/]+)\/artifacts\/summary\/$/);
+      if (channel) { event.preventDefault(); chooseScope(decodeURIComponent(channel[1])); }
+      else if (video) {
+        const jobs = archive.jobs.filter((j) => j.video_id === decodeURIComponent(video[1]));
+        if (jobs.length) { event.preventDefault(); selectVideo(jobs, jobs.find((j) => j.profile === decodeURIComponent(video[2])) || bestJob(jobs)); }
+      }
+    });
+    body.append(node("p", `Generated ${new Date(entry.generated_at).toLocaleString()} from saved summaries. Speaker opinions and forecasts retain their original uncertainty.`, "reader-note"));
+  } catch (error) {
+    if (!controller.signal.aborted) { content.textContent = error.message; readerSignature = ""; }
+  }
+}
+$("channel-scope").addEventListener("change", (event) => { chooseScope(event.target.value); setReaderOpen(true); });
+$("rolling-summary").addEventListener("click", () => { chooseScope(libraryScope); setReaderOpen(true); });

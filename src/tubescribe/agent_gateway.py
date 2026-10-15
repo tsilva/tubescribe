@@ -152,6 +152,10 @@ def execute(root, identifier, upstream, *, runner_factory=AgentRunner):
                     )
                     reader = Transcript(srt, compact=context["compact"])
                     tools = LocalTools(lambda token: make_handler(screenshots, token, reader))
+                elif kind == "rollup":
+                    from .rollups import tools as digest_tools
+
+                    tools = LocalTools(digest_tools)
                 elif kind == "artifact":
                     from .artifacts import Figures, figure_handler
 
@@ -174,7 +178,7 @@ def execute(root, identifier, upstream, *, runner_factory=AgentRunner):
                         if screenshots
                         else None
                     )
-                else:
+                elif kind == "artifact":
                     result["tool_state"] = {"calls": figures.calls}
                 key = "agent-results/" + identifier + ".json"
                 store.blobs.put(key, json.dumps(result).encode())
@@ -261,7 +265,7 @@ def make_gateway(root, upstream, *, port=0, runner_factory=AgentRunner):
                     payload = json.loads(self.rfile.read(length))
                     context = payload.get("tool_context", {})
                     # Only configured archive objects; never arbitrary callback URLs or filesystem paths.
-                    if context.get("kind") not in {"postprocessing", "artifact"}:
+                    if context.get("kind") not in {"postprocessing", "artifact", "rollup"}:
                         raise ValueError("A durable tool context is required")
                     row, created = runs.create(identifier, payload)
                     if created:

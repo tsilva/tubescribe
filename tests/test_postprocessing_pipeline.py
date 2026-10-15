@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -16,6 +17,7 @@ from test_pipeline import CID, DIARIZATION, RESULT, VID
 
 from tubescribe.dashboard import make_server, snapshot
 from tubescribe.postprocessing_worker import cached_video, cleanup_video, process_one, recover, run
+from tubescribe.recent import ensure_recent
 from tubescribe.storage import Store, atomic_write
 from tubescribe.worker import work
 
@@ -555,7 +557,39 @@ class FinalStage(unittest.TestCase):
             check=True,
         )
         self.inspect_video = True
-        result = work(self.store, "http://127.0.0.1:1", ids=[VID], bridge=self.bridge)
+        clock = datetime(2026, 10, 15, 12, tzinfo=UTC)
+        with (
+            patch(
+                "tubescribe.recent.youtube.discover",
+                return_value=[
+                    {
+                        "id": VID,
+                        "title": "Test",
+                        "url": self.job["url"],
+                    }
+                ],
+            ),
+            patch(
+                "tubescribe.recent.youtube.details",
+                return_value={
+                    "channel_id": CID,
+                    "timestamp": clock.timestamp(),
+                    "duration": 4,
+                },
+            ),
+        ):
+            recent = ensure_recent(
+                self.store, "http://127.0.0.1:1", bridge=self.bridge, clock=clock
+            )
+            self.assertEqual(recent["incomplete"], [])
+            repeated = ensure_recent(
+                self.store, "http://127.0.0.1:1", bridge=self.bridge, clock=clock
+            )
+        result = recent["processing"]
+        self.assertEqual(repeated["processing"]["skipped"], 1)
+        self.assertEqual(repeated["incomplete"], [])
+        self.assertEqual(self.requests, 2)
+        self.assertEqual(self.transcribe.call_count, 1)
         self.assertEqual(result["completed"], 1)
         self.assertEqual(self.row()["figures"], 1)
         self.assertFalse((folder / (VID + ".mp4")).exists())

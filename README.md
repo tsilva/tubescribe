@@ -18,6 +18,17 @@ scripts/tubescribe --help
 
 The wrapper runs `uv --config-file uv.toml run --locked tubescribe`, ensuring machine-specific uv configuration cannot change resolution. Both `pyproject.toml` and the explicit `uv.toml` preserve a **seven-day package age cutoff** and the existing bad-package exclusions. `uv.lock` records exact dependency versions and hashes. Refresh deliberately with `uv --config-file uv.toml lock --upgrade`; do not bypass the cutoff to fix download errors.
 
+For a global command that follows source edits, install the editable tool:
+
+```bash
+uv --config-file uv.toml tool install --editable .
+tubescribe ensure-recent
+```
+
+Editable installs use this checkout's `data/` archive from any working directory.
+Regular non-editable installations default to `~/.local/share/tubescribe`.
+`--data` overrides `TUBESCRIBE_DATA`, which overrides the installation default.
+
 ## SSH and remote ASR
 
 The working host is `beast3-ssh.tsilva.eu`, reached through the existing authenticated Cloudflare SSH proxy. `beast-3.local` was unreachable from this Mac during setup. The local alias is `tubescribe-beast`.
@@ -101,6 +112,42 @@ scripts/tubescribe sync --profile turbo-v2
 scripts/tubescribe work --profile turbo-v2 --wait
 ```
 
+## Rolling recent-video catch-up
+
+Run `scripts/tubescribe ensure-recent` on the Mac to discover and fully process the
+last seven days of publications from every tracked channel. An optional positional
+channel ID restricts the scope; `--days N` changes the rolling window. The command
+checks uploads, Shorts, and completed livestreams without a fixed video count or
+assuming tab ordering. It resolves publication metadata before selection, excludes
+future/live/upcoming/preparing recordings, and reports unknown dates and failed tabs.
+When YouTube supplies only an upload date, it conservatively includes the cutoff's
+whole UTC calendar day and reports those IDs under `date_only_videos`; their exact
+publication hour is unknown.
+Flat entries with no dates require individual metadata requests, so discovery of
+large histories can take time. Private/deleted/unlisted videos absent from public
+listings cannot be guaranteed.
+
+The Mac retains discovery, its archive, downloads, and orchestration. ASR and
+diarization use the existing Beast-3 RTX 4090 services through the configured SSH
+tunnels; neither runs inference on the Mac. Start those services/tunnels as described
+above and below. Postprocessing and the final summary use the existing AgentBridge
+configuration. `--profile`, `--bridge`, `--video-cache`, the global `--endpoint`, and
+`--max-attempts` select the existing pipeline settings.
+
+By default the command runs until the scoped full pipeline drains, including bounded
+retry cooldowns. It reuses valid completed stages and checkpoints; it never resets
+failed attempt budgets. It prints any remaining incomplete video/stage and exits
+nonzero for discovery errors, failed attempts, or incomplete pipelines. Inspect
+`status --failures`, resolve the cause, and explicitly `retry --video VIDEO_ID` when
+an exhausted budget needs resetting. A YouTube rate-limit/bot response stops the
+check before submitting further processing; rerun after the cooldown.
+
+`--enqueue-only` instead records a durable scoped `work` submission for `queue serve`
+and returns immediately. Repeated identical queued/active selections are deduplicated.
+The recorded video IDs remain queued even after they leave the discovery window.
+Enqueue success means work was submitted, not that processing finished. This command
+performs one check per invocation; no recurring schedule is installed automatically.
+
 ## Remote speaker diarization
 
 The production diarizer is **NVIDIA Nemotron-3-Diarization**, pinned to revision `f667ed73aee57d40cc39428eb768b4fd87a0a29e`, with the configured new-install baseline Transformers 5.18.0 / PyTorch 2.13.0+cu130, float32 on **RTX 4090 device 0**. It is ungated and needs no Hugging Face token. The locked Linux Torch wheel requires a CUDA 13-compatible NVIDIA driver. On 2026-10-10 the idle service was redeployed and verified healthy on Torch 2.13.0+cu130, with the previous environment retained for rollback. Updating the repository alone does not restart or upgrade a service. Existing diarization profiles retain their original backend identity; use a new explicit profile such as `turbo-security-20261010` for future ingestion after this upgrade. The isolated environment is `/home/tsilva/.local/share/tubescribe/diarization-service`; it shares cached model weights but does not change the ASR environment or other running models.
@@ -143,6 +190,9 @@ Both modes use the same exclusive archive capacity lease and separately verified
 ```bash
 scripts/tubescribe channels add https://www.youtube.com/@JordiVisserLabs
 scripts/tubescribe channels list
+scripts/tubescribe ensure-recent                    # fully process the last seven days
+scripts/tubescribe ensure-recent --days 14          # a different rolling publication window
+scripts/tubescribe ensure-recent --enqueue-only     # submit for an existing queue serve worker
 scripts/tubescribe latest --count 3                # resolve dates across all channel tabs; queue the latest three
 scripts/tubescribe sync                            # index accessible public history, without transcribing
 scripts/tubescribe sync UCSLOw8JrFTBb3qF-p4v0v_w
@@ -176,7 +226,8 @@ Each video/profile pair has a unique job. Download, ASR, diarization, postproces
 
 **SubRip (`.srt`)** is the default subtitle format: plain UTF-8, numbered cues and `HH:MM:SS,mmm` timestamps. Diarized cues are split at speaker changes and kept short for subtitles, with a speaker prefix; older ASR-only cues retain their original segment boundaries. No video title or metadata is inserted into subtitle cues; JSON retains full provenance. Existing archives gain SRT files through `subtitles` or on the next worker run, using saved JSON without downloading or transcribing again. Missing/corrupt SRT and Markdown files are regenerated from that authoritative JSON. Stop an active backfill before `subtitles` or backup/export to obtain the archive lock, then restart it. Subtitle exports can reuse a destination directory; matching video/profile filenames are updated, while unrelated files remain untouched. CLI output lists both formats and counts all generated files.
 
-The default archive directory is `data/` in this repository (the wrapper always changes to the repository root):
+Editable and source installs use this repository's `data/` archive, including when
+the global `tubescribe` command runs from another directory:
 
 - `data/archive.sqlite3`: channels, discovery state, videos, jobs, ASR/diarization profiles, independent diarization state, transcript index and hashes.
 New transcript versions insert `sources/UUID/` below `PROFILE/`; the database records
@@ -191,7 +242,7 @@ exact object keys. The following flat paths describe legacy archives, which rema
 - `data/audio/VIDEO_ID.EXT`: temporary or retained retry audio; complete downloads use the original audio codec.
 - `data/smoke.log`, `data/backfill.log`, `data/diarization-backfill.log`: stage events with UTC timestamps, errors, duration, and inference speed.
 
-Override with `--data /absolute/path` (before the command) or `TUBESCRIBE_DATA`. Data, audio, transcripts, logs, secrets, environments, and model weights are ignored by Git.
+The editable/source default is the checkout's `data/` directory, independent of the current working directory. Override with `--data /absolute/path` (before the command) or `TUBESCRIBE_DATA`. Explicit relative overrides remain relative to the caller's working directory. Data, audio, transcripts, logs, secrets, environments, and model weights are ignored by Git.
 
 ## Background import and backup
 
@@ -252,7 +303,58 @@ The pane defaults to the existing summary, preserving links to its saved figures
 
 The dashboard reads SQLite in short transactions. Its monitoring endpoints do not acquire the worker's archive lock or run inference. It checks for updates every five seconds while visible through `/api/feed?revision=REVISION`. The first response contains compact video records; subsequent responses contain only changed records and removed keys. Unknown or expired revisions return a fresh full feed, and gzip is used when accepted by the client. The existing `/api/snapshot` remains available for full operational details. The browser keeps a per-tab feed cache for up to 24 hours and displays it immediately on reload while checking the server; session storage failures fall back to a fresh fetch. It initially renders 50 videos, adds older rows in batches of 50 as the end approaches (or with **Load older videos**), and searches the entire cached catalogue. Unchanged row nodes, selection, expanded details, and reader content survive updates; processing details are built only when expanded. Local file checks share one archive connection per scan. `Awaiting diarization` means ASR is saved but speakers are pending. Final completion requires saved ASR, diarization, a processed bundle, and its summary. `Awaiting summary` and `Summarizing` distinguish the final step; summary failures appear directly in the row. Status reflects recorded state; a stopped worker may leave a stage recorded as active until the next worker recovers it. Worker liveness is shown in the header and beside any interrupted active stage. The browser’s local date and time format is used for labels.
 
-The processed transcript header links to available artifact workflows. Open **One-page summary**, then **Build artifact** to launch a background worker; its status page refreshes until completion. Artifact creation is the dashboard's only write operation: the same-origin form and its REST JSON equivalent share one queued/active submission for repeated requests. Use the CLI for adding channels, discovery, retries, and other worker control. File access is restricted to recognized transcript/review/artifact outputs and audio inside the archive; it does not expose SQLite, SSH configuration, sockets, or arbitrary local files. No external frontend assets or JavaScript packages are required.
+The processed transcript header links to available artifact workflows. Open **One-page summary**, then **Build artifact** to launch a background worker; its status page refreshes until completion. Video artifact creation is the dashboard's interactive write operation; rolling overview maintenance runs independently: the same-origin form and its REST JSON equivalent share one queued/active submission for repeated requests. Use the CLI for adding channels, discovery, retries, and other worker control. File access is restricted to recognized transcript/review/artifact outputs and audio inside the archive; it does not expose SQLite, SSH configuration, sockets, or arbitrary local files. No external frontend assets or JavaScript packages are required.
+## Rolling seven-day summaries
+
+The dashboard supports three reading levels: **All channels → Channel → Video**.
+Use **Browse** to choose a channel or all channels, then **7-day summary** to read its
+rolling overview. Channel overviews link to recent videos; the combined overview links
+to channel overviews. Video summaries, transcripts, and SRT timestamps remain in the
+same reader. Each overview also has full-page and copy-link controls.
+
+Channel digests synthesize saved video summaries for publications in the trailing
+168 hours, using `codex/gpt-6.1-sol` with **high** reasoning through AgentBridge. The
+all-channels digest synthesizes the channel digests. The output targets one page,
+retains attribution and uncertainty, and cites saved sources (including screenshots
+when useful). Coverage shows summarized versus indexed recent videos and excludes
+videos whose publication date is unknown. It does not claim completeness beyond the
+indexed catalogue and never starts downloads or transcription to fill gaps.
+
+**Aggregation waits for the video queue to drain.** Any queued or active `work`,
+`diarize`, `postprocess`, or `artifacts` submission, or live archive/video/job lease,
+blocks aggregation. Untouched, unsubmitted videos do not block it. Once submitted
+video work is flushed, only affected channels rebuild, then the combined overview
+rebuilds once. A new batch arriving during generation defers publication; a valid
+saved model response can be reused after the queue drains.
+
+The running dashboard checks once per minute; the independent `queue serve` role
+also checks for due refreshes. Stop both and automatic maintenance stops until one
+resumes. Reads never invoke a model. Source fingerprints detect new/changed summaries,
+coverage changes, and entries aging out of the seven-day window; unchanged inputs
+reuse published bundles. Failed generations retry after five minutes, up to three
+attempts per input version. Empty windows require no model call. Old-window content
+is not served while its replacement is pending. Outputs use the existing durable
+object storage and fenced publication; SQLite and PostgreSQL migration 6 adds the
+`rolling_summaries` ledger. Existing published video URLs are unchanged.
+
+```bash
+scripts/tubescribe rollups                   # refresh after video work drains
+scripts/tubescribe rollups --force           # reset the digest retry budget
+scripts/tubescribe rollups --bridge http://127.0.0.1:PORT
+```
+
+Stable overview routes:
+
+| Resource | URL |
+| --- | --- |
+| All-channels overview | `/summaries/` |
+| Channel overview | `/channels/CHANNEL_ID/summary/` |
+| Markdown | Append `summary.md` to either overview URL |
+| Overview catalogue and coverage | `/api/summaries` |
+| Individual metadata | Request either overview with `Accept: application/json` |
+
+These routes inherit dashboard authentication and same-origin access controls. Public
+consumers such as NotebookLM still require a reachable, authorized deployment URL.
 
 ## Resource URLs and NotebookLM sources
 
@@ -380,7 +482,8 @@ existing local archive.
 | `src/tubescribe/pipeline.py` | Stage dependencies, completion, retry eligibility, and shared final-stage execution. |
 | `src/tubescribe/repository.py` | SQLite/PostgreSQL job records, claims, read models, submissions, attempts, events, and fenced commits. `Store` composes the selected adapter. |
 | `src/tubescribe/database.py` | Database connections, PostgreSQL transaction locks, server-clock ownership, and portable SQLite export. |
-| `src/tubescribe/migrations.py` | Explicit schema upgrades, startup compatibility checks, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–5. |
+| `src/tubescribe/rollups.py` | Source-versioned rolling channel and all-channels summaries; queue-drain scheduling and durable bundles. |
+| `src/tubescribe/migrations.py` | Explicit schema upgrades, startup compatibility checks, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–6. |
 | `src/tubescribe/blobs.py` | Confined object keys, hashes, metadata, streamed file transfer, and verified bundle publication. Local, separate-volume, and in-memory adapters share the interface. `src/tubescribe/s3.py` adds S3-compatible objects with multipart uploads and verified streaming downloads. |
 | `src/tubescribe/storage.py` | Durable checkpoint writes, scratch materialization, fresh publication versions, and recovery. |
 | `src/tubescribe/submission.py` | Deduplicated durable requests, recorded results, and local process or independent queue dispatch. |
@@ -514,7 +617,7 @@ through their tools.
 
 | Setting | Default / meaning |
 | --- | --- |
-| `TUBESCRIBE_DATA` / `--data` | `data`; process scratch and legacy archive root. |
+| `TUBESCRIBE_DATA` / `--data` | Checkout's `data/` for editable/source installs; `~/.local/share/tubescribe` otherwise. Process scratch and legacy archive root; independent of the working directory unless explicitly overridden with a relative path. |
 | `TUBESCRIBE_DATABASE` | `DATA/archive.sqlite3`; durable SQLite location. |
 | `TUBESCRIBE_OBJECTS` | Unset; otherwise a separate durable object directory. Mutually exclusive with S3. |
 | `TUBESCRIBE_DATABASE_URL` | Unset; PostgreSQL URI overrides the SQLite adapter. |

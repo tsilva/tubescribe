@@ -293,7 +293,7 @@ class CloudRehearsal(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ],
-            [1, 2, 3, 4, 5],
+            [1, 2, 3, 4, 5, 6],
         )
         another = Store(self.base / "migrated")
         self.addCleanup(another.db.close)

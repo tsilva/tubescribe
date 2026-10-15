@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import youtube
 from .asr import Client
+from .config import default_data
 from .storage import Store, worker_lock
 from .submission import execute_cli
 from .tunnel import tunnel
@@ -23,7 +24,7 @@ def out(data):
 
 def main():
     p = argparse.ArgumentParser(description="Local YouTube archive using remote ASR")
-    p.add_argument("--data", type=Path, default=Path(os.environ.get("TUBESCRIBE_DATA", "data")))
+    p.add_argument("--data", type=Path, default=default_data(), help="Archive/scratch directory")
     p.add_argument("--endpoint", default=os.environ.get("TUBESCRIBE_ENDPOINT"))
     p.add_argument("--submission", help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="command", required=True)
@@ -53,6 +54,14 @@ def main():
             c.add_argument("--limit", type=int)
         else:
             c.add_argument("--count", type=int, default=3)
+    c = sub.add_parser("ensure-recent", help="Fully process tracked channels' recent videos")
+    c.add_argument("channel", nargs="?")
+    c.add_argument("--days", type=int, default=7)
+    c.add_argument("--profile", default="turbo-v1")
+    c.add_argument("--max-attempts", type=int, default=3)
+    c.add_argument("--enqueue-only", action="store_true", help="Submit work for queue serve")
+    c.add_argument("--bridge")
+    c.add_argument("--video-cache")
     c = sub.add_parser("work")
     c.add_argument("--video", action="append")
     c.add_argument("--channel")
@@ -99,6 +108,9 @@ def main():
         "--wait", action="store_true", help="Wait for an active archive worker to finish"
     )
     c.add_argument("--list-workflows", action="store_true")
+    c = sub.add_parser("rollups", help="Refresh rolling seven-day channel and library summaries")
+    c.add_argument("--bridge")
+    c.add_argument("--force", action="store_true")
     c = sub.add_parser("status")
     c.add_argument("--failures", action="store_true")
     c = sub.add_parser("retry")
@@ -152,10 +164,11 @@ def main():
         p.error("Profile must be a path-safe label of letters, numbers, underscores or hyphens")
     if (
         getattr(args, "count", 3) < 1
+        or getattr(args, "days", 7) < 1
         or getattr(args, "max_attempts", 3) < 1
         or (getattr(args, "limit", None) is not None and args.limit < 1)
     ):
-        p.error("Counts, limits and attempt bounds must be positive")
+        p.error("Days, counts, limits and attempt bounds must be positive")
     if args.command == "operations":
         from .operations import metrics, readiness
 
@@ -185,7 +198,16 @@ def main():
     def stop_worker(signum, frame):
         raise KeyboardInterrupt()
 
-    if args.command in {"work", "diarize", "postprocess", "artifacts", "queue", "agent"}:
+    if args.command in {
+        "work",
+        "diarize",
+        "postprocess",
+        "artifacts",
+        "rollups",
+        "queue",
+        "agent",
+        "ensure-recent",
+    }:
         signal.signal(signal.SIGTERM, stop_worker)
 
     def endpoint():
@@ -272,6 +294,14 @@ def main():
                     force=args.force,
                     summary=not args.no_summary,
                 ),
+            )
+            out(result)
+            return int(result["failed"] > 0)
+        elif args.command == "rollups":
+            from .rollups import run
+
+            result = execute_cli(
+                store, args, lambda: run(store, bridge=args.bridge, force=args.force)
             )
             out(result)
             return int(result["failed"] > 0)
@@ -391,6 +421,28 @@ def main():
                     out({"latest": [v for _, v in chosen]})
             if errors:
                 return 1
+        elif args.command == "ensure-recent":
+            from .recent import ensure_recent
+
+            result = ensure_recent(
+                store,
+                endpoint(),
+                days=args.days,
+                channel=args.channel,
+                profile=args.profile,
+                max_attempts=args.max_attempts,
+                enqueue_only=args.enqueue_only,
+                bridge=args.bridge,
+                video_cache=args.video_cache,
+            )
+            out(result)
+            return int(
+                bool(
+                    result["discovery_errors"]
+                    or result.get("incomplete")
+                    or result.get("processing", {}).get("failed")
+                )
+            )
         elif args.command == "work":
             result = execute_cli(
                 store,

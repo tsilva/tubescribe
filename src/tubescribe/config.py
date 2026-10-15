@@ -11,6 +11,18 @@ _DATABASES = {}
 _WORKER_ID = uuid.uuid4().hex
 
 
+def default_data():
+    """Editable installs share the checkout archive regardless of the caller's cwd."""
+    if os.environ.get("TUBESCRIBE_DATA"):
+        return Path(os.environ["TUBESCRIBE_DATA"]).expanduser()
+    checkout = Path(__file__).resolve().parents[2]
+    if (checkout / "pyproject.toml").is_file() and (
+        checkout / "src" / "tubescribe"
+    ).resolve() == Path(__file__).resolve().parent:
+        return checkout / "data"
+    return Path.home() / ".local" / "share" / "tubescribe"
+
+
 def database_path(root):
     root = Path(root).resolve()
     return _DATABASES.get(

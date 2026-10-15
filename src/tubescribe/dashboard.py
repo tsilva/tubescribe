@@ -492,7 +492,83 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             url = urlsplit(self.path)
             query = parse_qs(url.query)
             try:
+                self.resource = None
                 from .resources import render_video, resolve, segment, video_metadata
+                from .rollups import index as digest_index
+                from .rollups import records as digest_records
+                from .rollups import url as digest_url
+                from .storage import Store
+
+                digest_match = re.fullmatch(
+                    r"/(?:api/)?(summaries|channels/([^/]+)/summary)(?:/(summary\.md))?/?", url.path
+                )
+                if url.path == "/api/summaries" or digest_match:
+                    store = Store(root)
+                    try:
+                        metadata = digest_index(store)
+                        if url.path == "/api/summaries":
+                            self.send_json(metadata)
+                            return
+                        scope = "channel:" + segment(digest_match[2]) if digest_match[2] else "all"
+                        entry = next((e for e in metadata["items"] if e["scope"] == scope), None)
+                        if entry is None:
+                            raise FileNotFoundError("Unknown channel")
+                        if url.path.startswith("/api/") or "application/json" in self.headers.get(
+                            "Accept", ""
+                        ):
+                            self.send_json(
+                                {
+                                    **entry,
+                                    "days": metadata["days"],
+                                    "since": metadata["since"],
+                                    "until": metadata["until"],
+                                }
+                            )
+                            return
+                        if not digest_match[3] and not url.path.endswith("/"):
+                            self.send_response(308)
+                            self.send_header("Location", digest_url(scope))
+                            self.send_header("Content-Length", "0")
+                            self.end_headers()
+                            return
+                        if entry["state"] != "ready":
+                            self.send_json(
+                                {
+                                    **entry,
+                                    "message": "The rolling summary is being refreshed; expired content is not served.",
+                                },
+                                503,
+                            )
+                            return
+                        row = digest_records(store)[scope]
+                        if not store.bundle_valid(row["output_dir"], row["manifest_sha256"]):
+                            raise FileNotFoundError("Digest bundle is unavailable")
+                        manifest = json.loads(
+                            store.read_key(
+                                row["output_dir"] + "/manifest.json", row["manifest_sha256"]
+                            )
+                        )
+                        leaf = "summary.md" if digest_match[3] else "preview.html"
+                        data = store.read_key(
+                            row["output_dir"] + "/" + leaf, manifest["files"][leaf]
+                        )
+                        if leaf == "preview.html":
+                            tag = (
+                                '<link rel="canonical" href="'
+                                + html.escape(self.origin() + digest_url(scope), quote=True)
+                                + '">'
+                            )
+                            data = data.decode().replace("</head>", tag + "</head>", 1).encode()
+                        self.send_headers(
+                            200,
+                            CONTENT_TYPES[".md" if digest_match[3] else ".html"],
+                            len(data),
+                            generated_html=not bool(digest_match[3]),
+                        )
+                        self.write_data(data)
+                    finally:
+                        store.db.close()
+                    return
 
                 self.resource = None
                 views = ArchiveViews(root)
@@ -1007,4 +1083,29 @@ def dashboard(root: Path, action="start", port=0):
             }
             atomic_write(root / "dashboard.json", json.dumps(state, indent=2).encode())
             print(json.dumps(state), flush=True)
-            server.serve_forever()
+            stop_digests = threading.Event()
+
+            def maintain_digests():
+                from .rollups import schedule
+                from .storage import Store
+
+                while not stop_digests.is_set():
+                    store = None
+                    try:
+                        store = Store(root)
+                        schedule(store)
+                    except Exception:
+                        # The reader remains available while durable services/inference recover.
+                        pass
+                    finally:
+                        if store is not None:
+                            store.db.close()
+                    stop_digests.wait(60)
+
+            digest_thread = threading.Thread(target=maintain_digests, daemon=True)
+            digest_thread.start()
+            try:
+                server.serve_forever()
+            finally:
+                stop_digests.set()
+                digest_thread.join(timeout=5)

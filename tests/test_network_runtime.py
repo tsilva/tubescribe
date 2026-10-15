@@ -207,7 +207,7 @@ class NetworkRuntime(unittest.TestCase):
                 self.assertEqual(manage(root, "status")["schema_version"], 4)
                 self.assertNotIn("worker_id", columns(db, "submissions"))
             self.assertEqual(manage(root, "apply")["previous_version"], 4)
-            self.assertEqual(manage(root, "apply")["previous_version"], 5)
+            self.assertEqual(manage(root, "apply")["previous_version"], 6)
             upgraded = self.replacement("upgraded")
             self.assertEqual(upgraded.submission(queued)["state"], "queued")
             upgraded.recover()

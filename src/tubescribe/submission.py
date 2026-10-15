@@ -17,7 +17,7 @@ class JobRequest:
     options: dict
 
     def encode(self):
-        if self.command not in ("work", "postprocess", "diarize", "artifacts"):
+        if self.command not in ("work", "postprocess", "diarize", "artifacts", "rollups"):
             raise ValueError("Unknown worker command")
         return json.dumps(
             {"command": self.command, "options": self.normalized()}, sort_keys=True, default=str
@@ -103,7 +103,12 @@ class Dispatcher:
     def submit(self, request, *, background=False):
         with submission_gate(self.store.root, "submit:" + request.dedupe):
             identifier, created = self.store.enqueue(request.encode(), request.dedupe)
-            if background and created and not self.store.config.queued:
+            row = self.store.submission(identifier)
+            if (
+                background
+                and not self.store.config.queued
+                and (created or (row["state"] == "queued" and row["pid"] is None))
+            ):
                 try:
                     pid = self.process.start(self.store.root, request, identifier)
                     self.store.update_submission(identifier, pid=pid)
@@ -180,6 +185,9 @@ def consume(store, *, once=False, poll=None, process=None):
     completed = failed = 0
     with lease(store.root, "dispatcher", reentrant=False):
         while True:
+            from .rollups import schedule
+
+            schedule(store, background=False)
             store.reclaim_submissions()
             rows = store.queued_submissions()
             for row in rows:
@@ -215,6 +223,9 @@ def consume_network(store, *, once, poll, process):
     completed = failed = 0
     with lease(store.root, "dispatcher:" + store.config.worker_id, reentrant=False):
         while True:
+            from .rollups import schedule
+
+            schedule(store, background=False)
             store.reclaim_submissions()
             row = store.claim_submission(store.config.worker_id)
             if row is None:

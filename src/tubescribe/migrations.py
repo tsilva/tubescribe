@@ -2,7 +2,7 @@
 
 import os
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class SchemaCompatibilityError(ValueError):
@@ -178,6 +178,13 @@ BASE = """
 CLAIMS = "CREATE TABLE IF NOT EXISTS claims (resource TEXT PRIMARY KEY, owner TEXT NOT NULL, expires REAL NOT NULL); CREATE TABLE IF NOT EXISTS submissions (id TEXT PRIMARY KEY, dedupe TEXT NOT NULL, request TEXT NOT NULL, state TEXT NOT NULL, pid INTEGER, error TEXT, created REAL NOT NULL, updated REAL NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS submission_pending ON submissions(dedupe) WHERE state IN ('queued','active');"
 
 
+ROLLING = """CREATE TABLE rolling_summaries (
+    scope TEXT PRIMARY KEY, state TEXT NOT NULL, input_hash TEXT,
+    output_dir TEXT, manifest_sha256 TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry REAL NOT NULL DEFAULT 0, error TEXT, updated_at TEXT NOT NULL,
+    completed_at TEXT)"""
+
+
 def migrate(db):
     schema_version(db)  # Refuse future/corrupt ledgers before any DDL or PRAGMA writes.
     if getattr(db, "dialect", "sqlite") == "postgres":
@@ -224,6 +231,9 @@ def migrate(db):
         if version < 5:
             db.execute("ALTER TABLE submissions ADD COLUMN worker_id TEXT")
             db.execute("INSERT INTO schema_migrations VALUES(5)")
+        if version < 6:
+            db.execute(ROLLING)
+            db.execute("INSERT INTO schema_migrations VALUES(6)")
         db.commit()
     except BaseException:
         db.rollback()
@@ -276,3 +286,6 @@ def migrate_postgres(db):
         if version < 5:
             db.execute("ALTER TABLE submissions ADD COLUMN worker_id TEXT")
             db.execute("INSERT INTO schema_migrations VALUES(5)")
+        if version < 6:
+            db.execute(ROLLING.replace("REAL", "DOUBLE PRECISION"))
+            db.execute("INSERT INTO schema_migrations VALUES(6)")
