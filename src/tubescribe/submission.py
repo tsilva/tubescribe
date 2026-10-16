@@ -72,7 +72,7 @@ class LocalProcess:
                 command.append(flag)
             elif isinstance(value, list):
                 for item in value:
-                    command += [flag, str(item)]
+                    command.append(flag + "=" + str(item))
             else:
                 command += [flag, str(value)]
         folder = root / "quality" / "worker-logs"

@@ -20,6 +20,52 @@ from tubescribe.submission import Dispatcher, Inline, JobRequest, LocalProcess
 
 
 class Runtime(unittest.TestCase):
+    def test_shared_download_cooldown_is_durable_and_never_shortened(self):
+        claims = Claims(self.root)
+        self.addCleanup(claims.close)
+        claims.defer_downloads(60)
+        deadline = claims.db.execute(
+            "SELECT expires FROM claims WHERE resource='backoff:download'"
+        ).fetchone()[0]
+        claims.defer_downloads(1)
+        self.assertEqual(
+            claims.db.execute(
+                "SELECT expires FROM claims WHERE resource='backoff:download'"
+            ).fetchone()[0],
+            deadline,
+        )
+        self.assertGreater(claims.download_delay(), 50)
+        with claims.db:
+            claims.db.execute("UPDATE claims SET expires=0 WHERE resource='backoff:download'")
+        self.assertEqual(claims.download_delay(), 0)
+
+    def test_recovery_materialization_reuses_only_verified_copies_in_current_scan(self):
+        blobs = MemoryArtifacts()
+        refs = [blobs.put(f"bundle/{i}.json", str(i).encode()) for i in range(10)]
+        store = Store(self.root / "remote", blobs=blobs)
+        self.addCleanup(store.db.close)
+
+        def scan():
+            store.materialize_prefix("bundle")
+            store.materialize_prefix("bundle")
+
+        with (
+            patch.object(store, "_recover", side_effect=scan),
+            patch.object(blobs, "copy_to", wraps=blobs.copy_to) as copies,
+        ):
+            store.recover()
+            self.assertEqual(copies.call_count, 10)
+            self.assertIsNone(store._recovery_materialized)
+            # A subsequent scan must fetch and verify remote content again.
+            blobs.put(refs[0].key, b"changed")
+            store.recover()
+            self.assertEqual(copies.call_count, 20)
+            self.assertEqual((store.root / refs[0].key).read_bytes(), b"changed")
+        with patch.object(store, "_recover", side_effect=ValueError("failure")):
+            with self.assertRaises(ValueError):
+                store.recover()
+        self.assertIsNone(store._recovery_materialized)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -197,8 +243,20 @@ class Runtime(unittest.TestCase):
         argv = spawn.call_args.args[0]
         self.assertIn("--submission", argv)
         self.assertIn("id", argv)
-        self.assertIn("--video", argv)
+        self.assertIn("--video=" + VID, argv)
         self.assertNotIn("shell", spawn.call_args.kwargs)
+
+    def test_local_process_preserves_dash_prefixed_video_ids(self):
+        import argparse
+
+        spawn = Mock(return_value=Mock(pid=321))
+        request = JobRequest("work", {"video": ["-r8aNg-uH3g", VID]})
+        LocalProcess(spawn=spawn).start(self.root, request, "id")
+        argv = spawn.call_args.args[0]
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--video", action="append")
+        selected = parser.parse_args([value for value in argv if value.startswith("--video=")])
+        self.assertEqual(selected.video, request.options["video"])
 
     def test_agent_runner_uses_remote_adapter_without_local_callback_server(self):
         sent = []

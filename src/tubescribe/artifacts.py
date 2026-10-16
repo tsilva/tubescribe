@@ -423,6 +423,7 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
     stage = "save" if checkpoint else "model"
     if row["save_attempts" if checkpoint else "attempts"] >= max_attempts:
         raise ValueError("Artifact attempt budget exhausted; use --force for a new run")
+    rejected_response = False
     try:
         if not checkpoint:
             bridge = bridge or bridge_endpoint(store.root)
@@ -491,6 +492,20 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
                 "max_tool_calls": 3,
                 "timeout_seconds": 900,
             }
+            if journal:
+                # Retry feedback belongs to the original durable request. Retain
+                # it when reconnecting rather than changing a live run's inputs.
+                payload["instructions"] = json.loads((output / "request.json").read_text())[
+                    "instructions"
+                ]
+            elif row["error"] == "Artifact evidence quote does not occur in the final Markdown":
+                payload["instructions"] += (
+                    "\nPrevious attempt failed evidence validation. Each source_quote must contain "
+                    "at least five whitespace-separated words copied as one exact contiguous "
+                    "substring of the supplied raw Markdown. Preserve punctuation and formatting. "
+                    "For a very short spoken answer, copy its complete Markdown paragraph, including "
+                    "the speaker label and timestamp link, instead of shortening or inventing a quote."
+                )
             atomic_write(
                 output / "request.json",
                 json.dumps(
@@ -515,7 +530,11 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             )
             if result.get("tool_state"):
                 figures.calls = result["tool_state"]["calls"]
-            validate(result, markdown, resources, definition)
+            try:
+                validate(result, markdown, resources, definition)
+            except (ValueError, KeyError, TypeError):
+                rejected_response = True
+                raise
             atomic_write(output / "response.json", json.dumps(result, ensure_ascii=False).encode())
             atomic_write(output / "inspection.json", json.dumps(figures.calls).encode())
             stage = "save"
@@ -645,6 +664,8 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             run_pid=None,
             error=str(error) or "Interrupted; rerun artifacts to resume",
             next_retry=time.time() + min(1800, 60 * 2 ** min(5, row["attempts"])),
+            # Retain rejected runs for audit, but never reconnect to their durable journal.
+            **({"output_dir": None} if rejected_response else {}),
         )
         raise
     log(

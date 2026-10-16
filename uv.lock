@@ -2536,7 +2536,9 @@ name = "tubescribe"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "boto3" },
     { name = "httpx" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "yt-dlp", extra = ["default"] },
 ]
 
@@ -2572,6 +2574,7 @@ rehearsal = [
 [package.metadata]
 requires-dist = [
     { name = "av", marker = "extra == 'asr'", specifier = "<17" },
+    { name = "boto3", specifier = ">=1.35" },
     { name = "boto3", marker = "extra == 'cloud'", specifier = ">=1.35" },
     { name = "fastapi", marker = "extra == 'asr'", specifier = ">=0.115" },
     { name = "faster-whisper", marker = "extra == 'asr'", specifier = ">=1.2" },
@@ -2579,6 +2582,7 @@ requires-dist = [
     { name = "librosa", marker = "extra == 'diarization'", specifier = ">=0.11" },
     { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' and extra == 'asr'", specifier = ">=12.4" },
     { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux' and extra == 'asr'", specifier = ">=9.1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'cloud'", specifier = ">=3.2" },
     { name = "python-multipart", marker = "extra == 'asr'", specifier = ">=0.0.20" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'diarization'", specifier = "==2.13.0" },

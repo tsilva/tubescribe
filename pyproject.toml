@@ -3,7 +3,12 @@ name = "tubescribe"
 version = "0.1.0"
 description = "A resumable personal YouTube ASR archive"
 requires-python = ">=3.11,<3.14"
-dependencies = ["httpx>=0.28", "yt-dlp[default]>=2026.2.4"]
+dependencies = [
+    "httpx>=0.28",
+    "yt-dlp[default]>=2026.2.4",
+    "boto3>=1.35",
+    "psycopg[binary]>=3.2",
+]
 
 [project.optional-dependencies]
 diarization = [

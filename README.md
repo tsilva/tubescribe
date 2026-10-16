@@ -145,8 +145,36 @@ check before submitting further processing; rerun after the cooldown.
 `--enqueue-only` instead records a durable scoped `work` submission for `queue serve`
 and returns immediately. Repeated identical queued/active selections are deduplicated.
 The recorded video IDs remain queued even after they leave the discovery window.
+Video IDs, including IDs beginning with a hyphen, are preserved by background dispatch.
 Enqueue success means work was submitted, not that processing finished. This command
 performs one check per invocation; no recurring schedule is installed automatically.
+
+For recurring incremental discovery, schedule `scripts/tubescribe feed-poll --profile
+turbo-torch213` every 15 minutes on the local processing host, alongside `queue serve`.
+This polls each channel's public uploads playlist with a 15-entry bound, including
+Shorts and completed streams. It avoids scanning the full history on every check,
+skips completed/exhausted jobs and already queued IDs, and resolves exact watch-page
+metadata for new candidates before submitting the existing full pipeline. Active,
+upcoming and still-preparing recordings wait for a later poll. A full recent feed
+without any local overlap falls back to scoped seven-day reconciliation so the
+15-entry bound does not silently truncate a busy channel or an outage backlog.
+Catch-up discovery is checkpointed in the database, so interruption after partial
+indexing does not hide the remaining backlog. Full-tab discovery uses approximate
+listing dates to skip clearly old entries before resolving exact watch-page dates.
+Ordinary per-video discovery errors are reported without blocking other candidates;
+rate limits retain the shared download cooldown. Polling never resets retry budgets.
+The standalone command performs one check; a local scheduler supplies recurrence.
+
+This Mac's cloud installation runs `com.tsilva.tubescribe-feed-watch` for discovery
+and `com.tsilva.tubescribe-cloud-consumer` for durable queue processing. Its dedicated
+`com.tsilva.tubescribe-bridge` and `com.tsilva.tubescribe-gateway` services also restart
+at login or after failure; other AgentBridge applications remain separate. The watcher
+also restores missing loopback inference forwards through an already connected
+Core Tunnel master. It never starts an SSH master or requests fresh authentication;
+if Core Tunnel is disconnected, reconnect it and approve Bitwarden when prompted.
+Processing and screenshot tools remain on local hardware, publishing to Neon/R2.
+The consumer retains eight Codex slots and one GPU/download slot. Rolling summaries
+refresh only after discovery and submitted video work drain.
 
 ## Remote speaker diarization
 
@@ -220,9 +248,9 @@ scripts/tubescribe subtitles /absolute/path/to/subtitles --profile turbo-v1 # ex
 
 Jordi Visser's stable channel ID is **UCSLOw8JrFTBb3qF-p4v0v_w**. Discovery checks `/videos`, `/shorts`, and `/streams` independently. Absent tabs count as empty; failed tab requests remain visible. Active/upcoming livestreams and recordings still being prepared are excluded. Flat indexing does not always expose exact upload dates; `latest` resolves metadata before choosing and a download checks availability/channel identity again. `sync --limit N` limits each tab rather than the whole channel.
 
-Downloads prefer audio-only HLS (`bestaudio[protocol^=m3u8]/bestaudio`), because direct DASH audio returned HTTP 403 for two smoke-test videos. Normal ingestion uses one fragment at a time; redownloading for saved-ASR enrichment uses two concurrent fragments. Both process only one video at a time, retain request/download sleeps, and use two bounded yt-dlp network retries. Unavailable HLS fragments cause failure rather than a silently truncated transcript. Decoded duration is checked against video metadata. Stage attempts default to three total attempts, with exponential cooldowns starting at one minute. Rate limits/bot checks pause the entire worker for 30 minutes with `--wait`, or stop the current run without it. No cookies or authenticated YouTube account are required by default; inaccessible/private/member-only videos are recorded as failures when encountered. Discovery reflects currently accessible public listings and cannot enumerate hidden/private/deleted content.
+Downloads prefer audio-only HLS (`bestaudio[protocol^=m3u8]/bestaudio`), because direct DASH audio returned HTTP 403 for two smoke-test videos. Screenshot source videos also prefer HLS up to 720p, falling back to direct video or combined streams when HLS is absent; a CoinForge direct video stream returned the same 403 while its HLS stream remained accessible. Normal ingestion uses one fragment at a time; redownloading for saved-ASR enrichment uses two concurrent fragments. Both process only one video at a time, retain request/download sleeps, and use two bounded yt-dlp network retries. Unavailable HLS fragments cause failure rather than a silently truncated transcript. Decoded duration is checked against video metadata. Stage attempts default to three total attempts, with exponential cooldowns starting at one minute. Rate limits/bot checks pause the entire worker for 30 minutes with `--wait`, or stop the current run without it. Network downloads also persist a shared 30-minute cooldown in the database. Every downloader checks it before and after acquiring a slot, so already waiting videos do not make new YouTube requests during the cooldown; independent Codex tasks can finish from cached sources. No cookies or authenticated YouTube account are required by default; inaccessible/private/member-only videos are recorded as failures when encountered. Discovery reflects currently accessible public listings and cannot enumerate hidden/private/deleted content.
 
-Each video/profile pair has a unique job. Download, ASR, diarization, postprocessing, and summary have independent states; discovery is tracked per channel/tab. `work` defaults to download → ASR → diarization → AgentBridge postprocessing → one-page summary. Raw speaker-labelled formats commit before the final step. Failed diarization resumes from ASR, and failed postprocessing resumes from the diarized source without either earlier inference call, even if an earlier stage succeeded on its last allowed attempt. Only one worker can hold the archive capacity lease. Operator interruptions do not consume stage retry budgets. Jobs with intact transcripts, completed diarization, a valid processed bundle, and a valid summary are skipped. Summary failures resume from the finished Markdown and saved figures without earlier inference or a video download; model/save attempts and retry backoff are tracked separately. `retry` resets failed artifact budgets too. Missing/corrupt saved JSON/text is repaired from ASR and diarization checkpoints when available. Raw formats are atomically written and fsynced before SQLite commits; audio is removed **only after diarization completion commits** (unless `--keep-audio` is requested). A later postprocessing failure preserves those raw formats and the separate video cache. `status` reports all four inference stages; `status --failures` and `retry` include summaries. Overall completion requires both the processed bundle and the summary; completed older transcripts await a summary until the next scoped worker run. `--no-summary` explicitly stops after processed Markdown. Old diarized videos appear as awaiting postprocessing until finished. `--postprocessing off` explicitly preserves the earlier ASR/diarization-only worker behavior.
+Each video/profile pair has a unique job. Download, ASR, diarization, postprocessing, and summary have independent states; discovery is tracked per channel/tab. `work` defaults to download → ASR → diarization → AgentBridge postprocessing → one-page summary. Raw speaker-labelled formats commit before the final step. Failed diarization resumes from ASR, and failed postprocessing resumes from the diarized source without either earlier inference call, even if an earlier stage succeeded on its last allowed attempt. Only one worker can hold the archive capacity lease. Operator interruptions do not consume stage retry budgets. Jobs with intact transcripts, completed diarization, a valid processed bundle, and a valid summary are skipped. Summary failures resume from the finished Markdown and saved figures without earlier inference or a video download; model/save attempts and retry backoff are tracked separately. A model response rejected by evidence or resource validation starts a fresh bounded model attempt; its rejected durable run remains available for audit. Evidence retries receive explicit guidance to copy an exact quote of at least five words, including the full original speaker/timestamp paragraph when an answer is very short. Saved request instructions are retained when reconnecting to an interrupted durable run. Valid interrupted runs and save checkpoints resume without another model request. `retry` resets failed artifact budgets too. Missing/corrupt saved JSON/text is repaired from ASR and diarization checkpoints when available. Raw formats are atomically written and fsynced before SQLite commits; audio is removed **only after diarization completion commits** (unless `--keep-audio` is requested). A later postprocessing failure preserves those raw formats and the separate video cache. `status` reports all four inference stages; `status --failures` and `retry` include summaries. Overall completion requires both the processed bundle and the summary; completed older transcripts await a summary until the next scoped worker run. `--no-summary` explicitly stops after processed Markdown. Old diarized videos appear as awaiting postprocessing until finished. `--postprocessing off` explicitly preserves the earlier ASR/diarization-only worker behavior.
 
 **SubRip (`.srt`)** is the default subtitle format: plain UTF-8, numbered cues and `HH:MM:SS,mmm` timestamps. Diarized cues are split at speaker changes and kept short for subtitles, with a speaker prefix; older ASR-only cues retain their original segment boundaries. No video title or metadata is inserted into subtitle cues; JSON retains full provenance. Existing archives gain SRT files through `subtitles` or on the next worker run, using saved JSON without downloading or transcribing again. Missing/corrupt SRT and Markdown files are regenerated from that authoritative JSON. Stop an active backfill before `subtitles` or backup/export to obtain the archive lock, then restart it. Subtitle exports can reuse a destination directory; matching video/profile filenames are updated, while unrelated files remain untouched. CLI output lists both formats and counts all generated files.
 
@@ -613,6 +641,56 @@ The source model remains `codex/gpt-6.1-sol` with high reasoning for both Markdo
 summary generation. Models still inspect only the bounded, relevant figures requested
 through their tools.
 
+### Vercel hosting with local processing
+
+`api/index.py` exposes the existing dashboard routes as a Vercel Python Function.
+The hosted role serves the library, transcripts, summaries and figures and submits
+artifact requests to the shared PostgreSQL queue. It never starts a worker, download,
+FFmpeg process, inference service or rolling-summary scheduler. Those continue on your
+hardware through `queue serve` and the local AgentBridge gateway.
+
+Create a private R2 bucket and connect a Neon database to the Vercel project. Prefer a
+Frankfurt function/database region and the R2 EU jurisdiction. Keep Vercel Deployment
+Protection enabled for **all deployments**, including production; the application is a
+personal archive and does not yet implement user accounts. R2 public access stays off;
+the dashboard serves resources through its protected routes.
+
+Configure these Vercel environment variables before deploying:
+
+| Setting | Hosted value |
+| --- | --- |
+| `DATABASE_URL_UNPOOLED` | Supplied by the Neon integration; alternatively set `TUBESCRIBE_DATABASE_URL` to a direct PostgreSQL URI. Avoid transaction pooling because database sessions use read-only settings. |
+| `TUBESCRIBE_S3_BUCKET` | The private R2 bucket name. |
+| `TUBESCRIBE_S3_ENDPOINT` | R2's jurisdiction-specific S3 endpoint; EU buckets use `https://ACCOUNT.eu.r2.cloudflarestorage.com`. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Bucket-scoped R2 credentials, stored as secrets. |
+| `AWS_DEFAULT_REGION` | `auto`. |
+| `TUBESCRIBE_FORM_SECRET` | A separate random secret of at least 32 characters, stable across function instances so workflow forms survive cold starts. This is a form token, not an authentication credential. |
+| `TUBESCRIBE_PUBLIC_ORIGIN` | Optional explicit HTTPS origin; otherwise derived from Vercel's deployment URL. Vercel's verified production alias and deployment hostname are both accepted. |
+| `TUBESCRIBE_DISPATCH`, `TUBESCRIBE_MIGRATIONS` | `queue` and `check`; enforced by the hosted entrypoint. |
+
+Scratch defaults to `/tmp/tubescribe`. Startup fails if durable storage or the form secret
+is missing, rather than creating an empty SQLite archive. `.vercelignore` excludes local
+archives, models, media and secrets from uploads. `vercel.json` preserves canonical
+resource routes by forwarding all paths to the same handler.
+Remote library listings use paginated object metadata instead of a separate metadata
+request per file. Published summary links do not require files in the web instance's
+scratch directory; document delivery still verifies the published bundle.
+
+Before cutting over an existing archive, let submitted video work and agent runs drain,
+export a verified backup, initialize the **empty** Neon database with `migrate apply`, and use
+`restore` with the Neon/R2 configuration. Validate bundles and resource routes
+before pointing local workers and the gateway at the new backends. A checkpoint cutover
+can pause an unfinished batch at a completed-video boundary, wait for agent runs to drain,
+then export and restore its saved stages and queued work. Resume that same scope against
+Neon/R2 so subsequent completions publish there directly; do not resume the old queue.
+PostgreSQL restore streams catalogue rows using COPY inside the restore transaction.
+S3 restores verify up to eight independent uploads concurrently before publishing records.
+Keep separate scratch
+directories for each process and retain the original archive as rollback evidence. Do
+not switch the storage configuration of a running batch or run two independent copies
+of its queue. Use the same committed code and migration version on Vercel and local
+workers. Apply migrations explicitly before deploying code that requires a newer schema.
+
 ### Configuration, access, and inference roles
 
 | Setting | Default / meaning |
@@ -621,6 +699,7 @@ through their tools.
 | `TUBESCRIBE_DATABASE` | `DATA/archive.sqlite3`; durable SQLite location. |
 | `TUBESCRIBE_OBJECTS` | Unset; otherwise a separate durable object directory. Mutually exclusive with S3. |
 | `TUBESCRIBE_DATABASE_URL` | Unset; PostgreSQL URI overrides the SQLite adapter. |
+| `TUBESCRIBE_DATABASE_UNPOOLED_URL` | Optional direct URI for read-only sessions when processing uses a transaction-pooled `TUBESCRIBE_DATABASE_URL`. It must address the same database. |
 | `TUBESCRIBE_MIGRATIONS` | `auto` for local SQLite, `check` for PostgreSQL. Both Compose stacks use `check`: startup validates the schema and a separate migration service applies upgrades. |
 | `TUBESCRIBE_S3_BUCKET` | Unset; selects an existing S3-compatible bucket. |
 | `TUBESCRIBE_S3_ENDPOINT` | Unset uses AWS; otherwise HTTP(S) endpoint. Plain HTTP is restricted to loopback or the local Compose `objects` service. |
@@ -633,7 +712,7 @@ through their tools.
 | `TUBESCRIBE_WORKER_POLL` | `3`; positive finite consumer polling seconds. |
 | `TUBESCRIBE_AGENT_PROTOCOL` | `sync` or `durable`. |
 | `TUBESCRIBE_AGENTBRIDGE` | Explicit AgentBridge or durable gateway URL; existing loopback discovery remains available. |
-| `TUBESCRIBE_AGENT_CONCURRENCY` | `1`; gateway capacity, integer 1–8. |
+| `TUBESCRIBE_AGENT_CONCURRENCY` | `1`; durable gateway and network pipeline concurrency, integer 1–8. SQLite workers remain serial. |
 | `TUBESCRIBE_BIND` | `127.0.0.1`; service bind address. |
 | `TUBESCRIBE_PUBLIC_ORIGIN` | HTTPS origin required for non-loopback runtime binding. |
 | `TUBESCRIBE_ACCESS_TOKEN` | Optional on local web/inference services, required on the gateway; at least 32 characters when configured. |
@@ -642,6 +721,8 @@ through their tools.
 | `TUBESCRIBE_REMOTE_INFERENCE` | `1` explicitly enables HTTPS inference clients instead of loopback HTTP. |
 | `TUBESCRIBE_INFERENCE_TOKEN` | Bearer credential for ASR/diarization and synchronous AgentBridge clients. Durable gateway clients use the archive access token. |
 | `TUBESCRIBE_GPU` | `RTX 4090`; another configured GPU name or an empty value disables the model-name check while retaining CUDA. |
+
+For eight concurrent Codex tasks, set `TUBESCRIBE_AGENT_CONCURRENCY=8` on the local pipeline and durable gateway, `TUBESCRIBE_AGENT_SLOTS=8` on every participating runtime, and AgentBridge `POOL_SIZE=8` (or `--workers 8`). Network `work` validates the archive once, then overlaps up to eight independently leased video executions, each with its own database connection. Cleanup and summary remain ordered within each video while other videos advance. Download and GPU capacities stay independently bounded by their existing slot settings. Work limits apply across the batch; service pauses stop new scheduling and drain active tasks. Interruptions also drain active work before the submission barrier is released, so rolling summaries cannot race unfinished video stages. Valid durable run and save checkpoints remain resumable. Startup recovery fetches bundle files in bounded groups of eight and reuses only copies fetched and checksum-verified during that scan, checking their local hashes before reuse. The scan cache is discarded on success or failure; subsequent scans fetch remote content again, and all publication/source validators remain active. Parallelism changes throughput, not model choice or reasoning effort; it does not reduce tokens per video. With Neon, processing can use its pooled URI plus the same database’s direct URI in `TUBESCRIBE_DATABASE_UNPOOLED_URL`; read-only session settings then stay out of the transaction pool. Keep migration and backup commands on a direct connection.
 
 Configured web authentication protects every route, including files. API clients send
 `Authorization: Bearer TOKEN`. A trusted HTTPS proxy can authenticate a user and inject
@@ -937,6 +1018,9 @@ A persisted response is bound to original source hashes and instructions in
 `run-context.json`; packaging/storage retries validate and reuse it without video access,
 service readiness, or another model call. Corrupt response checkpoints are rejected.
 Invalid new model outputs are retried with a fresh response within the model attempt bound.
+Cleanup stays within each speaker turn: even one-word interjections and apparent diarization
+fragments retain their original labels and order. The fidelity check rejects removed or merged
+turns; speaker reassignment belongs in diarization rather than Markdown cleanup.
 With the default synchronous protocol, interruption before a response checkpoint exists
 requires a new agent turn. The optional durable gateway reconnects callers to an existing
 run and its tools; gateway loss without a saved response instead requires operator review. Changed source content queues a new run. Missing/corrupt

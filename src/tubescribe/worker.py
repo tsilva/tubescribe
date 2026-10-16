@@ -1,4 +1,4 @@
-"""One archive worker, bounded attempts, recoverable stage transitions."""
+"""Checkpointed pipeline with bounded network concurrency and recoverable stages."""
 
 from __future__ import annotations
 
@@ -71,13 +71,38 @@ def work(
     summary=True,
     asr_client=None,
     diarization_factory=None,
+    _recover=True,
+    _parallel=True,
 ):
     if postprocessing not in {"video", "text", "off"}:
         raise ValueError("Postprocessing must be video, text, or off")
     summary = summary and postprocessing != "off"
+    if _parallel and store.config.network and store.config.agent_concurrency > 1:
+        from .parallel import work_parallel
+
+        return work_parallel(
+            store,
+            endpoint,
+            ids=ids,
+            channel=channel,
+            profile=profile,
+            limit=limit,
+            max_attempts=max_attempts,
+            wait=wait,
+            keep_audio=keep_audio,
+            postprocessing=postprocessing,
+            bridge=bridge,
+            video_cache=video_cache,
+            summary=summary,
+            asr_client=asr_client,
+            diarization_factory=diarization_factory,
+        )
     done = failed = 0
     with pipeline_lock(store.root):
-        store.recover()
+        if _recover:
+            log("recovery_start")
+            store.recover()
+            log("recovery_complete")
         from .pipeline import Plan
 
         plan = Plan(True, postprocessing != "off", summary)
@@ -310,7 +335,12 @@ def work(
                                     "queue_paused",
                                     reason=f"{stage} paused: {e}; prior checkpoints retained",
                                 )
-                                return {"completed": done, "failed": failed, "skipped": skipped}
+                                return {
+                                    "completed": done,
+                                    "failed": failed,
+                                    "skipped": skipped,
+                                    "paused": str(e),
+                                }
                             # A failure before stage bookkeeping must not spin on the same job.
                             if any(
                                 r["id"] == job["id"]
@@ -327,14 +357,24 @@ def work(
                                     reason="Stage failed before a retry checkpoint was recorded: "
                                     + str(e),
                                 )
-                                return {"completed": done, "failed": failed, "skipped": skipped}
+                                return {
+                                    "completed": done,
+                                    "failed": failed,
+                                    "skipped": skipped,
+                                    "paused": str(e),
+                                }
                             if kind == "rate_limit":
                                 log(
                                     "backoff",
                                     reason=f"YouTube rate limit during {stage}; pausing the queue",
                                 )
                                 if not wait:
-                                    return {"completed": done, "failed": failed, "skipped": skipped}
+                                    return {
+                                        "completed": done,
+                                        "failed": failed,
+                                        "skipped": skipped,
+                                        "paused": str(e),
+                                    }
                                 for _ in range(delay // 30):
                                     time.sleep(30)
                                 break
@@ -361,20 +401,35 @@ def work(
                         )
                         if isinstance(e, ProfileChanged):
                             log("queue_paused", reason=str(e))
-                            return {"completed": done, "failed": failed, "skipped": skipped}
+                            return {
+                                "completed": done,
+                                "failed": failed,
+                                "skipped": skipped,
+                                "paused": str(e),
+                            }
                         if isinstance(e, InferenceUnavailable):
                             log(
                                 "queue_paused",
                                 reason="ASR unavailable; audio retained, no further downloads",
                             )
-                            return {"completed": done, "failed": failed, "skipped": skipped}
+                            return {
+                                "completed": done,
+                                "failed": failed,
+                                "skipped": skipped,
+                                "paused": str(e),
+                            }
                         if kind == "rate_limit":
                             log(
                                 "backoff",
                                 reason="YouTube rate limit or bot check; pausing the queue",
                             )
                             if not wait:
-                                return {"completed": done, "failed": failed, "skipped": skipped}
+                                return {
+                                    "completed": done,
+                                    "failed": failed,
+                                    "skipped": skipped,
+                                    "paused": str(e),
+                                }
                             for _ in range(delay // 30):
                                 time.sleep(30)
                             break

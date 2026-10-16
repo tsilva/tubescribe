@@ -144,6 +144,85 @@ class NetworkRuntime(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         return store
 
+    def test_parallel_videos_overlap_agents_with_independent_connections_and_gpu_leases(self):
+        from test_pipeline import CID, RESULT
+
+        from tubescribe.inference import AgentRunner
+        from tubescribe.pipeline import Plan
+        from tubescribe.worker import work
+
+        ids = [VID, "lmnopqrstuv"]
+        self.store.index(
+            CID,
+            "upload",
+            [{"id": ids[1], "title": "Second", "url": "https://youtube.com/watch?v=" + ids[1]}],
+            "turbo-v1",
+        )
+        barrier = threading.Barrier(2)
+        guard = threading.Lock()
+        gpu_active = gpu_peak = 0
+        original = AgentRunner.run
+
+        def download(root, video_id):
+            path = root / "audio" / (video_id + ".webm")
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(b"audio")
+            return path, {"channel_id": CID, "duration": 4}
+
+        def transcribe(_):
+            nonlocal gpu_active, gpu_peak
+            with guard:
+                gpu_active += 1
+                gpu_peak = max(gpu_peak, gpu_active)
+            time.sleep(0.05)
+            with guard:
+                gpu_active -= 1
+            return RESULT
+
+        def agent(runner, payload, tools):
+            if "evidence" not in payload["output_schema"]["properties"]:
+                # Both real video stage handlers must reach the agent concurrently.
+                # This deadlocks if their worker lifetime/DB connection is shared.
+                barrier.wait(timeout=60)
+            return original(runner, payload, tools)
+
+        with (
+            patch.dict(
+                os.environ, {"TUBESCRIBE_AGENT_CONCURRENCY": "2", "TUBESCRIBE_AGENT_SLOTS": "2"}
+            ),
+            patch("tubescribe.worker.download", side_effect=download),
+            patch("tubescribe.worker.Client.transcribe", side_effect=transcribe),
+            patch.object(AgentRunner, "run", agent),
+        ):
+            worker = self.replacement("parallel-videos")
+            result = work(
+                worker,
+                "http://127.0.0.1:1",
+                ids=ids,
+                postprocessing="text",
+                bridge=self.fixture.bridge,
+            )
+        self.assertEqual(result["completed"], 2)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(gpu_peak, 1)
+        self.assertTrue(all(Plan().complete(row) for row in self.store.pipeline_jobs(ids=ids)))
+        self.assertEqual(self.fixture.requests, 4)
+
+    def test_youtube_cooldown_is_shared_across_worker_scratch_directories(self):
+        from tubescribe.execution import defer_downloads
+
+        replica = self.replacement("cooldown-replica")
+        defer_downloads(self.store.root, seconds=1)
+        started = time.monotonic()
+        with capacity(replica.root, "download"):
+            elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.7)
+        self.assertIsNone(
+            self.store.db.execute(
+                "SELECT 1 FROM claims WHERE resource='capacity:download:0'"
+            ).fetchone()
+        )
+
     def test_explicit_postgres_upgrade_preserves_publications_and_queued_work(self):
         from contextlib import closing
         from urllib.parse import quote, urlencode

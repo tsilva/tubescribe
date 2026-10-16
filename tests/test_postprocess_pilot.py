@@ -634,6 +634,26 @@ class ExpandedRegressionTests(unittest.TestCase):
             source, f"## One\n**Speaker 1:** {word} {word}\n**Speaker 2:** {word}", "speaker turn"
         )
 
+    def test_cleanup_keeps_one_word_speaker_interjections(self):
+        source = (
+            "1\n00:00:00,000 --> 00:00:02,000\nSpeaker 1: Mortgage rates remain high.\n\n"
+            "2\n00:00:02,000 --> 00:00:02,500\nSpeaker 2: And\n\n"
+            "3\n00:00:02,500 --> 00:00:05,000\nSpeaker 1: buyers face a tough market.\n\n"
+            "4\n00:00:05,000 --> 00:00:06,000\nSpeaker 2: Right.\n"
+        )
+        merged = (
+            "## One\n**Speaker 1:** Mortgage rates remain high, and buyers face a tough market.\n\n"
+            "**Speaker 2:** Right."
+        )
+        self.run_fake_summary(source, merged, "speaker turn")
+        preserved = (
+            "## One\n**Speaker 1:** Mortgage rates remain high.\n\n"
+            "**Speaker 2:** And\n\n**Speaker 1:** buyers face a tough market.\n\n"
+            "**Speaker 2:** Right."
+        )
+        report = pilot.audit_transcript_fidelity(source, preserved)
+        self.assertEqual(report["speaker_turns"], 4)
+
     def test_repeated_prose_prefix_is_not_a_person_name(self):
         source = (
             "\n\n".join(

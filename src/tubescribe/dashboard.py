@@ -116,7 +116,12 @@ def output_files(root: Path) -> list[dict]:
     try:
         if not archive.local_blobs:
             files = []
-            for key in archive.blobs.keys():
+            inventory = (
+                archive.blobs.inventory()
+                if hasattr(archive.blobs, "inventory")
+                else ((key, archive.blobs.stat(key)) for key in archive.blobs.keys())
+            )
+            for key, metadata in inventory:
                 category = Path(key).parts[0]
                 if category not in {
                     "transcripts",
@@ -126,7 +131,6 @@ def output_files(root: Path) -> list[dict]:
                     "audio",
                 } or Path(key).suffix not in TEXT_FORMATS | {".png", ".zip"}:
                     continue
-                metadata = archive.blobs.stat(key)
                 files.append(
                     {
                         "path": key,
@@ -270,11 +274,11 @@ def snapshot(root: Path) -> dict:
                 if cover := covers.get(directory.as_posix()):
                     job["cover_url"] = job["processed_url"] + "figures/" + cover
         if job.get("summary_state") == "complete" and job.get("summary_dir"):
-            from .artifacts import artifact_path
-
-            directory = artifact_path(SimpleNamespace(root=root), job["summary_dir"])
-            if (directory / "artifact.md").is_file():
-                job["summary_url"] = artifact_url(job["video_id"], job["profile"], "summary")
+            # Published state owns availability; a fresh web instance has no local
+            # bundle. Resource delivery still validates the manifest and contents.
+            job["summary_url"] = artifact_url(job["video_id"], job["profile"], "summary")
+            directory = (root / job["summary_dir"]).resolve()
+            if directory.is_relative_to(root / "artifacts") and (directory / "artifact.md").is_file():
                 for figure in sorted((directory / "figures").glob("frame_*.png")):
                     if re.fullmatch(r"frame_\d+\.png", figure.name) and figure.is_file():
                         job["cover_url"] = job["summary_url"] + "figures/" + figure.name
@@ -367,7 +371,8 @@ class FeedChanges:
             return result
 
 
-def make_server(root: Path, port: int = 0, instance: str | None = None) -> ThreadingHTTPServer:
+def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
+    """Share HTTP routes between the local server and hosted WSGI entrypoint."""
     root = root.resolve()
     config = RuntimeConfig.load(root)
     instance = instance or uuid.uuid4().hex
@@ -461,6 +466,7 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
             if config.public_origin:
                 hosts.add(urlsplit(config.public_origin).netloc)
+            hosts.update(urlsplit(origin).netloc for origin in public_origins)
             if config.access_token:
                 import hmac
                 from http.cookies import SimpleCookie
@@ -477,11 +483,16 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
                 return False
             origin = self.headers.get("Origin")
             if origin and origin not in {f"http://{h}" for h in hosts} | (
-                {config.public_origin} if config.public_origin else set()
+                set(public_origins) | ({config.public_origin} if config.public_origin else set())
             ):
                 self.send_json({"error": "Cross-origin access is disabled"}, 403)
                 return False
-            if self.headers.get("Sec-Fetch-Site") == "cross-site":
+            navigation = (
+                self.command in {"GET", "HEAD"}
+                and self.headers.get("Sec-Fetch-Mode") == "navigate"
+                and self.headers.get("Sec-Fetch-Dest") == "document"
+            )
+            if self.headers.get("Sec-Fetch-Site") == "cross-site" and not navigation:
                 self.send_json({"error": "Cross-site access is disabled"}, 403)
                 return False
             return True
@@ -986,7 +997,12 @@ def make_server(root: Path, port: int = 0, instance: str | None = None) -> Threa
             except (OSError, RuntimeError, *database_errors()):
                 self.send_json({"error": "Artifact worker could not start"}, 503)
 
-    return ThreadingHTTPServer((config.host, port), Handler)
+    return Handler
+
+
+def make_server(root: Path, port: int = 0, instance: str | None = None) -> ThreadingHTTPServer:
+    config = RuntimeConfig.load(root)
+    return ThreadingHTTPServer((config.host, port), make_handler(root, instance))
 
 
 def dashboard_status(root: Path) -> dict:

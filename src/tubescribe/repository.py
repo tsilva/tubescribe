@@ -647,6 +647,21 @@ class SQLClaims:
 
         self.db = open_runtime(root)
 
+    def defer_downloads(self, seconds):
+        stamp = database_clock(self.db)
+        with self.db:
+            self.db.execute(
+                "INSERT INTO claims VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET "
+                "expires=CASE WHEN claims.expires>excluded.expires THEN claims.expires ELSE excluded.expires END",
+                ("backoff:download", "rate-limit", stamp + seconds),
+            )
+
+    def download_delay(self):
+        row = self.db.execute(
+            "SELECT expires FROM claims WHERE resource='backoff:download'"
+        ).fetchone()
+        return max(0, row[0] - database_clock(self.db)) if row else 0
+
     def acquire(self, resource, owner, *, ttl=90, clock=None):
         stamp = time.time() if clock is None else clock
         with self.db:

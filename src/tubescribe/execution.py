@@ -183,7 +183,10 @@ def pipeline_lock(root):
 
     config = RuntimeConfig.load(root)
     if config.network:
-        with lease(root, "worker:" + config.worker_id, wait=True):
+        # Each network execution thread owns its own lifetime. Nested stages on the
+        # same thread remain reentrant; sibling videos retain independent fencing.
+        resource = f"worker:{config.worker_id}:{threading.get_ident()}"
+        with lease(root, resource, wait=True):
             yield
     else:
         with worker_lock(root):
@@ -206,9 +209,22 @@ def recovery_job(store, job_id):
         yield True
 
 
+def defer_downloads(root, seconds=1800):
+    """Share YouTube's cooldown across workers without consuming stage attempts."""
+    from contextlib import closing
+
+    from .config import RuntimeConfig
+
+    if RuntimeConfig.load(root).network:
+        with closing(Claims(root)) as claims:
+            claims.defer_downloads(seconds)
+
+
 @contextmanager
 def capacity(root, kind):
     """Independent database leases bound downloads, GPU inference, and agent calls."""
+    import sys
+
     from .config import RuntimeConfig
 
     config = RuntimeConfig.load(root)
@@ -218,24 +234,31 @@ def capacity(root, kind):
     slots = {"download": config.downloads, "gpu": config.gpu_slots, "agent": config.agent_slots}[
         kind
     ]
-    while True:
-        for slot in range(slots):
-            context = lease(root, f"capacity:{kind}:{slot}")
-            try:
-                context.__enter__()
-            except ClaimBusy:
+    cooldown = Claims(root) if kind == "download" else None
+    try:
+        while True:
+            if cooldown and (delay := cooldown.download_delay()) > 0:
+                time.sleep(min(30, max(1, delay)))
                 continue
-            try:
-                yield
-            except BaseException:
-                import sys
-
-                context.__exit__(*sys.exc_info())
-                raise
-            else:
-                context.__exit__(None, None, None)
-            return
-        time.sleep(0.2)
+            for slot in range(slots):
+                context = lease(root, f"capacity:{kind}:{slot}")
+                try:
+                    context.__enter__()
+                except ClaimBusy:
+                    continue
+                try:
+                    # A previous downloader can install a cooldown while this one
+                    # waits for the slot. Recheck before any YouTube request starts.
+                    if cooldown and cooldown.download_delay() > 0:
+                        continue
+                    yield
+                    return
+                finally:
+                    context.__exit__(*sys.exc_info())
+            time.sleep(0.2)
+    finally:
+        if cooldown:
+            cooldown.close()
 
 
 @contextmanager

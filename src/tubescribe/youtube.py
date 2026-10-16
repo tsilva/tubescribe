@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import sys
+from functools import wraps
 from pathlib import Path
 
 TABS = {"upload": "videos", "short": "shorts", "stream": "streams"}
@@ -112,7 +113,13 @@ def resolve(url: str) -> dict:
 
 
 def discover(channel_id: str, kind: str, limit=None) -> list[dict]:
-    args = ["--flat-playlist", "--dump-single-json", "--skip-download"]
+    args = [
+        "--flat-playlist",
+        "--dump-single-json",
+        "--skip-download",
+        "--extractor-args",
+        "youtubetab:approximate_date",
+    ]
     if limit:
         args += ["--playlist-end", str(limit)]
     try:
@@ -141,6 +148,22 @@ def discover(channel_id: str, kind: str, limit=None) -> list[dict]:
     return videos
 
 
+def shared_backoff(function):
+    @wraps(function)
+    def invoke(root, *args, **kwargs):
+        try:
+            return function(root, *args, **kwargs)
+        except YouTubeError as error:
+            if error.kind == "rate_limit":
+                from .execution import defer_downloads
+
+                defer_downloads(root)
+            raise
+
+    return invoke
+
+
+@shared_backoff
 def download(root: Path, video_id: str, *, concurrent_fragments=1) -> tuple[Path, dict]:
     if not ID.fullmatch(video_id):
         raise ValueError("Invalid video ID")
@@ -195,6 +218,7 @@ def details(video_id: str) -> dict:
     )
 
 
+@shared_backoff
 def download_video(root: Path, video_id: str) -> tuple[Path, dict]:
     """Cache a modest video stream for visual inspection, independently of ASR audio."""
     if not ID.fullmatch(video_id):
@@ -210,7 +234,7 @@ def download_video(root: Path, video_id: str) -> tuple[Path, dict]:
             "--dump-json",
             "--no-simulate",
             "--format",
-            "bestvideo[height<=720]/best[height<=720]",
+            "bestvideo[height<=720][protocol^=m3u8]/bestvideo[height<=720]/best[height<=720]",
             "--concurrent-fragments",
             "1",
             "--abort-on-unavailable-fragments",

@@ -268,6 +268,68 @@ class Artifacts(unittest.TestCase):
             build_one(self.store, self.fixture.job["id"], "summary", bridge=self.bridge)
         self.assertEqual(self.requests, 0)
 
+    def test_rejected_durable_response_starts_fresh_run_with_bounded_attempts(self):
+        directories = []
+        instructions = []
+
+        def configured_runner(store, bridge, key):
+            directory = store.root / key
+            directories.append(directory)
+
+            def response(payload, *_):
+                instructions.append(payload["instructions"])
+                journal = directory / "agent-run.json"
+                if journal.exists():
+                    return json.loads(journal.read_text())
+                result = {
+                    "output": {
+                        "markdown": "# Summary\n\nStructural changes weaken old signals.",
+                        "used_image_ids": [],
+                        "evidence": [{"claim": "Signals change.", "source_quote": QUOTE}],
+                    }
+                }
+                if len(directories) == 1:
+                    result["output"]["evidence"][0]["source_quote"] = (
+                        "An invented quote absent from the source."
+                    )
+                journal.write_text(json.dumps(result))
+                return result
+
+            return Mock(run=Mock(side_effect=response))
+
+        with patch("tubescribe.inference.configured_runner", side_effect=configured_runner):
+            with self.assertRaisesRegex(ValueError, "evidence quote"):
+                build_one(self.store, self.fixture.job["id"], "summary", bridge=self.bridge)
+            self.assertEqual(self.row()["attempts"], 1)
+            self.assertIsNone(self.row()["output_dir"])
+            self.assertTrue((directories[0] / "agent-run.json").is_file())
+            self.assertTrue(
+                build_one(self.store, self.fixture.job["id"], "summary", bridge=self.bridge)
+            )
+            # Simulate reconnecting to that valid durable response after a caller
+            # interruption. Its retry guidance must remain byte-for-byte stable.
+            (directories[1] / "response.json").unlink()
+            self.store.stage_update(
+                "artifact",
+                self.fixture.job["id"],
+                workflow="summary",
+                state="pending",
+                stage="model",
+                output_dir=directories[1].relative_to(self.store.root).as_posix(),
+                response_sha256=None,
+                error="Interrupted; checkpoints retained",
+            )
+            self.assertTrue(
+                build_one(self.store, self.fixture.job["id"], "summary", bridge=self.bridge)
+            )
+        self.assertNotEqual(directories[0], directories[1])
+        self.assertEqual(self.row()["attempts"], 2)
+        self.assertEqual(self.row()["state"], "complete")
+        self.assertNotIn("Previous attempt failed", instructions[0])
+        self.assertIn("at least five whitespace-separated words", instructions[1])
+        self.assertEqual(directories[1], directories[2])
+        self.assertEqual(instructions[1], instructions[2])
+
     def test_pipeline_resumes_summary_failure_after_earlier_attempt_budgets(self):
         with self.store.db:
             self.store.db.execute("UPDATE jobs SET asr_attempts=3")

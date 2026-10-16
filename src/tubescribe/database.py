@@ -113,6 +113,10 @@ def connect(root, *, readonly=False, must_exist=False):
     from .config import database_path
 
     if url := network_database():
+        if readonly:
+            # Session-level read-only settings must not enter a transaction pool
+            # that can later lend that backend to a writing worker.
+            url = os.environ.get("TUBESCRIBE_DATABASE_UNPOOLED_URL") or url
         return PostgreSQLConnection(url, readonly=readonly)
     path = database_path(root)
     db = (

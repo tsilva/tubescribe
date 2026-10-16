@@ -6,7 +6,9 @@ import re
 import shutil
 import sqlite3
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from itertools import islice
 from pathlib import Path
 
 from .blobs import atomic_write, checked_key, file_digest
@@ -122,20 +124,41 @@ def restore_archive(store, source):
                 raise ValueError(
                     "Restore requires empty objects or matching partial restore contents"
                 )
-        for key, checksum in objects.items():
+        def restore_object(item):
+            key, checksum = item
             ref = store.blobs.put_file(key, source / key)
             if ref.sha256 != checksum or not store.exists(key, checksum):
                 raise ValueError("Restored object verification failed")
+
+        if store.config.s3_bucket:
+            # Objects are independent; publish records only after every upload has
+            # passed its checksum check. Bound both in-flight work and memory.
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                pending = iter(objects.items())
+                while batch := list(islice(pending, 8)):
+                    list(pool.map(restore_object, batch))
+        else:
+            for item in objects.items():
+                restore_object(item)
         with store.db:
             from .execution import assert_owned
 
             assert_owned(store.db, store.root)
             for table in tables:
                 fields = columns(store.db, table)
-                for row in incoming.execute(f"SELECT {','.join(fields)} FROM {table}"):
-                    store.db.execute(
+                rows = incoming.execute(f"SELECT {','.join(fields)} FROM {table}")
+                if store.config.network:
+                    # COPY keeps a remote restore inside one transaction without a
+                    # network round trip for every catalogue row.
+                    with store.db.connection.cursor().copy(
+                        f"COPY {table}({','.join(fields)}) FROM STDIN"
+                    ) as copy:
+                        for row in rows:
+                            copy.write_row(tuple(row))
+                else:
+                    store.db.executemany(
                         f"INSERT INTO {table}({','.join(fields)}) VALUES({','.join('?' for _ in fields)})",
-                        row,
+                        rows,
                     )
             if store.config.network:
                 for table in ("jobs", "runtime_events"):

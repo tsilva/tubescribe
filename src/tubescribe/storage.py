@@ -55,6 +55,7 @@ class Store:
 
         self.config = RuntimeConfig.load(self.root)
         self._uploaded = {}
+        self._recovery_materialized = None
         from .s3 import S3Artifacts
 
         self.blobs = blobs or (
@@ -83,17 +84,26 @@ class Store:
             return False
 
     def materialize(self, key, checksum=None):
-        from .blobs import checked_key
+        from .blobs import checked_key, file_digest
 
         key = checked_key(key)
         path = (self.root / key).resolve()
         if not path.is_relative_to(self.root):
             raise ValueError("Scratch path escapes runtime directory")
         if not self.local_blobs:
-            self.blobs.copy_to(key, path, checksum)
+            cache = self._recovery_materialized
+            verified = cache.get(key) if cache is not None else None
+            if (
+                verified
+                and (checksum is None or checksum == verified)
+                and path.is_file()
+                and file_digest(path) == verified
+            ):
+                return path
+            ref = self.blobs.copy_to(key, path, checksum)
+            if cache is not None:
+                cache[key] = ref.sha256
         elif checksum:
-            from .blobs import file_digest
-
             if file_digest(path) != checksum:
                 raise ValueError("Artifact content does not match its reference")
         return path
@@ -105,8 +115,15 @@ class Store:
         if not (self.root / key).resolve().is_relative_to(self.root):
             raise ValueError("Scratch prefix escapes runtime directory")
         if not self.local_blobs:
-            for name in self.blobs.keys(key.rstrip("/") + "/"):
-                self.materialize(name)
+            names = self.blobs.keys(key.rstrip("/") + "/")
+            if self._recovery_materialized is not None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(self.materialize, names))
+            else:
+                for name in names:
+                    self.materialize(name)
         return self.root / key
 
     def persist_media(self, path):
@@ -188,6 +205,17 @@ class Store:
             return False
 
     def recover(self):
+        # Publications have immutable keys and recovery leases each idle video.
+        # Reuse only copies fetched and checksum-verified during this scan; never
+        # trust a cache left by an earlier process or skip later remote validation.
+        previous = self._recovery_materialized
+        self._recovery_materialized = {}
+        try:
+            return self._recover()
+        finally:
+            self._recovery_materialized = previous
+
+    def _recover(self):
         self.reset_interrupted()
         # Reopen completed jobs only if their authoritative content has vanished/corrupted.
         for r in self.transcript_records():

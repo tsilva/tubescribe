@@ -92,6 +92,27 @@ class Dashboard(unittest.TestCase):
             self.assertEqual({f["format"] for f in saved["files"]}, {"md", "srt", "txt", "json"})
         self.assertFalse(snapshot(self.root)["worker"]["running"])
 
+    def test_published_summary_link_survives_empty_web_scratch(self):
+        job_id = self.store.db.execute("SELECT id FROM jobs WHERE video_id='saved'").fetchone()[0]
+        self.store.ensure_stage("artifact", job_id, workflow="summary")
+        self.store.stage_update(
+            "artifact",
+            job_id,
+            workflow="summary",
+            state="complete",
+            output_dir="artifacts/published-remote/summary",
+            manifest_sha256="a" * 64,
+        )
+        self.assertFalse((self.root / "artifacts/published-remote/summary").exists())
+        from unittest.mock import patch
+
+        with patch(
+            "tubescribe.storage.Store.materialize_prefix",
+            side_effect=AssertionError("Listing must not download publication bundles"),
+        ):
+            saved = next(j for j in snapshot(self.root)["jobs"] if j["video_id"] == "saved")
+        self.assertIn("/artifacts/summary/", saved["summary_url"])
+
     def test_videos_are_unique_across_profiles_and_empty_channels_visible(self):
         self.store.index(
             "channel",

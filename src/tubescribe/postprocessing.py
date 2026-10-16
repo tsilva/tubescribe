@@ -385,10 +385,15 @@ The initial input is a visual-reference SEARCH INDEX, not the full transcript. F
 using that index. Then call get_full_transcript exactly once and read the WHOLE SRT before writing.
 If full reading reveals a materially missed visual, you may inspect it, but prefer finishing searches
 before loading the full SRT so it is not carried through every inspection turn. Preserve all substantive discussion in chronological order: this is a cleaned
-transcript, NOT a summary or an investment report. Remove filler and join broken subtitle sentences;
+transcript, NOT a summary or an investment report. Remove filler only WITHIN a speaker turn and join broken subtitle sentences from that same speaker;
 add useful section headings, paragraphs, speaker labels, and timestamp links when supported by the source URL. Use plain timestamps otherwise. Do not add
 facts absent from the source. Correct an ASR term only where context or inspected on-screen text
 clearly establishes it. Preserve competing proper-name spellings unless an explicit source correction or inspected label establishes equivalence; a later differently spelled name alone does not prove an earlier one was mistaken. Preserve unresolved ambiguity and every untranscribed-speech annotation.
+Preserve EVERY source speaker change in exactly its original order, including one-word interjections,
+backchannels, and fragments such as "And", "I", or "if I". Keep each as its own labelled turn with
+its source timestamp. Never remove a whole turn as filler, merge it into another voice, or repair
+an apparent diarization error by reassigning its words. Join cues only when no different speaker
+intervenes. Check the complete source/output speaker-turn sequences before returning the document.
 
 Try to identify each diarized speaker from explicit self-introductions, introductions by another
 speaker, or on-screen presenter/name cards supported by who is speaking. Inspect opening title/name

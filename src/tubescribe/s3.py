@@ -140,6 +140,16 @@ class S3Artifacts:
                 names.extend(checked_key(item["Key"]) for item in page.get("Contents", []))
         return sorted(names)
 
+    def inventory(self):
+        """List display metadata in pages, without one HEAD request per object."""
+        with self.request(self.bucket, missing=False):
+            for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket):
+                for item in page.get("Contents", []):
+                    yield checked_key(item["Key"]), {
+                        "bytes": item["Size"],
+                        "modified_at": item["LastModified"].timestamp(),
+                    }
+
     def delete(self, key):
         key = checked_key(key)
         with self.request(key):

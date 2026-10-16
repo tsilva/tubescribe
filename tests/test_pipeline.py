@@ -9,7 +9,7 @@ from tubescribe.diarization import MODEL, REVISION
 from tubescribe.storage import Store, worker_lock
 from tubescribe.subtitles import render_markdown, render_srt
 from tubescribe.worker import InferenceUnavailable, ensure_ready, work
-from tubescribe.youtube import YouTubeError, discover, run
+from tubescribe.youtube import YouTubeError, discover, download_video, run
 
 CID = "UCabcdefghijklmnopqrstuv"
 VID = "abcdefghijk"
@@ -438,6 +438,39 @@ class Pipeline(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 run(["--dump-single-json"])
             kill.assert_called_once_with(12345, 15)
+
+    def test_screenshot_video_prefers_accessible_hls_with_direct_fallback(self):
+        from yt_dlp import YoutubeDL
+
+        path = self.store.root / "source.mp4"
+        path.write_bytes(b"video")
+        with patch(
+            "tubescribe.youtube.run",
+            side_effect=[{"id": VID}, {"_filename": str(path)}],
+        ) as downloader:
+            downloaded, _ = download_video(self.store.root, VID)
+        self.assertEqual(downloaded, path)
+        args = downloader.call_args.args[0]
+        self.assertIn("--abort-on-unavailable-fragments", args)
+        selector = args[args.index("--format") + 1]
+        formats = [
+            {"format_id": "hls", "height": 720, "protocol": "m3u8_native"},
+            {"format_id": "direct", "height": 720, "protocol": "https"},
+            {"format_id": "too-large", "height": 1080, "protocol": "m3u8_native"},
+        ]
+        formats = [
+            {**f, "vcodec": "h264", "acodec": "none", "url": "https://example.com/video"}
+            for f in formats
+        ]
+        with YoutubeDL({"quiet": True}) as ydl:
+            choose = ydl.build_format_selector(selector)
+            for available, expected in [(formats, "hls"), ([formats[1]], "direct")]:
+                selected = list(
+                    choose(
+                        {"formats": available, "has_merged_format": False, "incomplete_formats": False}
+                    )
+                )
+                self.assertEqual([f["format_id"] for f in selected], [expected])
 
 
 if __name__ == "__main__":

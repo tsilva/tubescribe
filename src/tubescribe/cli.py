@@ -62,6 +62,12 @@ def main():
     c.add_argument("--enqueue-only", action="store_true", help="Submit work for queue serve")
     c.add_argument("--bridge")
     c.add_argument("--video-cache")
+    c = sub.add_parser(
+        "feed-poll", help="Incrementally discover channel publications and queue full processing"
+    )
+    c.add_argument("--days", type=int, default=7)
+    c.add_argument("--profile", default="turbo-v1")
+    c.add_argument("--bridge")
     c = sub.add_parser("work")
     c.add_argument("--video", action="append")
     c.add_argument("--channel")
@@ -207,6 +213,7 @@ def main():
         "queue",
         "agent",
         "ensure-recent",
+        "feed-poll",
     }:
         signal.signal(signal.SIGTERM, stop_worker)
 
@@ -421,6 +428,14 @@ def main():
                     out({"latest": [v for _, v in chosen]})
             if errors:
                 return 1
+        elif args.command == "feed-poll":
+            from .feed_watch import poll_feeds
+
+            result = poll_feeds(
+                store, endpoint(), profile=args.profile, days=args.days, bridge=args.bridge
+            )
+            out(result)
+            return int(bool(result["errors"]))
         elif args.command == "ensure-recent":
             from .recent import ensure_recent
 

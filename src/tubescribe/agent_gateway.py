@@ -244,7 +244,14 @@ def make_gateway(root, upstream, *, port=0, runner_factory=AgentRunner):
                 return
             parts = urlsplit(self.path).path.strip("/").split("/")
             if parts == ["health"]:
-                return self.send({"service": "tubescribe-agent-gateway", "protocol": "durable-v1"})
+                return self.send(
+                    {
+                        "service": "tubescribe-agent-gateway",
+                        "protocol": "durable-v1",
+                        "concurrency": config.agent_concurrency,
+                        "agent_slots": config.agent_slots,
+                    }
+                )
             if parts == ["ready"]:
                 from .operations import readiness
 
