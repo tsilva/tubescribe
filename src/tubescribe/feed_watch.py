@@ -1,10 +1,12 @@
 """Incremental public-feed discovery feeding the existing durable video pipeline."""
 
 import json
+import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from . import youtube
-from .execution import capacity, defer_downloads, lease
+from .execution import LeaseLost, assert_owned, capacity, defer_downloads, lease
 from .pipeline import Plan
 from .recent import ensure_recent, publication_time
 from .submission import Dispatcher, JobRequest
@@ -181,6 +183,8 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                         )
                         if stamp >= cutoff:
                             selected.add(video["id"])
+                    except LeaseLost:
+                        raise
                     except Exception as error:
                         if isinstance(error, youtube.YouTubeError) and error.kind == "rate_limit":
                             raise
@@ -191,6 +195,8 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                                 "error": str(error),
                             }
                         )
+            except LeaseLost:
+                raise
             except Exception as error:
                 result["errors"].append({"channel_id": source["id"], "error": str(error)})
                 if isinstance(error, youtube.YouTubeError) and error.kind == "rate_limit":
@@ -232,3 +238,70 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                 )
             )
     return result
+
+
+def watch_feeds(root, endpoint, *, profile="turbo-v1", days=7, bridge=None,
+                interval=900, on_poll=None, stop=None, clock=None):
+    """Reopen ownership and connections for each poll, including after sleep/loss."""
+    from .blobs import atomic_write
+    from .storage import Store
+
+    if interval < 30:
+        raise ValueError("Feed watch interval must be at least 30 seconds")
+    root = Path(root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    checkpoint = root / "last-poll.json"
+    stop = stop or threading.Event()
+    clock = clock or (lambda: datetime.now(UTC))
+
+    def deadline():
+        try:
+            value = datetime.fromisoformat(json.loads(checkpoint.read_text())["next_poll_at"])
+            return value if value.tzinfo else datetime.min.replace(tzinfo=UTC)
+        except (OSError, ValueError, KeyError, TypeError):
+            return datetime.min.replace(tzinfo=UTC)
+
+    while not stop.is_set():
+        delay = max(0, min(interval, (deadline() - clock()).total_seconds()))
+        if delay and stop.wait(delay):
+            break
+        started = clock()
+        store = None
+        try:
+            store = Store(root)
+            # Do not hold ownership or a database session across the idle interval.
+            with lease(root, "feed-watcher", reentrant=False):
+                # Another supervised instance may already have completed this poll.
+                if deadline() > clock():
+                    continue
+                result = poll_feeds(
+                    store, endpoint, profile=profile, days=days, bridge=bridge, clock=started
+                )
+                with store.db:
+                    assert_owned(store.db, root)
+                due = max(started + timedelta(seconds=interval), clock() + timedelta(seconds=30))
+                result["next_poll_at"] = due.isoformat()
+                atomic_write(checkpoint, json.dumps(result, indent=2).encode())
+        except Exception as error:
+            # The lease context has unwound before retrying. In particular, never
+            # continue using thread-local fencing for an expired watcher owner.
+            result = {
+                "checked_at": clock().isoformat(),
+                "videos": [],
+                "errors": [{"error": str(error)}],
+                "next_poll_at": (clock() + timedelta(seconds=30)).isoformat(),
+            }
+            # A competing poller owns the shared checkpoint; don't postpone its work.
+            from .execution import ClaimBusy
+
+            if isinstance(error, ClaimBusy):
+                if stop.wait(30):
+                    break
+                continue
+            if deadline() <= started:
+                atomic_write(checkpoint, json.dumps(result, indent=2).encode())
+        finally:
+            if store is not None:
+                store.db.close()
+        if on_poll:
+            on_poll(result)

@@ -32,7 +32,7 @@ def work_parallel(store, endpoint, **options):
     active = {}
     with pipeline_lock(store.root):
         log("recovery_start")
-        store.recover()
+        store.recover(**scope)
         log("recovery_complete")
         skipped = store.completed(plan, **scope)
         log("parallel_start", concurrency=slots, skipped=skipped)

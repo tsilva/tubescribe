@@ -398,9 +398,11 @@ class SQLJobRepository:
             )
         ]
 
-    def reset_interrupted(self, stage_name=None):
+    def reset_interrupted(self, stage_name=None, *, job_ids=None):
         from .execution import assert_owned
 
+        if job_ids is not None and not job_ids:
+            return
         tables = {
             "asr": "jobs",
             "diarization": "diarizations",
@@ -418,9 +420,12 @@ class SQLJobRepository:
                 if stage == "artifact":
                     values += ",run_pid=NULL"
                 key = "id" if stage == "asr" else "job_id"
+                scope = ""
+                if job_ids is not None:
+                    scope = f" AND {key} IN (" + ",".join("?" for _ in job_ids) + ")"
                 self.db.execute(
-                    f"UPDATE {table} SET {values} WHERE state='active' AND NOT EXISTS(SELECT 1 FROM claims WHERE resource='job:'||{table}.{key} AND expires>?)",
-                    (database_clock(self.db),),
+                    f"UPDATE {table} SET {values} WHERE state='active' AND NOT EXISTS(SELECT 1 FROM claims WHERE resource='job:'||{table}.{key} AND expires>?)" + scope,
+                    (database_clock(self.db), *(job_ids or ())),
                 )
 
     def stage_inputs(self, completed_stage, *, order="published", **scope):
@@ -807,7 +812,7 @@ class ArchiveViews:
                 else ("j.video_id=? AND j.profile=?", (video_id, profile))
             )
             row = db.execute(
-                "SELECT j.id AS job_id,j.video_id,j.profile,j.asr_state,v.title,v.url,t.json_path,d.state AS diarization_state,p.state AS postprocessing_state FROM jobs j JOIN videos v ON v.id=j.video_id LEFT JOIN transcripts t ON t.job_id=j.id LEFT JOIN diarizations d ON d.job_id=j.id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE "
+                "SELECT j.id AS job_id,j.video_id,j.profile,j.asr_state,v.title,v.url,t.json_path,d.state AS diarization_state,p.state AS postprocessing_state,p.output_dir AS postprocessing_dir,p.manifest_sha256 AS postprocessing_manifest_sha256 FROM jobs j JOIN videos v ON v.id=j.video_id LEFT JOIN transcripts t ON t.job_id=j.id LEFT JOIN diarizations d ON d.job_id=j.id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE "
                 + condition,
                 values,
             ).fetchone()
@@ -855,7 +860,7 @@ class ArchiveViews:
 
     def srt(self, job_id):
         return self._one(
-            "SELECT t.json_path,v.title,v.id,p.state FROM transcripts t JOIN jobs j ON j.id=t.job_id JOIN videos v ON v.id=j.video_id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.id=?",
+            "SELECT t.json_path,v.title,v.id,p.state,j.profile FROM transcripts t JOIN jobs j ON j.id=t.job_id JOIN videos v ON v.id=j.video_id LEFT JOIN postprocessings p ON p.job_id=j.id WHERE j.id=?",
             (job_id,),
         )
 
@@ -891,7 +896,7 @@ class ArchiveViews:
                            ,p.state AS postprocessing_state,p.stage AS postprocessing_stage,
                            p.error AS postprocessing_error,p.next_retry AS postprocessing_next_retry,
                            p.updated_at AS postprocessing_updated_at,p.attempts AS postprocessing_attempts,
-                           p.figures,p.agent_seconds,p.output_dir AS postprocessing_dir,
+                           p.figures,p.agent_seconds,p.output_dir AS postprocessing_dir,p.manifest_sha256 AS postprocessing_manifest_sha256,
                            a.state AS summary_state,a.stage AS summary_stage,a.error AS summary_error,
                            a.next_retry AS summary_next_retry,a.updated_at AS summary_updated_at,
                            a.attempts AS summary_attempts,a.output_dir AS summary_dir

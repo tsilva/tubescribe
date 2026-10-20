@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TubeScribe · Your library</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="alternate" type="application/json" href="/api/library">
   <script src="/app.js" defer></script>
 </head>
 <body class="library-app">
@@ -21,16 +22,11 @@
       <nav class="scope-nav" aria-label="Library levels"><label>Browse <select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select></label><button id="rolling-summary" class="button" aria-pressed="true">7-day summary</button></nav>
       <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search channels, video titles, or IDs…"></div><span id="result-count" role="status"></span></div>
       <div id="feed" class="video-feed" tabindex="-1" aria-label="Video feed"><p class="empty">Loading your videos…</p></div>
-      <footer>Transcripts, context, and the ideas worth keeping.<span>Library updates automatically</span></footer>
+      <footer><a href="/library/">Browse saved content</a> · <a href="/llms.txt">Agent reading guide</a> · Transcripts, context, and the ideas worth keeping.<span>Library updates automatically</span></footer>
     </div>
     <aside id="reader" class="reader" aria-labelledby="reader-title">
       <div class="reader-empty"><p class="eyebrow">YOUR READING SPACE</p><h2 id="reader-title">Find your next idea.</h2><p>Select a video to read its summary or transcript.</p></div>
     </aside>
   </main>
-  <dialog id="transcript-preview" aria-labelledby="preview-title">
-    <div class="dialog-heading"><h2 id="preview-title">Transcript</h2><button id="close-preview" class="icon-button" aria-label="Close transcript"><img src="/icons/x-mark.svg" alt=""></button></div>
-    <div class="preview-actions"><label>Format <select id="preview-format" aria-label="Transcript format"></select></label><a id="preview-download" class="button">Download</a><a id="preview-srt" class="button hidden">View SRT</a></div>
-    <div id="preview-content"></div>
-  </dialog>
 </body>
 </html>

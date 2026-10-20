@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 
 from . import postprocessing as engine
+from .agent_gateway import DurableRunFailed
 from .database import database_errors, transient_errors
 from .execution import capacity, job_stage, pipeline_lock
 from .inference import PostprocessingUnavailable
@@ -106,8 +107,10 @@ def cleanup_video(store, video_id):
         log("video_cleanup_failed", video_id=video_id, error=str(error))
 
 
-def recover(store):
+def recover(store, *, job_ids=None):
     for row in store.stage_records("postprocessing", states=("complete",)):
+        if job_ids is not None and row["job_id"] not in job_ids:
+            continue
         from .execution import recovery_job
 
         with recovery_job(store, row["job_id"]) as idle:
@@ -390,7 +393,7 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             **{COUNTERS[stage]: attempts},
             **(
                 {"output_dir": None, "save_attempts": row["save_attempts"]}
-                if stage == "process" and isinstance(error, ValueError)
+                if stage == "process" and isinstance(error, (ValueError, DurableRunFailed))
                 else {}
             ),
         )

@@ -430,36 +430,11 @@ class Artifacts(unittest.TestCase):
         ) as client:
             route = f"/artifacts/{self.fixture.job['id']}/summary/"
             ready = client.get(route)
-            self.assertIn("Build artifact", ready.text)
-            self.assertIn('src="/artifact.js"', ready.text)
-            self.assertIn("script-src 'self'", ready.headers["content-security-policy"])
-            script = client.get("/artifact.js")
-            self.assertEqual(script.status_code, 200)
-            self.assertIn("event.preventDefault()", script.text)
-            self.assertIn('method: "POST"', script.text)
-            self.assertEqual(client.post(route + "run", data={"token": "bad"}).status_code, 403)
-            self.assertEqual(
-                client.post(
-                    route + "run",
-                    data={"token": "test-token"},
-                    headers={"Origin": "https://evil.example"},
-                ).status_code,
-                403,
-            )
-            child = Mock()
-            child.poll.return_value = None
-            child.pid = 12345
-            with patch("tubescribe.dashboard.subprocess.Popen", return_value=child) as spawn:
-                self.assertEqual(
-                    client.post(route + "run", data={"token": "test-token"}).status_code, 303
-                )
-                self.assertEqual(
-                    client.post(route + "run", data={"token": "test-token"}).status_code, 303
-                )
-                self.assertEqual(spawn.call_count, 1)
-                command = spawn.call_args.args[0]
-                self.assertIn("tubescribe.cli", command)
-                self.assertIn("artifacts", command)
+            self.assertNotIn("Build artifact", ready.text)
+            self.assertNotIn("<form", ready.text)
+            self.assertEqual(client.get("/artifact.js").status_code, 404)
+            for token in ("bad", "test-token"):
+                self.assertEqual(client.post(route + "run", data={"token": token}).status_code, 405)
             self.assertEqual(self.build()["completed"], 1)
             page = client.get(route)
             self.assertEqual(page.status_code, 200)

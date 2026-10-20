@@ -1,6 +1,7 @@
 """Executable cloud seams, ownership recovery and delivery contracts."""
 
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -20,6 +21,41 @@ from tubescribe.submission import Dispatcher, Inline, JobRequest, LocalProcess
 
 
 class Runtime(unittest.TestCase):
+    def test_heartbeat_reconnects_after_database_error_but_never_reacquires_expired_owner(self):
+        from tubescribe.execution import _heartbeat
+
+        broken, healthy = Mock(), Mock()
+        broken.renew.side_effect = sqlite3.OperationalError("connection lost")
+        healthy.renew.side_effect = [True, False]
+        stop = Mock()
+        stop.wait.return_value = False
+        with patch("tubescribe.execution.Claims", side_effect=[broken, healthy]) as connect:
+            _heartbeat(self.root, "feed-watcher", "original-owner", 90, stop)
+        self.assertEqual(connect.call_count, 2)
+        self.assertEqual([c.args[0] for c in stop.wait.call_args_list], [30, 5, 30])
+        self.assertEqual(healthy.renew.call_count, 2)
+        healthy.renew.assert_called_with("feed-watcher", "original-owner", ttl=90)
+        broken.close.assert_called_once()
+        healthy.close.assert_called_once()
+        broken.acquire.assert_not_called()
+        healthy.acquire.assert_not_called()
+
+    def test_scoped_recovery_only_resets_selected_profile_and_jobs(self):
+        other = "lmnopqrstuv"
+        self.store.index(CID, "upload", [{"id": other, "title": "Other", "url": "https://youtube.com/watch?v=" + other}], "turbo-v1")
+        self.store.index(CID, "upload", [{"id": VID, "title": "Test", "url": "https://youtube.com/watch?v=" + VID}], "other-profile")
+        with self.store.db:
+            self.store.db.execute("UPDATE jobs SET state='active',asr_state='active'")
+        self.store.recover(ids=[VID], profile="turbo-v1")
+        selected = self.store.pipeline_jobs(ids=[VID])[0]
+        self.assertEqual(selected["state"], "pending")
+        self.assertEqual(self.store.pipeline_jobs(ids=[other])[0]["state"], "active")
+        self.assertEqual(self.store.pipeline_jobs(ids=[VID], profile="other-profile")[0]["state"], "active")
+        self.store.recover(ids=[])
+        self.assertEqual(self.store.pipeline_jobs(ids=[other])[0]["state"], "active")
+        self.store.recover()
+        self.assertEqual(self.store.pipeline_jobs(ids=[other])[0]["state"], "pending")
+
     def test_shared_download_cooldown_is_durable_and_never_shortened(self):
         claims = Claims(self.root)
         self.addCleanup(claims.close)
@@ -289,6 +325,71 @@ class Runtime(unittest.TestCase):
         with self.assertRaises(ValueError):
             HardwarePolicy().check("cpu", "")
         HardwarePolicy(device=None, gpu=None).check("cpu", "")
+
+    def test_agent_runner_preserves_upstream_failure_detail(self):
+        runner = AgentRunner(
+            "http://127.0.0.1:1",
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(502, json={"detail": "Run exceeded its tool-call budget"})
+            ),
+        )
+        with self.assertRaisesRegex(httpx.HTTPStatusError, "tool-call budget"):
+            runner.run(
+                {"timeout_seconds": 30}, RemoteTools("https://tools.example/callback", "secret")
+            )
+
+    def test_durable_terminal_failure_is_distinct_from_uncertain_or_cancelled(self):
+        from tubescribe.agent_gateway import DurableAgentRunner, DurableRunFailed
+
+        for state in ("failed", "uncertain", "cancelled"):
+            with self.subTest(state=state):
+                runner = DurableAgentRunner(
+                    "http://127.0.0.1:1",
+                    store=self.store,
+                    run_key="runs/" + state,
+                    transport=httpx.MockTransport(
+                        lambda _, value=state: httpx.Response(200, json={"state": value})
+                    ),
+                )
+                with self.assertRaises(RuntimeError) as caught:
+                    runner.run({"timeout_seconds": 30}, None)
+                self.assertEqual(isinstance(caught.exception, DurableRunFailed), state == "failed")
+
+    def test_durable_status_retries_reconnect_to_same_run_without_new_model_request(self):
+        from tubescribe.agent_gateway import DurableAgentRunner
+
+        calls = []
+        replies = iter([
+            httpx.Response(503), httpx.Response(202, json={"state": "active"}),
+            httpx.ReadTimeout("temporary network loss"),
+            httpx.Response(200, json={"state": "complete", "result": {"output": {"markdown": "done"}}}),
+        ])
+
+        def transport(request):
+            calls.append((request.method, str(request.url), request.content))
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        runner = DurableAgentRunner("http://127.0.0.1:1", store=self.store,
+                                    run_key="runs/reconnect", transport=httpx.MockTransport(transport))
+        with patch("tubescribe.agent_gateway.time.sleep"):
+            result = runner.run({"timeout_seconds": 30}, None)
+        self.assertEqual(result["output"]["markdown"], "done")
+        self.assertEqual([c[0] for c in calls], ["POST", "POST", "GET", "GET"])
+        self.assertEqual(len({c[1] for c in calls}), 1)
+        self.assertEqual(calls[0][2], calls[1][2])
+
+    def test_durable_unavailable_gateway_has_bounded_transport_attempts(self):
+        from tubescribe.agent_gateway import DurableAgentRunner
+
+        transport = Mock(return_value=httpx.Response(503))
+        runner = DurableAgentRunner("http://127.0.0.1:1", store=self.store,
+                                    run_key="runs/unavailable", transport=httpx.MockTransport(transport))
+        with patch("tubescribe.agent_gateway.time.sleep"), self.assertRaises(httpx.HTTPStatusError):
+            runner.run({"timeout_seconds": 30}, None)
+        self.assertEqual(transport.call_count, 3)
 
     def test_logical_references_resolve_for_host_and_portable_export(self):
         references = {

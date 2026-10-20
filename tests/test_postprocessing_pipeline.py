@@ -410,6 +410,62 @@ class FinalStage(unittest.TestCase):
         self.assertEqual(self.row()["attempts"], 0)
         self.assertEqual(self.requests, 1)
 
+    def test_scoped_worker_validates_selected_bundle_without_scanning_other_videos(self):
+        self.assertEqual(self.full()["completed"], 1)
+        first = self.row()
+        other = "zyxwvutsrqp"
+        self.store.index(CID, "upload", [{"id": other, "title": "Other", "url": "https://youtube.com/watch?v=" + other}], "turbo-v1")
+        result = work(self.store, "http://127.0.0.1:1", ids=[other],
+                      postprocessing="text", summary=False, bridge=self.bridge)
+        self.assertEqual(result["completed"], 1)
+        directory = self.store.root / first["output_dir"]
+        (directory / "processed.md").write_text("corrupt")
+        calls = self.requests
+        with patch.object(self.store, "exists", wraps=self.store.exists) as reads:
+            result = work(self.store, "http://127.0.0.1:1", ids=[other],
+                          postprocessing="text", summary=False, bridge=self.bridge)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(self.requests, calls)
+        self.assertFalse(any("/" + VID + "/" in str(call.args) for call in reads.call_args_list))
+        self.assertEqual(self.store.stage_row("postprocessing", self.job["id"])["state"], "complete")
+        # Full reconciliation still finds the untouched corruption. Selecting that
+        # same video then validates and repairs it from its saved response, not ASR.
+        self.store.recover()
+        self.assertEqual(self.store.stage_row("postprocessing", self.job["id"])["state"], "pending")
+        asr_calls = self.transcribe.call_count
+        self.assertEqual(self.full()["completed"], 1)
+        self.assertEqual(self.transcribe.call_count, asr_calls)
+
+    def test_failed_durable_cleanup_gets_fresh_run_and_preserves_failure_audit(self):
+        from tubescribe.agent_gateway import DurableRunFailed
+        from tubescribe.inference import AgentRunner
+
+        directories = []
+
+        def runner(store, endpoint, key):
+            output = store.root / key
+            directories.append(output)
+            if len(directories) == 1:
+                def fail(*_):
+                    output.mkdir(parents=True, exist_ok=True)
+                    (output / "agent-run.json").write_text('{"run_id":"failed"}')
+                    raise DurableRunFailed("Upstream tool run failed")
+
+                return Mock(run=Mock(side_effect=fail))
+            return AgentRunner(endpoint)
+
+        with patch("tubescribe.inference.configured_runner", side_effect=runner):
+            self.assertEqual(self.full()["failed"], 1)
+            self.assertEqual(self.row()["attempts"], 1)
+            self.assertIsNone(self.row()["output_dir"])
+            self.assertTrue((directories[0] / "agent-run.json").is_file())
+            with self.store.db:
+                self.store.db.execute("UPDATE postprocessings SET next_retry=0")
+            self.assertEqual(self.full()["completed"], 1)
+        self.assertNotEqual(directories[0], directories[1])
+        self.assertEqual(self.row()["attempts"], 2)
+        self.assertEqual(self.transcribe.call_count, 1)
+
     def test_force_limit_preserves_other_completed_outputs(self):
         self.full()
         other = "zyxwvutsrqp"

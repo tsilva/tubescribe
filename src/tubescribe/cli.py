@@ -68,6 +68,8 @@ def main():
     c.add_argument("--days", type=int, default=7)
     c.add_argument("--profile", default="turbo-v1")
     c.add_argument("--bridge")
+    c.add_argument("--watch", action="store_true", help="Repeat with fresh per-poll ownership")
+    c.add_argument("--interval", type=int, default=900, help="Watch interval in seconds (minimum 30)")
     c = sub.add_parser("work")
     c.add_argument("--video", action="append")
     c.add_argument("--channel")
@@ -159,6 +161,8 @@ def main():
     c.add_argument("--local-port", type=int, default=18766)
     c.add_argument("--remote-port", type=int, default=18765)
     args = p.parse_args()
+    if args.command == "feed-poll" and args.interval < 30:
+        p.error("Feed watch interval must be at least 30 seconds")
     if args.command == "dashboard":
         try:
             args.port = 0 if args.port == "auto" else int(args.port)
@@ -429,8 +433,14 @@ def main():
             if errors:
                 return 1
         elif args.command == "feed-poll":
-            from .feed_watch import poll_feeds
+            from .feed_watch import poll_feeds, watch_feeds
 
+            if args.watch:
+                store.db.close()
+                return watch_feeds(
+                    args.data, endpoint(), profile=args.profile, days=args.days,
+                    bridge=args.bridge, interval=args.interval, on_poll=out,
+                )
             result = poll_feeds(
                 store, endpoint(), profile=args.profile, days=args.days, bridge=args.bridge
             )

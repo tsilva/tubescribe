@@ -236,10 +236,15 @@ def complete_valid(store, row):
         return False
 
 
-def recover(store):
+def recover(store, *, job_ids=None):
     """Repair idle jobs before selecting pipeline work."""
-    store.reset_interrupted("artifact")
+    if job_ids is None:
+        store.reset_interrupted("artifact")
+    else:
+        store.reset_interrupted("artifact", job_ids=job_ids)
     for row in store.stage_records("artifact", states=("complete",)):
+        if job_ids is not None and row["job_id"] not in job_ids:
+            continue
         from .execution import recovery_job
 
         with recovery_job(store, row["job_id"]) as idle:

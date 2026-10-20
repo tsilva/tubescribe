@@ -1,4 +1,4 @@
-"""Vercel web role: durable storage and queue submission, no processing loop."""
+"""Vercel web role: durable storage delivery, no processing or administrative routes."""
 
 import os
 import re
@@ -29,7 +29,6 @@ def hosted_handler():
     if not os.environ.get("TUBESCRIBE_PUBLIC_ORIGIN") and origins:
         os.environ["TUBESCRIBE_PUBLIC_ORIGIN"] = origins[0]
     config = RuntimeConfig.load(root)
-    secret = os.environ.get("TUBESCRIBE_FORM_SECRET", "")
     if not (
         config.network
         and config.s3_bucket
@@ -37,10 +36,9 @@ def hosted_handler():
         and config.public_origin
         and config.queued
         and os.environ["TUBESCRIBE_MIGRATIONS"] == "check"
-        and len(secret) >= 32
     ):
         raise ValueError(
             "Hosting requires PostgreSQL, S3, public origin, queue dispatch, "
-            "migration check mode and a 32-character form secret"
+            "migration check mode"
         )
-    return make_handler(root, secret, public_origins=origins)
+    return make_handler(root, public_origins=origins)

@@ -77,7 +77,7 @@ class Dashboard(unittest.TestCase):
 
     def test_snapshot_live_read_is_consistent_without_blocking_worker(self):
         with worker_lock(self.root):
-            result = self.client.get("/api/snapshot").json()
+            result = snapshot(self.root)
             self.assertTrue(result["worker"]["running"])
             self.assertEqual(result["summary"]["videos"], 4)
             self.assertEqual(result["summary"]["complete"], 0)
@@ -193,6 +193,40 @@ class Dashboard(unittest.TestCase):
         self.assertTrue(reset["full"])
         self.assertEqual(len(reset["jobs"]), 4)
 
+    def test_feed_never_scans_blob_storage_or_operational_state(self):
+        from unittest.mock import patch
+
+        with (
+            patch("tubescribe.dashboard.output_files", side_effect=AssertionError("R2 scan")),
+            patch("tubescribe.dashboard.recent_events", side_effect=AssertionError("Event scan")),
+            patch("tubescribe.storage.Store", side_effect=AssertionError("Archive writer")),
+        ):
+            response = self.client.get("/api/feed")
+        self.assertEqual(response.status_code, 200)
+        saved = next(j for j in response.json()["jobs"] if j["video_id"] == "saved")
+        self.assertIn("transcript_url", saved)
+        self.assertIn("srt_url", saved)
+
+    def test_unchanged_revision_survives_a_different_function_instance(self):
+        from tubescribe.dashboard import FeedChanges
+
+        first = self.client.get("/api/feed").json()
+        # The next function instance has none of the first instance's revision history.
+        next_instance = FeedChanges(self.root)
+        response = next_instance.get(first["revision"])
+        self.assertEqual(response["revision"], first["revision"])
+        self.assertFalse(response["full"])
+        self.assertEqual(response["jobs"], [])
+        self.assertEqual(response["removed"], [])
+
+    def test_public_cache_is_bounded_and_never_caches_identity_or_errors(self):
+        self.assertIn("s-maxage=3600", self.client.get("/").headers["cache-control"])
+        feed = self.client.get("/api/feed")
+        self.assertIn("s-maxage=5", feed.headers["cache-control"])
+        self.assertEqual(self.client.get("/api/feed?revision=x").headers["cache-control"], "no-store")
+        self.assertEqual(self.client.get("/missing").headers["cache-control"], "no-store")
+        self.assertEqual(self.client.get("/", headers={"Authorization": "Bearer anything"}).headers["cache-control"], "no-store")
+
     def test_feed_compresses_only_when_the_client_accepts_gzip(self):
         response = self.client.get("/api/feed", headers={"Accept-Encoding": "gzip"})
         self.assertEqual(response.headers["Content-Encoding"], "gzip")
@@ -202,17 +236,15 @@ class Dashboard(unittest.TestCase):
         self.assertNotIn("Content-Encoding", plain.headers)
         self.assertEqual(len(plain.json()["jobs"]), 4)
 
-    def test_preview_download_and_removed_file(self):
-        file = next(f for f in snapshot(self.root)["files"] if f["format"] == "md")
-        response = self.client.get("/api/preview", params={"path": file["path"]})
-        self.assertEqual(response.json()["content"], "**Speaker:** A saved transcript.\n")
-        self.assertFalse(response.json()["truncated"])
-        response = self.client.get(file["url"] + "&download=1")
-        self.assertEqual(response.content, (self.root / file["path"]).read_bytes())
-        self.assertIn("attachment", response.headers["content-disposition"])
-        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
-        (self.root / file["path"]).unlink()
-        self.assertEqual(self.client.get(file["url"]).status_code, 404)
+    def test_only_canonical_published_downloads_are_served(self):
+        job = next(j for j in snapshot(self.root)["jobs"] if j["video_id"] == "saved")
+        url = job["transcript_url"] + "transcript.md"
+        response = self.client.get(url)
+        self.assertEqual(response.content, b"**Speaker:** A saved transcript.\n")
+        for path in ("/api/file", "/api/preview", "/api/snapshot"):
+            self.assertEqual(self.client.get(path).status_code, 404)
+        Path(self.root / next(f["path"] for f in job["files"] if f["format"] == "md")).unlink()
+        self.assertEqual(self.client.get(url).status_code, 404)
 
     def test_srt_viewer_is_available_before_postprocessing_and_links_exact_youtube_seconds(self):
         job = next(j for j in snapshot(self.root)["jobs"] if j["video_id"] == "saved")
@@ -239,8 +271,7 @@ class Dashboard(unittest.TestCase):
         self.assertNotIn(">Open on YouTube</a>", response.text)
         self.assertNotIn(">Download SRT</a>", response.text)
         self.assertEqual(self.client.get("/icons/arrow-down-tray.svg").status_code, 200)
-        srt_file = next(f for f in job["files"] if f["format"] == "srt")
-        self.assertEqual(self.client.get(srt_file["url"]).content, original)
+        self.assertEqual(self.client.get(job["transcript_url"] + "source.srt").content, original)
         self.assertEqual(self.client.get("/transcripts/99999/srt").status_code, 404)
         path.unlink()
         self.assertEqual(self.client.get(job["srt_url"]).status_code, 404)
@@ -291,21 +322,15 @@ class Dashboard(unittest.TestCase):
         )
         self.assertEqual(self.client.post("/api/snapshot").status_code, 405)
 
-    def test_missing_db_visible_and_preview_is_bounded(self):
-        (self.root / "subtitles").mkdir()
-        (self.root / "subtitles/large.txt").write_bytes(b"x" * (2 * 1024**2 + 5))
-        preview = self.client.get("/api/preview", params={"path": "subtitles/large.txt"}).json()
-        self.assertTrue(preview["truncated"])
-        self.assertEqual(len(preview["content"]), 2 * 1024**2)
+    def test_missing_db_visible_without_initializing_an_archive(self):
         with tempfile.TemporaryDirectory() as folder:
             with make_server(Path(folder)) as empty:
                 thread = threading.Thread(target=empty.serve_forever, daemon=True)
                 thread.start()
                 try:
-                    response = httpx.get(
-                        f"http://127.0.0.1:{empty.server_port}/api/snapshot", trust_env=False
-                    )
+                    response = httpx.get(f"http://127.0.0.1:{empty.server_port}/api/library", trust_env=False)
                     self.assertEqual(response.status_code, 503)
+                    self.assertFalse((Path(folder) / "archive.sqlite3").exists())
                 finally:
                     empty.shutdown()
                     thread.join()

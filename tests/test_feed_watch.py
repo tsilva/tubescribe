@@ -1,13 +1,15 @@
 """Incremental discovery, scope validation and unchanged retry budgets."""
 
 import json
+import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from tubescribe.feed_watch import fetch_feed, poll_feeds
+from tubescribe.feed_watch import fetch_feed, poll_feeds, watch_feeds
 from tubescribe.storage import Store
 from tubescribe.youtube import YouTubeError
 
@@ -27,6 +29,69 @@ def entry(identifier=VID, stamp=None):
 
 
 class Feeds(unittest.TestCase):
+    def test_watch_recovers_expired_owner_with_new_connection_and_lease(self):
+        instant = [NOW]
+        stop = threading.Event()
+        seen, owners, results, waits = [], [], [], []
+
+        def polling(store, *_args, **_kwargs):
+            seen.append(store)
+            owners.append(store.db.execute(
+                "SELECT owner FROM claims WHERE resource='feed-watcher'"
+            ).fetchone()[0])
+            if len(seen) == 1:
+                with store.db:
+                    store.db.execute("UPDATE claims SET expires=0 WHERE resource='feed-watcher'")
+            return {"checked_at": instant[0].isoformat(), "videos": [], "errors": []}
+
+        def observe(result):
+            results.append(result)
+            if len(results) == 2:
+                stop.set()
+
+        def wait(seconds):
+            waits.append(seconds)
+            instant[0] += timedelta(seconds=seconds)
+            return False
+
+        with (
+            patch("tubescribe.feed_watch.poll_feeds", side_effect=polling),
+            patch.object(stop, "wait", side_effect=wait),
+        ):
+            watch_feeds(self.store.root, "http://127.0.0.1:1", interval=900,
+                        stop=stop, clock=lambda: instant[0], on_poll=observe)
+        self.assertIn("ownership expired", results[0]["errors"][0]["error"])
+        self.assertEqual(results[1]["errors"], [])
+        self.assertEqual(waits, [30])
+        self.assertNotEqual(owners[0], owners[1])
+        self.assertIsNot(seen[0], seen[1])
+        for store in seen:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                store.db.execute("SELECT 1")
+        self.assertIsNone(self.store.db.execute(
+            "SELECT 1 FROM claims WHERE resource='feed-watcher'"
+        ).fetchone())
+
+    def test_poll_aborts_immediately_on_lost_ownership(self):
+        from tubescribe.execution import LeaseLost
+
+        with patch("tubescribe.feed_watch.fetch_feed", side_effect=LeaseLost("expired")) as fetch:
+            with self.assertRaisesRegex(LeaseLost, "expired"):
+                self.poll()
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_watch_respects_saved_next_poll_on_restart(self):
+        stop = threading.Event()
+        checkpoint = self.store.root / "last-poll.json"
+        checkpoint.write_text(json.dumps({"next_poll_at": (NOW + timedelta(seconds=500)).isoformat()}))
+        with (
+            patch.object(stop, "wait", return_value=True) as wait,
+            patch("tubescribe.feed_watch.poll_feeds") as poll,
+        ):
+            watch_feeds(self.store.root, "http://127.0.0.1:1", stop=stop, clock=lambda: NOW)
+        wait.assert_called_once_with(500)
+        poll.assert_not_called()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

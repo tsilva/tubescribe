@@ -22,6 +22,34 @@ class LeaseLost(RuntimeError):
     pass
 
 
+def _heartbeat(root, resource, owner, ttl, stop):
+    from .database import database_errors
+
+    connection = None
+    delay = ttl / 3
+    try:
+        while not stop.wait(delay):
+            try:
+                if connection is None:
+                    connection = Claims(root)
+                # renew is conditional on the SAME unexpired owner. A reconnect
+                # can repair transport loss, never resurrect expired ownership.
+                if not connection.renew(resource, owner, ttl=ttl):
+                    break
+                delay = ttl / 3
+            except database_errors():
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except database_errors():
+                        pass
+                connection = None
+                delay = min(5, ttl / 3)
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def assert_owned(db, root):
     """The conditional write takes the DB write lock before any state mutation."""
     from .database import identity
@@ -59,23 +87,7 @@ def lease(root, resource, *, ttl=90, reentrant=True, wait=False):
     _LOCAL.owners = {**owners, key: owner}
     stop = threading.Event()
 
-    def heartbeat():
-        from .database import database_errors
-
-        connection = None
-        try:
-            connection = Claims(root)
-            while not stop.wait(ttl / 3):
-                if not connection.renew(resource, owner, ttl=ttl):
-                    break
-        except database_errors():
-            # Ownership will expire; subsequent state commits still require fencing.
-            pass
-        finally:
-            if connection:
-                connection.close()
-
-    thread = threading.Thread(target=heartbeat, daemon=True)
+    thread = threading.Thread(target=_heartbeat, args=(root, resource, owner, ttl, stop), daemon=True)
     thread.start()
     try:
         yield owner

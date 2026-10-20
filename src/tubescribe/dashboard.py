@@ -9,14 +9,12 @@ import html
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -317,15 +315,41 @@ def snapshot(root: Path) -> dict:
     }
 
 
+def reader_snapshot(root: Path) -> dict:
+    """Build reader metadata from one database snapshot, without enumerating objects."""
+    channels, _, _, jobs = ArchiveViews(root).snapshot()
+    names = {c["id"]: c["title"] for c in channels}
+    for job in jobs:
+        job["stage"] = stage(job)
+        job["channel_title"] = names.get(job["channel_id"], job["channel_id"])
+        base = transcript_url(job["video_id"], job["profile"]) if job["profile"] else None
+        if job["json_path"]:
+            job["transcript_url"] = base
+            job["srt_url"] = base + "subtitles/"
+        if job.get("postprocessing_state") == "complete" and job.get("postprocessing_dir"):
+            job["processed_url"] = base
+            if job.get("figures"):
+                version = quote(job.get("postprocessing_manifest_sha256") or "", safe="")
+                job["cover_url"] = base + "cover.png?v=" + version
+        if job.get("summary_state") == "complete" and job.get("summary_dir"):
+            job["summary_url"] = artifact_url(job["video_id"], job["profile"], "summary")
+    for channel in channels:
+        channel["videos"] = len({j["video_id"] for j in jobs if j["channel_id"] == channel["id"]})
+    return {
+        "generated_at": now(),
+        "summary": {"channels": len(channels), "videos": len({j["video_id"] for j in jobs})},
+        "channels": channels,
+        "jobs": jobs,
+    }
+
+
 class FeedChanges:
     """Small UI records and bounded revision history; snapshots remain authoritative."""
 
     fields = frozenset(
         "video_id channel_id title url duration published_at job_id profile stage scheduled "
-        "channel_title download_state asr_state download_attempts asr_attempts next_retry "
-        "failed_stage error updated_at completed_at model language processing_seconds "
-        "diarization_state diarization_attempts speaker_count diarization_seconds "
-        "postprocessing_state figures postprocessing_dir summary_state summary_attempts summary_dir "
+        "channel_title asr_state updated_at completed_at language "
+        "diarization_state speaker_count postprocessing_state figures summary_state "
         "summary_updated_at transcript_url processed_url cover_url summary_url srt_url".split()
     )
 
@@ -336,7 +360,7 @@ class FeedChanges:
 
     def get(self, revision=None):
         with self.lock:
-            data = snapshot(self.root)
+            data = reader_snapshot(self.root)
             jobs = {}
             for source in data["jobs"]:
                 key = (
@@ -350,11 +374,17 @@ class FeedChanges:
                 key: hashlib.sha256(json.dumps(job, sort_keys=True).encode()).hexdigest()
                 for key, job in jobs.items()
             }
-            metadata = {k: data[k] for k in ("channels", "summary", "worker")}
+            metadata = {
+                "channels": [
+                    {k: row[k] for k in ("id", "title", "url", "videos") if k in row}
+                    for row in data["channels"]
+                ],
+                "summary": {k: data["summary"][k] for k in ("channels", "videos")},
+            }
             current = hashlib.sha256(
                 json.dumps([metadata, fingerprints], sort_keys=True).encode()
             ).hexdigest()
-            previous = self.history.get(revision)
+            previous = fingerprints if revision == current else self.history.get(revision)
             result = {
                 **metadata,
                 "generated_at": data["generated_at"],
@@ -376,7 +406,6 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
     root = root.resolve()
     config = RuntimeConfig.load(root)
     instance = instance or uuid.uuid4().hex
-    children_lock = threading.Lock()
     feed_changes = FeedChanges(root)
 
     class Handler(BaseHTTPRequestHandler):
@@ -398,7 +427,17 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(length))
-            self.send_header("Cache-Control", "no-store")
+            cache = "no-store"
+            path = urlsplit(self.path).path
+            public = not config.access_token and not self.headers.get("Authorization")
+            if status == 200 and public:
+                if path in {"/", "/app.js", "/style.css"} or path.startswith("/icons/"):
+                    cache = "public, max-age=0, s-maxage=3600, stale-while-revalidate=60"
+                elif path == "/api/feed" and not urlsplit(self.path).query:
+                    cache = "public, max-age=0, s-maxage=5, stale-while-revalidate=10"
+                elif path.endswith("/cover.png"):
+                    cache = "public, max-age=300, s-maxage=3600"
+            self.send_header("Cache-Control", cache)
             self.send_header("Vary", "Accept, Accept-Encoding" if vary_encoding else "Accept")
             if content_encoding:
                 self.send_header("Content-Encoding", content_encoding)
@@ -510,6 +549,23 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 from .rollups import url as digest_url
                 from .storage import Store
 
+                if url.path in {"/library", "/library/", "/api/library", "/llms.txt"}:
+                    from .catalogue import catalogue, guide, render_catalogue
+
+                    if url.path == "/llms.txt":
+                        data = guide(self.origin()).encode()
+                        self.send_headers(200, "text/plain; charset=utf-8", len(data))
+                        self.write_data(data)
+                    else:
+                        data = catalogue(root, query, self.origin())
+                        if url.path == "/api/library" or "application/json" in self.headers.get("Accept", ""):
+                            self.send_json(data, compress=True)
+                        else:
+                            text = render_catalogue(data).encode()
+                            self.send_headers(200, CONTENT_TYPES[".html"], len(text), generated_html=True)
+                            self.write_data(text)
+                    return
+
                 digest_match = re.fullmatch(
                     r"/(?:api/)?(summaries|channels/([^/]+)/summary)(?:/(summary\.md))?/?", url.path
                 )
@@ -517,6 +573,11 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     store = Store(root)
                     try:
                         metadata = digest_index(store)
+                        metadata.pop("waiting_for_videos", None)
+                        for entry in metadata["items"]:
+                            entry.pop("error", None)
+                            entry.pop("input_hash", None)
+                            entry["markdown_url"] = entry["url"] + "summary.md"
                         if url.path == "/api/summaries":
                             self.send_json(metadata)
                             return
@@ -617,6 +678,25 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             workflow(root, resource.workflow)
                         self.send_json(resource.metadata(views, self.origin()))
                         return
+                    if resource.leaf == "cover.png":
+                        if resource.row["postprocessing_state"] != "complete":
+                            raise FileNotFoundError()
+                        directory = resource.row["postprocessing_dir"]
+                        checksum = resource.row["postprocessing_manifest_sha256"]
+                        if not directory or not checksum:
+                            raise FileNotFoundError()
+                        store = Store(root)
+                        try:
+                            manifest = json.loads(store.read_key(directory + "/manifest.json", checksum))
+                            names = sorted(n for n in manifest["files"] if re.fullmatch(r"figures/frame_\d+\.png", n))
+                            if not names:
+                                raise FileNotFoundError()
+                            data = store.read_key(directory + "/" + names[0], manifest["files"][names[0]])
+                        finally:
+                            store.db.close()
+                        self.send_headers(200, CONTENT_TYPES[".png"], len(data))
+                        self.write_data(data)
+                        return
                     if resource.raw_key:
                         data = allowed_file(root, resource.raw_key).read_bytes()
                         if not resource.leaf:
@@ -646,7 +726,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                         raise FileNotFoundError()
                     if resource.canonical_request:
                         url = url._replace(path=resource.internal)
-                if url.path == "/api/health":
+                if url.path == "/api/health" and not public_origins and not config.public_origin:
                     self.send_json(
                         {
                             "service": "tubescribe-dashboard",
@@ -655,25 +735,6 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             "archive_root": str(root),
                         }
                     )
-                elif url.path == "/api/ready":
-                    from .operations import readiness
-
-                    result = readiness(root)
-                    self.send_json(result, 200 if result["ready"] else 503)
-                elif url.path in {"/api/metrics", "/metrics"}:
-                    from .operations import metrics, prometheus
-
-                    result = metrics(root)
-                    if url.path == "/api/metrics":
-                        self.send_json(result)
-                    else:
-                        data = prometheus(result).encode()
-                        self.send_headers(
-                            200, "text/plain; version=0.0.4; charset=utf-8", len(data)
-                        )
-                        self.write_data(data)
-                elif url.path == "/api/snapshot":
-                    self.send_json(snapshot(root))
                 elif url.path == "/api/feed":
                     self.send_json(
                         feed_changes.get(query.get("revision", [None])[0]), compress=True
@@ -719,49 +780,14 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     elif match[3]:
                         raise FileNotFoundError()
                     else:
-                        state = row[2] or "ready"
-                        pending = state in {"pending", "active"}
-                        interrupted = False
-                        if pending and row[5]:
-                            try:
-                                os.kill(row[5], 0)
-                            except ProcessLookupError:
-                                state, pending, interrupted = "interrupted", False, True
-                            except PermissionError:
-                                pass
-                        refresh = '<meta http-equiv="refresh" content="5">' if pending else ""
-                        form = (
-                            ""
-                            if pending
-                            else (
-                                f'<form data-artifact method="post" action="/artifacts/{match[1]}/{match[2]}/run">'
-                                f'<input type="hidden" name="token" value="{instance}">'
-                                '<button type="submit">Build artifact</button></form>'
-                            )
-                        )
                         data = (
                             '<!doctype html><html lang="en"><meta charset="utf-8">'
                             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-                            f"{refresh}<title>{html.escape(definition['title'])}</title>"
-                            '<link rel="stylesheet" href="/style.css"><script src="/artifact.js" defer></script><main>'
+                            f"<title>{html.escape(definition['title'])}</title>"
+                            '<link rel="stylesheet" href="/style.css"><main>'
                             f"<h1>{html.escape(definition['title'])}</h1><p>{html.escape(row[0])}</p>"
-                            f'<p class="artifact-status">{html.escape(state.capitalize())}</p>'
-                            + (
-                                "<p>Generating artifact. This page refreshes automatically.</p>"
-                                if state == "active"
-                                else "<p>The workflow will start when the archive worker is available. This page refreshes automatically.</p>"
-                                if pending
-                                else ""
-                            )
-                            + (f'<p role="alert">{html.escape(row[4])}</p>' if row[4] else "")
-                            + (
-                                "<p>Worker interrupted. Build again to resume saved progress.</p>"
-                                if interrupted
-                                else ""
-                            )
-                            + '<p role="alert" data-artifact-error></p>'
-                            + form
-                            + f'<p><a href="/processed/{match[1]}/preview.html">Full transcript</a></p></main></html>'
+                            '<p>This summary is not available yet. Please check back later.</p>'
+                            f'<p><a href="/processed/{match[1]}/preview.html">Full transcript</a></p></main></html>'
                         ).encode()
                         data = self.document_data(data)
                         self.send_headers(200, CONTENT_TYPES[".html"], len(data))
@@ -780,7 +806,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                         video_id=row[2],
                         download_url=self.resource.base + "source.srt"
                         if self.resource
-                        else "/api/file?path=" + quote(relative, safe="") + "&download=1",
+                        else transcript_url(row[2], row[4]) + "source.srt",
                         processed_url=f"/processed/{match[1]}/preview.html"
                         if row[3] == "complete"
                         else None,
@@ -842,34 +868,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             else None,
                         )
                         self.write_data(data)
-                elif url.path in ("/api/file", "/api/preview"):
-                    path = allowed_file(root, query.get("path", [""])[0])
-                    if url.path == "/api/preview":
-                        if path.suffix not in TEXT_FORMATS:
-                            raise ValueError("Preview is available for transcript text formats")
-                        with path.open("rb") as handle:
-                            data = handle.read(2 * 1024**2 + 1)
-                        self.send_json(
-                            {
-                                "content": data[: 2 * 1024**2].decode("utf-8", errors="replace"),
-                                "truncated": len(data) > 2 * 1024**2,
-                            }
-                        )
-                    else:
-                        with path.open("rb") as handle:
-                            length = os.fstat(handle.fileno()).st_size
-                            disposition = (
-                                "attachment" if query.get("download") == ["1"] else "inline"
-                            )
-                            self.send_headers(
-                                200,
-                                CONTENT_TYPES.get(path.suffix, "text/plain; charset=utf-8"),
-                                length,
-                                disposition=f"{disposition}; filename*=UTF-8''{quote(path.name)}",
-                            )
-                            if self.command != "HEAD":
-                                shutil.copyfileobj(handle, self.wfile)
-                elif url.path in ("/", "/app.js", "/artifact.js", "/style.css") or re.fullmatch(
+                elif url.path in ("/", "/app.js", "/style.css") or re.fullmatch(
                     r"/icons/(magnifying-glass|document-text|clipboard-document|arrow-top-right-on-square|arrow-down-tray|chevron-up|x-mark|arrow-path)\.svg",
                     url.path,
                 ):
@@ -896,106 +895,18 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             if not self.trusted():
                 return
             self.resource = None
-            requested_path = urlsplit(self.path).path
-            from .resources import resolve
+            self.close_connection = True
+            self.send_response(405)
+            data = b'{"error":"This library is read-only. Use GET or HEAD."}'
+            self.send_header("Allow", "GET, HEAD")
+            self.send_header("Content-Type", CONTENT_TYPES[".json"])
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.write_data(data)
 
-            try:
-                resource = (
-                    resolve(ArchiveViews(root), requested_path)
-                    if requested_path.startswith("/videos/")
-                    else None
-                )
-            except FileNotFoundError:
-                self.send_json({"error": "Resource not found"}, 404)
-                return
-            internal = requested_path
-            if resource and resource.canonical_request and resource.workflow and not resource.leaf:
-                self.resource = resource
-                internal = resource.internal + "run"
-            match = re.fullmatch(r"/artifacts/(\d+)/([a-z][a-z0-9_-]{0,63})/run", internal)
-            if not match:
-                self.send_json(
-                    {"error": "Only artifact workflows can be triggered here"},
-                    HTTPStatus.METHOD_NOT_ALLOWED,
-                )
-                return
-            try:
-                from .artifacts import inputs
-                from .storage import Store
-
-                length = int(self.headers.get("Content-Length", "0"))
-                content_type = self.headers.get("Content-Type", "").split(";")[0]
-                json_request = content_type == "application/json" and self.resource is not None
-                if (
-                    not 0 < length <= 1024
-                    or content_type not in {"application/x-www-form-urlencoded", "application/json"}
-                    or (content_type == "application/json" and not json_request)
-                ):
-                    raise ValueError("Use a workflow form or JSON token object")
-                raw = self.rfile.read(length).decode()
-                if json_request:
-                    value = json.loads(raw)
-                    if (
-                        not isinstance(value, dict)
-                        or set(value) != {"token"}
-                        or not isinstance(value["token"], str)
-                    ):
-                        raise ValueError("Workflow JSON requires a token string")
-                    fields = {"token": [value["token"]]}
-                else:
-                    fields = parse_qs(raw)
-                if fields.get("token") != [instance]:
-                    self.send_json({"error": "Refresh the workflow page before triggering it"}, 403)
-                    return
-                with children_lock:
-                    store = Store(root)
-                    try:
-                        from .submission import Dispatcher, JobRequest, LocalProcess
-
-                        source = inputs(store, int(match[1]), match[2])[0]
-                        key = (int(match[1]), match[2])
-                        store.ensure_stage("artifact", key[0], workflow=key[1])
-                        request = JobRequest(
-                            "artifacts",
-                            {
-                                "video": [source["video_id"]],
-                                "profile": source["profile"],
-                                "workflow": match[2],
-                                "wait": True,
-                            },
-                        )
-                        identifier = Dispatcher(
-                            store, process=LocalProcess(spawn=subprocess.Popen)
-                        ).submit(request, background=True)
-                        pid = store.submission(identifier)["pid"]
-                        store.stage_update("artifact", key[0], workflow=key[1], run_pid=pid)
-                    finally:
-                        store.db.close()
-                location = artifact_url(source["video_id"], source["profile"], match[2])
-                if json_request:
-                    data = json.dumps(
-                        {
-                            "submission_id": identifier,
-                            "state": "queued",
-                            "url": self.origin() + location,
-                        }
-                    ).encode()
-                    self.send_response(202)
-                    self.send_header("Content-Type", CONTENT_TYPES[".json"])
-                    self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Cache-Control", "no-store")
-                    self.send_header("Location", location)
-                    self.end_headers()
-                    self.write_data(data)
-                else:
-                    self.send_response(303)
-                    self.send_header("Location", location)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-            except (ValueError, FileNotFoundError, KeyError) as error:
-                self.send_json({"error": str(error)}, 400)
-            except (OSError, RuntimeError, *database_errors()):
-                self.send_json({"error": "Artifact worker could not start"}, 503)
+        do_PUT = do_POST
+        do_PATCH = do_POST
+        do_DELETE = do_POST
 
     return Handler
 

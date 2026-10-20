@@ -101,7 +101,7 @@ def work(
     with pipeline_lock(store.root):
         if _recover:
             log("recovery_start")
-            store.recover()
+            store.recover(ids=ids, channel=channel, profile=profile)
             log("recovery_complete")
         from .pipeline import Plan
 

@@ -109,7 +109,22 @@ class AgentRunner:
                 transport=self.transport,
             ) as client:
                 response = client.post(self.endpoint + "/api/v1/agent/runs", json=payload)
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as error:
+                    # Persist upstream diagnostics in the durable run, instead of
+                    # reducing every provider/tool failure to an opaque HTTP 502.
+                    try:
+                        detail = response.json().get("detail")
+                    except (ValueError, AttributeError):
+                        detail = None
+                    if isinstance(detail, str) and detail:
+                        raise httpx.HTTPStatusError(
+                            f"{error}; upstream detail: {detail[:2000]}",
+                            request=error.request,
+                            response=error.response,
+                        ) from error
+                    raise
                 return response.json()
 
 

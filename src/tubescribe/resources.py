@@ -123,6 +123,8 @@ def resolve(views, path):
         if leaf and not re.fullmatch(r"artifact\.md|figures/frame_\d+\.png", leaf):
             raise FileNotFoundError()
         internal = f"/artifacts/{job}/{workflow}/" + leaf
+    elif leaf == "cover.png":
+        internal = ""
     elif leaf in {"transcript.json", "transcript.txt", "transcript.md"}:
         if not row["json_path"]:
             raise FileNotFoundError()

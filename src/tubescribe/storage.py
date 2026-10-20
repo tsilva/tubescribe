@@ -204,21 +204,46 @@ class Store:
         except (FileNotFoundError, ValueError, KeyError, TypeError):
             return False
 
-    def recover(self):
+    def recover(self, *, ids=None, channel=None, profile=None):
         # Publications have immutable keys and recovery leases each idle video.
         # Reuse only copies fetched and checksum-verified during this scan; never
         # trust a cache left by an earlier process or skip later remote validation.
         previous = self._recovery_materialized
         self._recovery_materialized = {}
         try:
-            return self._recover()
+            if ids is None and channel is None and profile is None:
+                return self._recover()
+            conditions, values = [], []
+            if ids is not None:
+                if not ids:
+                    return self._recover(job_ids=set())
+                conditions.append("j.video_id IN (" + ",".join("?" for _ in ids) + ")")
+                values.extend(ids)
+            if channel is not None:
+                conditions.append("v.channel_id=?")
+                values.append(channel)
+            if profile is not None:
+                conditions.append("j.profile=?")
+                values.append(profile)
+            jobs = {
+                r[0] for r in self.db.execute(
+                    "SELECT j.id FROM jobs j JOIN videos v ON v.id=j.video_id WHERE "
+                    + " AND ".join(conditions), values,
+                )
+            }
+            return self._recover(job_ids=jobs)
         finally:
             self._recovery_materialized = previous
 
-    def _recover(self):
-        self.reset_interrupted()
+    def _recover(self, job_ids=None):
+        if job_ids is None:
+            self.reset_interrupted()
+        else:
+            self.reset_interrupted(job_ids=job_ids)
         # Reopen completed jobs only if their authoritative content has vanished/corrupted.
         for r in self.transcript_records():
+            if job_ids is not None and r["id"] not in job_ids:
+                continue
             from .execution import recovery_job
 
             with recovery_job(self, r["id"]) as idle:
@@ -279,10 +304,10 @@ class Store:
                     self._subtitle(r)
         from .postprocessing_worker import recover
 
-        recover(self)
+        recover(self, job_ids=job_ids)
         from .artifacts import recover as recover_artifacts
 
-        recover_artifacts(self)
+        recover_artifacts(self, job_ids=job_ids)
 
     def save(self, job: dict, result: dict, *, keep_audio=False):
         import uuid

@@ -115,17 +115,15 @@ class Reliability(unittest.TestCase):
             headers = {"Authorization": "Bearer " + token}
             for path in ("/api/ready", "/api/metrics", "/metrics"):
                 self.assertEqual(
-                    httpx.get(base + path, headers=headers, trust_env=False).status_code, 200
+                    httpx.get(base + path, headers=headers, trust_env=False).status_code, 404
                 )
             with patch(
                 "tubescribe.operations.LocalArtifacts.probe",
                 side_effect=StorageUnavailable("offline"),
             ):
-                reply = httpx.get(base + "/api/ready", headers=headers, trust_env=False)
-                self.assertEqual(reply.status_code, 503)
-                self.assertEqual(
-                    reply.json()["checks"], {"database": True, "schema": True, "objects": False}
-                )
+                result = readiness(self.store.root)
+                self.assertFalse(result["ready"])
+                self.assertEqual(result["checks"], {"database": True, "schema": True, "objects": False})
                 self.assertEqual(
                     httpx.get(base + "/api/health", headers=headers, trust_env=False).status_code,
                     200,

@@ -98,7 +98,7 @@ class CloudRehearsal(unittest.TestCase):
         self.addCleanup(server.shutdown)
         url = f"http://127.0.0.1:{server.server_port}"
         with httpx.Client(trust_env=False) as client:
-            snapshot = client.get(url + "/api/snapshot").json()
+            snapshot = client.get(url + "/api/feed").json()
             self.assertEqual(snapshot["jobs"][0]["summary_state"], "complete")
             for route in [
                 f"/artifacts/{self.job['id']}/summary/",
@@ -201,10 +201,10 @@ class CloudRehearsal(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         url = f"http://127.0.0.1:{server.server_port}"
-        self.assertEqual(httpx.get(url + "/api/snapshot", trust_env=False).status_code, 401)
+        self.assertEqual(httpx.get(url + "/api/feed", trust_env=False).status_code, 401)
         self.assertEqual(
             httpx.get(
-                url + "/api/snapshot", headers={"Authorization": "Bearer " + token}, trust_env=False
+                url + "/api/feed", headers={"Authorization": "Bearer " + token}, trust_env=False
             ).status_code,
             200,
         )

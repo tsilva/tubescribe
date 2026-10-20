@@ -332,6 +332,10 @@ def make_gateway(root, upstream, *, port=0, runner_factory=AgentRunner):
     return server
 
 
+class DurableRunFailed(RuntimeError):
+    """A terminal failed run can be retried with a new idempotency key."""
+
+
 class DurableAgentRunner:
     def __init__(self, endpoint, *, store, run_key, headers=None, transport=None):
         self.endpoint = endpoint.rstrip("/")
@@ -366,14 +370,32 @@ class DurableAgentRunner:
         with httpx.Client(
             headers=self.headers, transport=self.transport, timeout=30, trust_env=False
         ) as client:
-            response = client.post(url, json=request)
-            response.raise_for_status()
+            def fetch(method):
+                # Both methods reuse the persisted idempotency key. A temporary
+                # gateway/DB outage must not abandon or duplicate a healthy model run.
+                for attempt in range(3):
+                    try:
+                        response = client.request(
+                            method, url, **({"json": request} if method == "POST" else {})
+                        )
+                        response.raise_for_status()
+                        return response
+                    except (httpx.TransportError, httpx.HTTPStatusError) as error:
+                        if isinstance(error, httpx.HTTPStatusError) and error.response.status_code not in {502, 503, 504}:
+                            raise
+                        if attempt == 2 or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(min(2 ** attempt, max(0, deadline - time.monotonic())))
+
+            response = fetch("POST")
             while True:
                 row = response.json()
                 if row["state"] == "complete":
                     self.store.materialize_prefix(self.run_key)
                     return row["result"]
-                if row["state"] in {"failed", "uncertain", "cancelled"} or row.get("cancelled"):
+                if row["state"] == "failed" and not row.get("cancelled"):
+                    raise DurableRunFailed(row.get("error") or "Agent run failed")
+                if row["state"] in {"uncertain", "cancelled"} or row.get("cancelled"):
                     raise RuntimeError(row.get("error") or "Agent run " + row["state"])
                 if time.monotonic() > deadline:
                     raise httpx.ReadTimeout(
@@ -381,8 +403,7 @@ class DurableAgentRunner:
                     )
                 time.sleep(poll)
                 poll = min(3, poll * 1.5)
-                response = client.get(url)
-                response.raise_for_status()
+                response = fetch("GET")
 
     def cancel(self):
         identifier = hashlib.sha256(self.run_key.encode()).hexdigest()

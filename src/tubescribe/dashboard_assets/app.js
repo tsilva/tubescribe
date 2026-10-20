@@ -4,8 +4,6 @@ const $ = (id) => document.getElementById(id);
 let archive = null;
 let rendered = "";
 let refreshing = false;
-let previewRequest = 0;
-let previewFiles = [];
 let selectedVideo = null;
 let selectedProfile = null;
 let readerSignature = "";
@@ -19,13 +17,12 @@ let digestRefreshing = false;
 const readingCache = new Map();
 const rowCache = new Map();
 const feedRecords = new Map();
-const feedCacheKey = "tubescribe.feed.v1";
+const feedCacheKey = "tubescribe.feed.v2";
 let feedRevision = "";
 let feedLimit = 50;
 let feedSearch = "";
 let feedObserver = null;
 const dateFormatter = new Intl.DateTimeFormat(undefined, {day: "numeric", month: "short", year: "numeric"});
-const expandedVideos = new Set();
 const narrowReader = window.matchMedia("(max-width: 900px)");
 
 function node(tag, text, className) {
@@ -67,44 +64,6 @@ function externalLink(label, url, className) {
     }
   } catch { /* Unknown source addresses remain plain text. */ }
   return link;
-}
-function transcriptFiles(job) {
-  // Only the published transcript, never a diarization prediction or ASR checkpoint.
-  const paths = new Set([job.text_path, job.json_path].filter(Boolean));
-  if (job.json_path) {
-    const base = job.json_path.replace(/\.json$/, "");
-    for (const format of ["md", "txt", "srt"]) paths.add(`${base}.${format}`);
-  }
-  return ["md", "txt", "srt", "json"].flatMap((format) =>
-    job.files.filter((file) => paths.has(file.path) && file.previewable && file.format === format));
-}
-function processingDetails(job) {
-  const details = node("div", undefined, "processing-details");
-  if (job.job_id == null) {
-    details.append(node("div", "No transcription queued", "muted"));
-    return details;
-  }
-  const stages = [
-    `Download: ${human(job.download_state)}`,
-    `ASR: ${human(job.asr_state)}`,
-    `Speakers: ${human(job.diarization_state || "pending")}${job.speaker_count != null ? ` (${job.speaker_count})` : ""}`,
-    `Postprocessing: ${human(job.postprocessing_state || "pending")}${job.figures != null ? ` (${job.figures} figures)` : ""}`,
-    `Summary: ${human(job.summary_state || "pending")}`,
-  ];
-  details.append(node("div", stages.join(" · "), "stage-line"));
-  const provenance = [job.profile, job.model, job.language].filter(Boolean);
-  if (job.processing_seconds != null) provenance.push(`ASR ${job.processing_seconds.toFixed(1)}s`);
-  if (job.diarization_seconds != null) provenance.push(`Speakers ${job.diarization_seconds.toFixed(1)}s`);
-  if (provenance.length) details.append(node("div", provenance.join(" · "), "muted"));
-  if (job.updated_at) details.append(node("div", `Updated ${date(job.updated_at)}`, "muted"));
-  if (job.completed_at) details.append(node("div", `ASR saved ${date(job.completed_at)}`, "muted"));
-  if (job.error) {
-    details.append(node("div", `${human(job.failed_stage || "job")}: ${job.error}`, "job-error"));
-    const retry = [`Attempts: download ${job.download_attempts || 0} · ASR ${job.asr_attempts || 0} · speakers ${job.diarization_attempts || 0} · summary ${job.summary_attempts || 0}`];
-    if (job.next_retry) retry.push(`Retry ${date(job.next_retry)}`);
-    details.append(node("div", retry.join(" · "), "muted"));
-  }
-  return details;
 }
 function icon(name) {
   const image = node("img", undefined, "icon");
@@ -182,32 +141,6 @@ function videoRow(jobs) {
   const bottom = node("div", undefined, "video-bottom");
   bottom.append(statusBadge(job));
   description.append(title, node("p", meta.join(" · "), "video-meta"), bottom);
-  if (!archive.worker.running && ["downloading", "transcribing", "diarizing", "postprocessing", "summarizing"].includes(job.stage)) {
-    description.append(node("p", "Processing paused · worker stopped", "muted"));
-  }
-  if (job.error) description.append(node("p", `${human(job.failed_stage || "Processing")}: ${job.error}`, "row-error"));
-  if (job.job_id != null) {
-    const details = node("details", undefined, "run-details");
-    details.dataset.video = video.video_id;
-    details.open = expandedVideos.has(video.video_id);
-    details.append(node("summary", jobs.length > 1 ? `Processing details · ${jobs.length} profiles` : "Processing details"));
-    details.addEventListener("toggle", () => {
-      if (details.open) expandedVideos.add(video.video_id);
-      else expandedVideos.delete(video.video_id);
-    });
-    const populate = () => {
-      if (details.childElementCount > 1) return;
-      for (const run of jobs) {
-        const block = node("div", undefined, "profile-run");
-        if (jobs.length > 1) block.append(node("strong", `${run.profile} · ${human(displayStage(run))}`));
-        block.append(processingDetails(run));
-        details.append(block);
-      }
-    };
-    if (details.open) populate();
-    details.addEventListener("toggle", () => { if (details.open) populate(); });
-    description.append(details);
-  }
   main.append(description);
   row.append(main);
   return row;
@@ -215,7 +148,7 @@ function videoRow(jobs) {
 function renderFeed() {
   if (!archive) return;
   const search = $("video-search").value.trim().toLowerCase();
-  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, archive.worker.running]);
+  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs]);
   if (signature === rendered) return;
   rendered = signature;
   const focused = document.activeElement?.dataset.focus;
@@ -239,7 +172,6 @@ function renderFeed() {
   }
   const matches = videos.filter(({jobs}) => (!libraryScope || jobs[0].channel_id === libraryScope) && (!search || jobs.some((job) =>
     `${job.channel_title} ${job.channel_id} ${job.title} ${job.video_id}`.toLowerCase().includes(search))));
-  const sources = new Set(matches.map(({jobs}) => jobs[0].channel_id));
   if (search !== feedSearch) {
     feedSearch = search;
     feedLimit = 50;
@@ -268,19 +200,11 @@ function renderFeed() {
       feedObserver.observe(more);
     }
   }
-  const errors = [];
-  for (const channel of archive.channels) {
-    if (search && !sources.has(channel.id) && !`${channel.title} ${channel.id}`.toLowerCase().includes(search)) continue;
-    for (const discovery of channel.discovery || []) {
-      if (discovery.error) errors.push(node("p", `${channel.title} · ${human(discovery.kind)} discovery: ${discovery.error}`, "discovery-error"));
-    }
-  }
-  $("feed-errors").replaceChildren(...errors);
   const list = $("feed-list");
   const visible = matches.slice(0, feedLimit);
   const rows = visible.map(({jobs}) => {
     const id = jobs[0].video_id;
-    const signature = JSON.stringify([jobs, archive.worker.running]);
+    const signature = JSON.stringify([jobs]);
     let cached = rowCache.get(id);
     if (!cached || cached.signature !== signature) {
       cached = {signature, row: videoRow(jobs)};
@@ -519,7 +443,7 @@ async function renderReader(jobs, job) {
   pane.replaceChildren(...parts);
   pane.scrollTop = 0;
   if (!sourceUrl) {
-    content.append(node("h3", "The transcript is not ready yet."), node("p", job.stage === "failed" ? "Processing needs attention. The details in the video row show what happened." : "This video is in your library. Its transcript will appear here once processing finishes."));
+    content.append(node("h3", "The transcript is not ready yet."), node("p", job.stage === "failed" ? "The transcript is currently unavailable." : "This video is in your library. Its transcript will appear here once processing finishes."));
     return;
   }
   content.append(node("p", `Loading ${activeTab.label.toLowerCase()}…`, "muted"));
@@ -560,39 +484,6 @@ async function renderReader(jobs, job) {
   }
 }
 
-function openTranscript(job, files) {
-  previewFiles = files;
-  $("preview-srt").classList.toggle("hidden", !job.srt_url);
-  if (job.srt_url) $("preview-srt").href = job.srt_url;
-  $("preview-title").textContent = job.title;
-  $("preview-format").replaceChildren(...files.map((file) => new Option(file.format.toUpperCase(), file.path)));
-  if (!$("transcript-preview").open) $("transcript-preview").showModal();
-  preview(files[0]);
-}
-async function preview(file) {
-  const request = ++previewRequest;
-  $("preview-download").href = `${file.url}&download=1`;
-  $("preview-download").download = file.name;
-  $("preview-content").replaceChildren(node("p", "Loading transcript…", "empty"));
-  try {
-    const response = await fetch(`/api/preview?path=${encodeURIComponent(file.path)}`);
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Preview unavailable");
-    if (request !== previewRequest) return;
-    if (file.format === "md") {
-      $("preview-content").replaceChildren(...result.content.split(/\n\s*\n/).map((paragraph) => {
-        const element = node("p", undefined, "markdown-turn");
-        const turn = paragraph.match(/^\*\*(.+?):\*\*\s(.*)$/s);
-        if (turn) element.append(node("strong", `${turn[1].replace(/\\([\\*_\[\]])/g, "$1")}: `), document.createTextNode(turn[2]));
-        else element.textContent = paragraph;
-        return element;
-      }));
-    } else $("preview-content").replaceChildren(node("pre", result.content, "preview-body"));
-    if (result.truncated) $("preview-content").prepend(node("p", "Preview limited to 2 MiB. Download for the complete transcript.", "preview-warning"));
-  } catch (error) {
-    if (request === previewRequest) $("preview-content").replaceChildren(node("p", error.message, "empty"));
-  }
-}
 function applyFeed(data) {
   if (data.full) feedRecords.clear();
   else if (!archive) throw new Error("The library needs a fresh snapshot.");
@@ -601,7 +492,6 @@ function applyFeed(data) {
   archive = {
     channels: data.channels,
     summary: data.summary,
-    worker: data.worker,
     generated_at: data.generated_at,
     jobs: Array.from(feedRecords.values()),
   };
@@ -609,7 +499,7 @@ function applyFeed(data) {
 }
 function showArchive(cached = false) {
   $("archive-summary").textContent = `${archive.summary.channels} channel${archive.summary.channels === 1 ? "" : "s"} · ${archive.summary.videos} video${archive.summary.videos === 1 ? "" : "s"}`;
-  $("worker-status").textContent = cached ? "Checking for updates…" : `Worker ${archive.worker.running ? "running" : "stopped"}`;
+  $("worker-status").textContent = cached ? "Checking for updates…" : "Library up to date";
   $("updated").textContent = cached ? "Cached library" : `Updated ${new Date(archive.generated_at).toLocaleTimeString()}`;
   syncScopes();
   renderFeed();
@@ -619,7 +509,7 @@ function restoreFeed() {
     const saved = JSON.parse(sessionStorage.getItem(feedCacheKey));
     if (!saved || !Number.isFinite(saved.savedAt) || Date.now() - saved.savedAt > 86400000 || !Array.isArray(saved.jobs)
         || !saved.jobs.every((job) => typeof job.key === "string")
-        || !Array.isArray(saved.channels) || !saved.summary || !saved.worker || !saved.revision) return;
+        || !Array.isArray(saved.channels) || !saved.summary || !saved.revision) return;
     applyFeed({...saved, full: true});
     showArchive(true);
   } catch { /* Storage can be disabled or contain an obsolete cache. */ }
@@ -629,7 +519,7 @@ async function refresh() {
   refreshing = true;
   $("refresh").disabled = true;
   try {
-    const response = await fetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`, {cache: "no-store"});
+    const response = await fetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`, {cache: feedRevision ? "no-store" : "default"});
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Archive unavailable");
     const previous = feedRevision;
@@ -646,7 +536,7 @@ async function refresh() {
     $("error").textContent = `${error.message}. ${archive ? "Showing the last available snapshot." : "Could not load the archive."} Refresh will retry.`;
     $("error").classList.remove("hidden");
     $("updated").textContent = "Connection unavailable";
-    $("worker-status").textContent = "Worker status unavailable";
+    $("worker-status").textContent = "Library unavailable";
     if (!archive) $("feed").replaceChildren(node("p", "Videos are unavailable until the archive reconnects.", "empty"));
   } finally {
     refreshing = false;
@@ -668,12 +558,6 @@ narrowReader.addEventListener("change", () => setReaderOpen($("reader").classLis
 $("today").textContent = new Date().toLocaleDateString(undefined, {weekday:"short", day:"numeric", month:"long", year:"numeric"});
 $("video-search").addEventListener("input", renderFeed);
 $("refresh").addEventListener("click", refresh);
-$("close-preview").addEventListener("click", () => $("transcript-preview").close());
-$("transcript-preview").addEventListener("close", () => previewRequest++);
-$("preview-format").addEventListener("change", () => {
-  const file = previewFiles.find((file) => file.path === $("preview-format").value);
-  if (file) preview(file);
-});
 restoreFeed();
 refresh();
 setInterval(() => { if (!document.hidden) refresh(); }, 5000);
@@ -782,8 +666,7 @@ async function renderDigest() {
   }
   pane.append(browse);
   if (entry.state !== "ready") {
-    body.append(node("p", digests.waiting_for_videos ? "Waiting for video processing to finish before refreshing this summary…" : entry.state === "failed" ? "Summary generation needs attention. Automatic retries are limited to three attempts." : "Updating the seven-day summary…", "muted"));
-    if (entry.error) body.append(node("p", entry.error, "muted"));
+    body.append(node("p", "The current seven-day summary is not available yet.", "muted"));
     return;
   }
   const actions = node("div", undefined, "reader-actions");

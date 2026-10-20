@@ -2,7 +2,7 @@
 
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import httpx
 import test_artifacts as artifact_fixture
@@ -99,23 +99,69 @@ class ResourceRoutes(unittest.TestCase):
         self.assertEqual(self.client.get(f"/artifacts/{self.job['id']}/summary/").status_code, 200)
         self.assertEqual(snapshot(self.store.root)["jobs"][0]["summary_url"], self.summary)
 
-    def test_post_creates_workflow_submission_without_action_url(self):
+    def test_library_reads_never_schedule_processing(self):
         ready = self.client.get(self.summary)
-        self.assertIn('action="' + self.summary + '"', ready.text)
-        self.assertNotIn(self.summary + "run", ready.text)
-        self.assertEqual(self.client.post(self.summary, json={"token": "bad"}).status_code, 403)
-        child = Mock()
-        child.pid = 12345
-        with patch("tubescribe.dashboard.subprocess.Popen", return_value=child) as spawn:
-            one = self.client.post(self.summary, json={"token": "resource-test-token"})
-            two = self.client.post(self.summary, json={"token": "resource-test-token"})
-            self.assertEqual(one.status_code, 202)
-            self.assertEqual(one.headers["location"], self.summary)
-            self.assertEqual(one.json()["submission_id"], two.json()["submission_id"])
-            self.assertEqual(spawn.call_count, 1)
-        self.assertEqual(
-            self.client.post(self.base, json={"token": "resource-test-token"}).status_code, 405
-        )
+        self.assertNotIn("<form", ready.text)
+        self.assertNotIn("Build artifact", ready.text)
+        before = self.store.db.execute("SELECT count(*) FROM submissions").fetchone()[0]
+        for path in (self.summary, self.summary + "run", self.base, "/api/library"):
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                response = self.client.request(method, path, json={"token": "resource-test-token"})
+                self.assertEqual(response.status_code, 405)
+                self.assertEqual(response.headers["allow"], "GET, HEAD")
+        self.assertEqual(before, self.store.db.execute("SELECT count(*) FROM submissions").fetchone()[0])
+        for path in ("/api/snapshot", "/api/ready", "/api/metrics", "/metrics", "/api/file", "/api/preview", "/artifact.js"):
+            self.assertEqual(self.client.get(path).status_code, 404)
+
+    def test_agent_can_discover_saved_sources_without_javascript(self):
+        self.fixture.build()
+        guide = self.client.get("/llms.txt")
+        self.assertIn("/api/library", guide.text)
+        page = self.client.get("/library/")
+        self.assertIn(self.base, page.text)
+        self.assertIn(self.summary + "artifact.md", page.text)
+        self.assertNotIn("<script", page.text)
+        data = self.client.get("/api/library", params={"limit": 1}).json()
+        self.assertEqual(data["total"], 1)
+        self.assertIsNone(data["links"]["next"])
+        video = data["items"][0]
+        self.assertEqual(video["video_id"], self.job["video_id"])
+        links = video["transcripts"][0]["links"]
+        for link in links.values():
+            self.assertEqual(self.client.get(link).status_code, 200, link)
+        for key in ("output_dir", "error", "attempts", "audio_path", "pid", "input_hash"):
+            self.assertNotIn('"' + key + '"', self.client.get("/api/library").text)
+        self.assertEqual(self.client.get("/api/library?offset=1").json()["items"], [])
+        self.assertEqual(self.client.get("/api/library?q=does-not-exist").json()["items"], [])
+        self.assertEqual(self.client.get("/api/library?channel=unknown").json()["items"], [])
+        for query in ("limit=0", "limit=101", "offset=-1", "offset=no"):
+            self.assertEqual(self.client.get("/api/library?" + query).status_code, 400)
+        head = self.client.head("/api/library")
+        self.assertEqual(head.status_code, 200)
+        self.assertEqual(head.content, b"")
+
+    def test_feed_cover_reads_only_the_issued_image_with_hash_validation(self):
+        from unittest.mock import patch
+
+        with self.store.db:
+            self.store.db.execute("UPDATE postprocessings SET figures=1 WHERE job_id=?", (self.job["id"],))
+        # Covers are discovered lazily from the published manifest, never an R2 inventory.
+        with patch("tubescribe.dashboard.output_files", side_effect=AssertionError("R2 scan")):
+            feed = self.client.get("/api/feed").json()
+        job = next(j for j in feed["jobs"] if j["video_id"] == self.job["video_id"])
+        self.assertIn("/cover.png?v=", job["cover_url"])
+        response = self.client.get(job["cover_url"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, artifact_fixture.PNG)
+        self.assertIn("s-maxage", response.headers["cache-control"])
+        row = self.store.db.execute("SELECT output_dir FROM postprocessings WHERE job_id=?", (self.job["id"],)).fetchone()
+        path = self.store.root / row["output_dir"] / "figures/frame_0001000.png"
+        original = path.read_bytes()
+        path.write_bytes(b"tampered")
+        try:
+            self.assertEqual(self.client.get(job["cover_url"]).status_code, 400)
+        finally:
+            path.write_bytes(original)
 
     def test_raw_sources_and_subtitles_work_before_processing(self):
         self.store.stage_update("postprocessing", self.job["id"], state="pending")

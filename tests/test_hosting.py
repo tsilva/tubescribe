@@ -60,7 +60,6 @@ class Hosting(unittest.TestCase):
             "TUBESCRIBE_S3_ENDPOINT": "https://objects.example.test",
             "VERCEL_URL": "tubescribe-preview.vercel.app",
             "VERCEL_PROJECT_PRODUCTION_URL": "tubescribe.vercel.app",
-            "TUBESCRIBE_FORM_SECRET": "a" * 64,
         }
 
     def test_hosted_roles_fail_closed_without_durable_backends(self):
@@ -68,7 +67,6 @@ class Hosting(unittest.TestCase):
             for missing in (
                 "DATABASE_URL_UNPOOLED",
                 "TUBESCRIBE_S3_BUCKET",
-                "TUBESCRIBE_FORM_SECRET",
             ):
                 settings = self.environment(folder)
                 del settings[missing]
