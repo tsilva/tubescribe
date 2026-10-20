@@ -850,6 +850,11 @@ new PostgreSQL/object volumes. It removes only its randomly named projects' cont
 volumes, including on failure. No production inference services or model tokens are used.
 `DOCKER_HOST` may select an isolated local engine without changing the global Docker context.
 
+The rehearsal runs `tubescribe operations ready` and `operations metrics` inside the
+web container to inspect durable dependencies. An unready CLI result exits 1 and
+retains its JSON checks for outage assertions. HTTP probes verify published content
+and the reader's availability; retired operational routes must return 404.
+
 Application containers use `restart: unless-stopped` for unexpected exits. The GPU image
 is separate and is not exercised by this CPU-only rehearsal. No cloud resources are created.
 

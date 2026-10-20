@@ -34,13 +34,15 @@ BASE = [
 ]
 
 
-def compose(*args, timeout=120, project=PROJECT, crashing=False):
+def compose(*args, timeout=120, project=PROJECT, crashing=False, allowed_returncodes=(0,)):
     command = BASE.copy()
     command[3] = project
     result = subprocess.run(
         command + list(args), cwd=ROOT, env=ENV, capture_output=True, text=True, timeout=timeout
     )
-    if result.returncode and not (crashing and result.returncode in {137, 143}):
+    if result.returncode not in allowed_returncodes and not (
+        crashing and result.returncode in {137, 143}
+    ):
         if args and args[0] == "run":
             with tempfile.NamedTemporaryFile(
                 mode="w", prefix=project + "-tests-", suffix=".log", delete=False
@@ -82,6 +84,24 @@ def web(path, *, project=PROJECT, service="gateway-fixture"):
     )
     return json.loads(
         compose("exec", "-T", service, "python", "-c", code, timeout=20, project=project)
+    )
+
+
+def operations(action, *, project=PROJECT):
+    # `operations ready` deliberately exits 1 while a durable dependency is down.
+    # Keep its JSON result so outage assertions can inspect the failed checks.
+    return json.loads(
+        compose(
+            "exec",
+            "-T",
+            "web",
+            "tubescribe",
+            "operations",
+            action,
+            project=project,
+            timeout=20,
+            allowed_returncodes=(0, 1) if action == "ready" else (0,),
+        )
     )
 
 
@@ -132,8 +152,8 @@ def restore_stack(job_id):
             project=RESTORE_PROJECT,
         )
     eventually(
-        lambda: web("/api/ready", project=RESTORE_PROJECT, service="web"),
-        lambda r: r["status"] == 200,
+        lambda: operations("ready", project=RESTORE_PROJECT),
+        lambda r: r["ready"],
     )
     for path in (
         f"/transcripts/{job_id}/srt",
@@ -177,7 +197,7 @@ def main():
             timeout=1800,
         )
         eventually(control, timeout=90)
-        eventually(lambda: web("/api/ready"), lambda r: r["status"] == 200)
+        eventually(lambda: operations("ready"), lambda r: r["ready"])
         compose("pause", "worker", "worker2")
         first, second = control("POST"), control("POST")
         assert first == second, "Duplicate requests were not deduplicated"
@@ -193,21 +213,24 @@ def main():
             f"/processed/{job_id}/preview.html",
             f"/artifacts/{job_id}/summary/",
             f"/processed/{job_id}/figures/frame_0001000.png",
-            "/metrics",
         ]:
             assert web(path)["status"] == 200, path
+        assert "queue" in operations("metrics")
+        for path in ("/api/ready", "/api/metrics", "/metrics", "/api/health"):
+            assert web(path)["status"] == 404, path
         print(
             "Separate worker/gateway containers, duplicate delivery, screenshots and summary: passed",
             flush=True,
         )
         compose("stop", "objects")
-        assert web("/api/ready")["status"] == 503
-        assert web("/api/health")["status"] == 200
+        outage = operations("ready")
+        assert not outage["ready"] and not outage["checks"]["objects"], outage
+        assert web("/")["status"] == 200
         control("POST")
         time.sleep(5)
         assert control()["status"]["completed_jobs"] == 1, "Storage outage changed completed stages"
         compose("start", "objects")
-        eventually(lambda: web("/api/ready"), lambda r: r["status"] == 200)
+        eventually(lambda: operations("ready"), lambda r: r["ready"])
         eventually(
             lambda: json.loads(compose("exec", "-T", "worker", "tubescribe", "queue", "status")),
             lambda rows: all(r["state"] == "complete" for r in rows),
@@ -218,10 +241,11 @@ def main():
             flush=True,
         )
         compose("stop", "database")
-        assert web("/api/ready")["status"] == 503
-        assert web("/api/health")["status"] == 200
+        outage = operations("ready")
+        assert not outage["ready"] and not outage["checks"]["database"], outage
+        assert web("/")["status"] == 200
         compose("start", "database")
-        eventually(lambda: web("/api/ready"), lambda r: r["status"] == 200)
+        eventually(lambda: operations("ready"), lambda r: r["ready"])
         eventually(control)
         assert control()["status"]["completed_jobs"] == 1
         for service in ("worker", "web", "gateway-fixture"):
@@ -252,7 +276,7 @@ def main():
             eventually(restart_count, lambda count: count > before, timeout=100)
             eventually(lambda: compose("exec", "-T", service, "true") or True, timeout=100)
             eventually(control, timeout=100)
-            eventually(lambda: web("/api/ready"), lambda r: r["status"] == 200, timeout=100)
+            eventually(lambda: operations("ready"), lambda r: r["ready"], timeout=100)
             control("POST")
             eventually(
                 lambda: json.loads(
