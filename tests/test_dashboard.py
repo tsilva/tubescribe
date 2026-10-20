@@ -355,3 +355,40 @@ class Dashboard(unittest.TestCase):
         self.assertEqual(icon.headers["content-type"], "image/svg+xml")
         self.assertEqual(self.client.get("/icons/README.md").status_code, 404)
         self.assertEqual(self.client.get("/icons/../index.html").status_code, 404)
+
+    def test_brand_assets_are_served_with_types_and_confined_paths(self):
+        page = self.client.get("/").text
+        self.assertIn('class="brand-mark"', page)
+        self.assertIn('href="/favicon.ico"', page)
+        self.assertIn('href="/brand/site.webmanifest"', page)
+        for name, content_type in (
+            ("logo.png", "image/png"),
+            ("favicon-16.png", "image/png"),
+            ("favicon-32.png", "image/png"),
+            ("favicon-48.png", "image/png"),
+            ("favicon.ico", "image/vnd.microsoft.icon"),
+            ("apple-touch-icon.png", "image/png"),
+            ("android-chrome-192.png", "image/png"),
+            ("android-chrome-512.png", "image/png"),
+            ("site.webmanifest", "application/manifest+json"),
+        ):
+            with self.subTest(name=name):
+                response = self.client.get(f"/brand/{name}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["content-type"], content_type)
+                self.assertIn("s-maxage=3600", response.headers["cache-control"])
+                self.assertEqual(int(response.headers["content-length"]), len(response.content))
+                head = self.client.head(f"/brand/{name}")
+                self.assertEqual(head.status_code, 200)
+                self.assertEqual(head.content, b"")
+                self.assertEqual(head.headers["content-length"], response.headers["content-length"])
+        self.assertEqual(
+            self.client.get("/favicon.ico").content, self.client.get("/brand/favicon.ico").content
+        )
+        manifest = self.client.get("/brand/site.webmanifest").json()
+        self.assertEqual(manifest["name"], "TubeScribe")
+        self.assertEqual(manifest["start_url"], "/")
+        for icon in manifest["icons"]:
+            self.assertEqual(self.client.get(f'/brand/{icon["src"]}').status_code, 200)
+        for path in ("/brand/sources/logo-source.png", "/brand/%2e%2e/index.html", "/brand/missing.png"):
+            self.assertEqual(self.client.get(path).status_code, 404)

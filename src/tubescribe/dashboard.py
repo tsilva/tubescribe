@@ -30,6 +30,39 @@ from .resources import artifact_url, transcript_url
 from .storage import atomic_write, now
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
+STATIC_ASSETS = {
+    "/": "index.html",
+    "/app.js": "app.js",
+    "/style.css": "style.css",
+    "/favicon.ico": "brand/favicon.ico",
+    **{
+        f"/brand/{name}": f"brand/{name}"
+        for name in (
+            "logo.png",
+            "favicon.ico",
+            "favicon-16.png",
+            "favicon-32.png",
+            "favicon-48.png",
+            "apple-touch-icon.png",
+            "android-chrome-192.png",
+            "android-chrome-512.png",
+            "site.webmanifest",
+        )
+    },
+    **{
+        f"/icons/{name}.svg": f"icons/{name}.svg"
+        for name in (
+            "magnifying-glass",
+            "document-text",
+            "clipboard-document",
+            "arrow-top-right-on-square",
+            "arrow-down-tray",
+            "chevron-up",
+            "x-mark",
+            "arrow-path",
+        )
+    },
+}
 TEXT_FORMATS = {".json", ".txt", ".srt", ".md"}
 AUDIO_FORMATS = {".mp4", ".m4a", ".mp3", ".webm", ".wav", ".ogg", ".opus", ".flac"}
 CONTENT_TYPES = {
@@ -43,6 +76,8 @@ CONTENT_TYPES = {
     ".webm": "audio/webm",
     ".wav": "audio/wav",
     ".png": "image/png",
+    ".ico": "image/vnd.microsoft.icon",
+    ".webmanifest": "application/manifest+json",
     ".zip": "application/zip",
     ".md": "text/markdown; charset=utf-8",
     ".svg": "image/svg+xml",
@@ -431,7 +466,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             path = urlsplit(self.path).path
             public = not config.access_token and not self.headers.get("Authorization")
             if status == 200 and public:
-                if path in {"/", "/app.js", "/style.css"} or path.startswith("/icons/"):
+                if path in STATIC_ASSETS:
                     cache = "public, max-age=0, s-maxage=3600, stale-while-revalidate=60"
                 elif path == "/api/feed" and not urlsplit(self.path).query:
                     cache = "public, max-age=0, s-maxage=5, stale-while-revalidate=10"
@@ -868,11 +903,8 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             else None,
                         )
                         self.write_data(data)
-                elif url.path in ("/", "/app.js", "/style.css") or re.fullmatch(
-                    r"/icons/(magnifying-glass|document-text|clipboard-document|arrow-top-right-on-square|arrow-down-tray|chevron-up|x-mark|arrow-path)\.svg",
-                    url.path,
-                ):
-                    path = ASSETS / ("index.html" if url.path == "/" else url.path[1:])
+                elif url.path in STATIC_ASSETS:
+                    path = ASSETS / STATIC_ASSETS[url.path]
                     data = path.read_bytes()
                     self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
                     self.write_data(data)

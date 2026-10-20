@@ -106,6 +106,11 @@ class Hosting(unittest.TestCase):
                             response = client.get("/", headers={"Host": host})
                             self.assertEqual(response.status_code, 200)
                             self.assertIn("Your library", response.text)
+                            brand = client.get("/brand/android-chrome-192.png", headers={"Host": host})
+                            self.assertEqual(brand.status_code, 200)
+                            self.assertEqual(brand.headers["content-type"], "image/png")
+                            favicon = client.get("/favicon.ico", headers={"Host": host})
+                            self.assertEqual(favicon.status_code, 200)
                             self.assertEqual(client.head("/", headers={"Host": host}).content, b"")
                         self.assertEqual(
                             client.get("/", headers={"Host": "evil.test"}).status_code, 403
