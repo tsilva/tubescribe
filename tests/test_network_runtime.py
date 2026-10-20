@@ -231,7 +231,7 @@ class NetworkRuntime(unittest.TestCase):
         from upgrade_fixture import load_postgres_v4, write_v4
 
         from tubescribe.database import columns, connect
-        from tubescribe.migrations import SchemaCompatibilityError, manage, migrate
+        from tubescribe.migrations import SCHEMA_VERSION, SchemaCompatibilityError, manage, migrate
         from tubescribe.worker import work
 
         self.fixture.full()
@@ -286,7 +286,7 @@ class NetworkRuntime(unittest.TestCase):
                 self.assertEqual(manage(root, "status")["schema_version"], 4)
                 self.assertNotIn("worker_id", columns(db, "submissions"))
             self.assertEqual(manage(root, "apply")["previous_version"], 4)
-            self.assertEqual(manage(root, "apply")["previous_version"], 6)
+            self.assertEqual(manage(root, "apply")["previous_version"], SCHEMA_VERSION)
             upgraded = self.replacement("upgraded")
             self.assertEqual(upgraded.submission(queued)["state"], "queued")
             upgraded.recover()
@@ -296,7 +296,7 @@ class NetworkRuntime(unittest.TestCase):
             for key, data in before.items():
                 self.assertEqual(upgraded.read_key(key), data, key)
             with upgraded.db:
-                upgraded.db.execute("INSERT INTO schema_migrations VALUES(6)")
+                upgraded.db.execute("INSERT INTO schema_migrations VALUES(?)", (SCHEMA_VERSION + 1,))
             with self.assertRaisesRegex(SchemaCompatibilityError, "newer"):
                 Store(root)
             with self.assertRaisesRegex(SchemaCompatibilityError, "newer"):
