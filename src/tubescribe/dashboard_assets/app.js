@@ -11,7 +11,7 @@ let readerController = null;
 let readerIdentity = "";
 let readerTab = "summary";
 let libraryScope = "";
-let readerLevel = "digest";
+let readerLevel = "video";
 let digests = null;
 let digestRefreshing = false;
 const readingCache = new Map();
@@ -93,16 +93,19 @@ function statusBadge(job) {
   const stage = displayStage(job);
   return node("span", human(stage), `badge ${stage}`);
 }
+function syncSelectedRows() {
+  for (const row of document.querySelectorAll(".video-row")) {
+    const selected = readerLevel === "video" && row.dataset.video === selectedVideo;
+    row.classList.toggle("selected", selected);
+    for (const button of row.querySelectorAll("[aria-pressed]")) button.setAttribute("aria-pressed", String(selected));
+  }
+}
 function selectVideo(jobs, job = bestJob(jobs), open = true) {
   readerLevel = "video";
   $("rolling-summary").setAttribute("aria-pressed", "false");
   selectedVideo = jobs[0].video_id;
   selectedProfile = job.profile;
-  for (const row of document.querySelectorAll(".video-row")) {
-    const selected = row.dataset.video === selectedVideo;
-    row.classList.toggle("selected", selected);
-    for (const button of row.querySelectorAll("[aria-pressed]")) button.setAttribute("aria-pressed", String(selected));
-  }
+  syncSelectedRows();
   renderReader(jobs, job);
   if (open) setReaderOpen(true);
 }
@@ -117,30 +120,44 @@ function videoRow(jobs) {
     selectVideo(jobs);
   });
   const main = node("div", undefined, "video-main");
+  const art = node("button", undefined, "video-art");
+  art.setAttribute("aria-label", `Preview ${video.title}`);
+  art.dataset.focus = `art-${video.video_id}`;
+  art.setAttribute("aria-pressed", String(readerLevel === "video" && video.video_id === selectedVideo));
+  const placeholder = node("span", "▶", "video-placeholder");
+  placeholder.setAttribute("aria-hidden", "true");
+  art.append(placeholder);
   if (job.cover_url) {
-    const art = node("button", undefined, "video-art");
-    art.setAttribute("aria-label", `Preview ${video.title}`);
-    art.dataset.focus = `art-${video.video_id}`;
     const image = node("img", undefined, "video-thumbnail");
     image.src = job.cover_url;
     image.alt = "";
     image.loading = "lazy";
-    image.addEventListener("error", () => art.remove(), {once: true});
+    image.addEventListener("error", () => image.remove(), {once: true});
     art.append(image);
-    if (video.duration != null) art.append(node("span", duration(video.duration), "duration"));
-    art.addEventListener("click", () => selectVideo(jobs));
-    main.append(art);
   }
+  if (video.duration != null) art.append(node("span", duration(video.duration), "duration"));
+  if (displayStage(job) === "complete") {
+    const badge = node("span", "✓", "completion-badge");
+    badge.setAttribute("role", "img");
+    badge.setAttribute("aria-label", "Complete");
+    badge.title = "Complete";
+    art.append(badge);
+  }
+  art.addEventListener("click", () => selectVideo(jobs));
+  main.append(art);
   const description = node("div", undefined, "video-description");
   const title = node("button", video.title || video.video_id, "video-title");
   title.dataset.focus = `title-${video.video_id}`;
   title.setAttribute("aria-pressed", String(video.video_id === selectedVideo));
   title.addEventListener("click", () => selectVideo(jobs));
   const channel = video.channel_title || archive.channels.find((source) => source.id === video.channel_id)?.title || video.channel_id;
-  const meta = [channel, date(video.published_at, true), !job.cover_url && duration(video.duration)].filter(Boolean);
+  const meta = [channel, date(video.published_at, true)].filter(Boolean);
   const bottom = node("div", undefined, "video-bottom");
-  bottom.append(statusBadge(job));
-  description.append(title, node("p", meta.join(" · "), "video-meta"), bottom);
+  description.append(title, node("p", meta.join(" · "), "video-meta"));
+  if (displayStage(job) !== "complete") {
+    bottom.append(statusBadge(job));
+    description.append(bottom);
+  }
   main.append(description);
   row.append(main);
   return row;
@@ -165,13 +182,13 @@ function renderFeed() {
     const second = Number.isFinite(b.published) ? b.published : -Infinity;
     return (first === second ? 0 : second - first) || a.jobs[0].video_id.localeCompare(b.jobs[0].video_id);
   });
-  if (!allVideos.has(selectedVideo)) {
-    const initial = videos.find(({jobs}) => bestJob(jobs).summary_url)?.jobs || videos[0]?.jobs;
-    selectedVideo = initial?.[0].video_id;
-    selectedProfile = initial && bestJob(initial).profile;
-  }
   const matches = videos.filter(({jobs}) => (!libraryScope || jobs[0].channel_id === libraryScope) && (!search || jobs.some((job) =>
     `${job.channel_title} ${job.channel_id} ${job.title} ${job.video_id}`.toLowerCase().includes(search))));
+  if (!matches.some(({jobs}) => jobs[0].video_id === selectedVideo)) {
+    const initial = matches[0]?.jobs;
+    selectedVideo = initial?.[0].video_id || null;
+    selectedProfile = initial ? bestJob(initial).profile : null;
+  }
   if (search !== feedSearch) {
     feedSearch = search;
     feedLimit = 50;
@@ -201,7 +218,9 @@ function renderFeed() {
     }
   }
   const list = $("feed-list");
-  const visible = matches.slice(0, feedLimit);
+  // Keep a preserved selection in the rendered feed even when newer uploads arrive.
+  const selectedIndex = matches.findIndex(({jobs}) => jobs[0].video_id === selectedVideo);
+  const visible = matches.slice(0, Math.max(feedLimit, selectedIndex + 1));
   const rows = visible.map(({jobs}) => {
     const id = jobs[0].video_id;
     const signature = JSON.stringify([jobs]);
@@ -210,9 +229,9 @@ function renderFeed() {
       cached = {signature, row: videoRow(jobs)};
       rowCache.set(id, cached);
     }
-    const selected = id === selectedVideo;
+    const selected = readerLevel === "video" && id === selectedVideo;
     cached.row.classList.toggle("selected", selected);
-    cached.row.querySelector(".video-title").setAttribute("aria-pressed", String(selected));
+    for (const button of cached.row.querySelectorAll("[aria-pressed]")) button.setAttribute("aria-pressed", String(selected));
     return cached.row;
   });
   let cursor = list.firstElementChild;
@@ -227,7 +246,7 @@ function renderFeed() {
   }
   for (const id of rowCache.keys()) if (!allVideos.has(id)) rowCache.delete(id);
   $("feed-empty").hidden = matches.length > 0;
-  $("feed-empty").textContent = search ? "No videos match this search. Try a different title or channel." : "Your library is empty. Add a channel to start collecting transcripts.";
+  $("feed-empty").textContent = search ? "No videos match this search. Try a different title or channel." : "No videos yet";
   $("feed-more").hidden = visible.length >= matches.length;
   $("feed-more").textContent = `Load older videos (${visible.length} of ${matches.length})`;
   $("result-count").textContent = `${matches.length} video${matches.length === 1 ? "" : "s"}${search ? " found" : ""}`;
@@ -314,7 +333,7 @@ async function renderReader(jobs, job) {
   readerIdentity = identity;
   const activeTab = tabs.find((tab) => tab.key === readerTab);
   const sourceUrl = activeTab?.url;
-  const signature = JSON.stringify([identity, readerTab, tabs, job.stage, job.scheduled, job.updated_at, job.summary_updated_at, job.summary_dir, job.postprocessing_dir]);
+  const signature = JSON.stringify([identity, readerTab, tabs, job.title, job.channel_title, job.published_at, job.duration, job.url, job.stage, job.scheduled, job.updated_at, job.summary_updated_at, job.summary_dir, job.postprocessing_dir]);
   if (signature === readerSignature) return;
   readerSignature = signature;
   readerController?.abort();
@@ -327,14 +346,7 @@ async function renderReader(jobs, job) {
   close.append(icon("x-mark"));
   close.addEventListener("click", backToLibrary);
   closeBar.append(node("span", "Your library"), close);
-  const parts = [closeBar, digestBreadcrumbs(job.channel_id)];
-  if (job.cover_url) {
-    const cover = node("img", undefined, "reader-cover");
-    cover.src = job.cover_url;
-    cover.alt = "Screenshot saved with this transcript";
-    cover.addEventListener("error", () => cover.remove(), {once:true});
-    parts.push(cover);
-  }
+  const parts = [closeBar];
   const title = node("h2", job.title || job.video_id);
   title.id = "reader-title";
   const statusRow = node("div", undefined, "reader-status-row");
@@ -426,7 +438,7 @@ async function renderReader(jobs, job) {
     body.tabIndex = 0;
   }
   const content = node("div", undefined, "reading-content");
-  if (activeTab) body.append(actions, shareStatus);
+  if (activeTab) parts.push(actions, shareStatus);
   body.append(content);
   content.addEventListener("click", (event) => {
     const link = event.target.closest("a[href]");
@@ -555,8 +567,12 @@ document.addEventListener("keydown", (event) => {
   }
 });
 narrowReader.addEventListener("change", () => setReaderOpen($("reader").classList.contains("is-open")));
-$("today").textContent = new Date().toLocaleDateString(undefined, {weekday:"short", day:"numeric", month:"long", year:"numeric"});
-$("video-search").addEventListener("input", renderFeed);
+$("video-search").addEventListener("input", () => {
+  readerLevel = "video";
+  $("rolling-summary").setAttribute("aria-pressed", "false");
+  rendered = "";
+  renderFeed();
+});
 $("refresh").addEventListener("click", refresh);
 restoreFeed();
 refresh();
@@ -572,26 +588,26 @@ function syncScopes() {
   if (!archive.channels.some((c) => c.id === libraryScope)) libraryScope = "";
   picker.value = libraryScope;
 }
-function chooseScope(channel = "") {
+function chooseScope(channel = "", overview = false) {
   libraryScope = channel;
   $("channel-scope").value = channel;
   feedLimit = 50;
-  readerLevel = "digest";
+  readerLevel = overview ? "digest" : "video";
   readerSignature = "";
-  $("rolling-summary").setAttribute("aria-pressed", "true");
+  rendered = "";
+  $("rolling-summary").setAttribute("aria-pressed", String(overview));
   renderFeed();
-  renderDigest();
 }
 function digestBreadcrumbs(channel) {
   const nav = node("nav", undefined, "digest-breadcrumbs");
   nav.setAttribute("aria-label", "Summary levels");
   const all = node("button", "All channels");
-  all.addEventListener("click", () => chooseScope());
+  all.addEventListener("click", () => chooseScope("", true));
   nav.append(all);
   if (channel) {
     const name = archive?.channels.find((c) => c.id === channel)?.title || channel;
     const button = node("button", name);
-    button.addEventListener("click", () => chooseScope(channel));
+    button.addEventListener("click", () => chooseScope(channel, true));
     nav.append(node("span", "/"), button);
   }
   return nav;
@@ -645,7 +661,7 @@ async function renderDigest() {
     browse.append(node("h3", "Explore channels"));
     for (const channel of archive?.channels || []) {
       const button = node("button", channel.title, "button");
-      button.addEventListener("click", () => chooseScope(channel.id));
+      button.addEventListener("click", () => chooseScope(channel.id, true));
       browse.append(button);
     }
   } else {
@@ -712,7 +728,7 @@ async function renderDigest() {
       if (target.origin !== location.origin) return;
       const channel = target.pathname.match(/^\/channels\/([^/]+)\/summary\/$/);
       const video = target.pathname.match(/^\/videos\/([^/]+)\/transcripts\/([^/]+)\/artifacts\/summary\/$/);
-      if (channel) { event.preventDefault(); chooseScope(decodeURIComponent(channel[1])); }
+      if (channel) { event.preventDefault(); chooseScope(decodeURIComponent(channel[1]), true); }
       else if (video) {
         const jobs = archive.jobs.filter((j) => j.video_id === decodeURIComponent(video[1]));
         if (jobs.length) { event.preventDefault(); selectVideo(jobs, jobs.find((j) => j.profile === decodeURIComponent(video[2])) || bestJob(jobs)); }
@@ -723,5 +739,5 @@ async function renderDigest() {
     if (!controller.signal.aborted) { content.textContent = error.message; readerSignature = ""; }
   }
 }
-$("channel-scope").addEventListener("change", (event) => { chooseScope(event.target.value); setReaderOpen(true); });
-$("rolling-summary").addEventListener("click", () => { chooseScope(libraryScope); setReaderOpen(true); });
+$("channel-scope").addEventListener("change", (event) => chooseScope(event.target.value));
+$("rolling-summary").addEventListener("click", () => { chooseScope(libraryScope, true); setReaderOpen(true); });
