@@ -350,9 +350,13 @@ async function renderReader(jobs, job) {
   const title = node("h2", job.title || job.video_id);
   title.id = "reader-title";
   const statusRow = node("div", undefined, "reader-status-row");
-  const youtube = externalLink("View on YouTube", job.url, "reader-youtube");
-  youtube.prepend(icon("arrow-top-right-on-square"));
-  statusRow.append(statusBadge(job), youtube);
+  const youtube = externalLink("", job.url, "document-button");
+  youtube.title = "View on YouTube";
+  youtube.setAttribute("aria-label", youtube.title);
+  const play = node("span", "▶", "youtube-icon");
+  play.setAttribute("aria-hidden", "true");
+  youtube.append(play);
+  statusRow.append(statusBadge(job));
   parts.push(title, node("p", [job.channel_title, date(job.published_at, true), duration(job.duration)].filter(Boolean).join(" · "), "reader-meta"), statusRow);
   if (jobs.length > 1) {
     const label = node("label", "Transcript version", "profile-picker");
@@ -373,6 +377,8 @@ async function renderReader(jobs, job) {
     $(`reader-tab-${readerTab}`)?.focus({preventScroll: true});
   };
   const actions = node("div", undefined, "reader-actions");
+  actions.append(youtube);
+  statusRow.append(actions);
   const shareStatus = node("div", undefined, "reader-share-status");
   shareStatus.setAttribute("role", "status");
   if (activeTab) {
@@ -438,7 +444,7 @@ async function renderReader(jobs, job) {
     body.tabIndex = 0;
   }
   const content = node("div", undefined, "reading-content");
-  if (activeTab) parts.push(actions, shareStatus);
+  if (activeTab) parts.push(shareStatus);
   body.append(content);
   content.addEventListener("click", (event) => {
     const link = event.target.closest("a[href]");
