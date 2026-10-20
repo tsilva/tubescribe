@@ -48,4 +48,4 @@ The [operations guide](docs/guide.md) contains the complete reference:
 - [Local and network architecture](docs/guide.md#local-runtime-and-network-adapters), [Vercel hosting](docs/guide.md#vercel-hosting-with-local-processing), and [configuration](docs/guide.md#configuration-access-and-inference-roles).
 - [Verification and schema upgrades](docs/guide.md#schema-upgrades-and-automated-verification), plus the [branding asset inventory](image-assets/manifest.json).
 
-For development, run `scripts/verify` for lint and local tests. PostgreSQL/S3 and container rehearsals are documented separately in the guide.
+For development, run `scripts/verify` for lint and local tests. The [container rehearsal](docs/guide.md#local-postgresql-and-s3-rehearsal) checks CLI readiness and metrics alongside HTTP delivery, outages, recovery, and restore.
