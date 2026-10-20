@@ -1247,7 +1247,8 @@ def render_preview(markdown: str, title: str) -> str:
 body{{margin:0;background:#f6f5f1;color:#242824;font:18px/1.7 Georgia,serif}}
 main{{max-width:920px;margin:0 auto;padding:40px 36px 100px;background:white}}
 header,nav,figcaption{{font:14px/1.5 system-ui,sans-serif}}
-header{{display:flex;justify-content:space-between;gap:24px;color:#68716b}}
+header{{color:#68716b}}header>span{{display:block;margin-bottom:8px}}
+header>a{{display:inline-block;max-width:100%;overflow-wrap:anywhere}}
 h1,h2,h3,h4{{font-family:system-ui,sans-serif;line-height:1.25;scroll-margin-top:24px}}
 h1{{font-size:38px}}h2{{margin-top:52px;font-size:25px}}h3{{font-size:21px}}
 a{{color:#196755;text-underline-offset:3px}}nav{{margin:24px 0;padding:18px;background:#f3f6f2}}
