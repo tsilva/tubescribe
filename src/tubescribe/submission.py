@@ -220,8 +220,15 @@ def consume(store, *, once=False, poll=None, process=None):
 
 def consume_network(store, *, once, poll, process):
     """Each consumer reserves requests transactionally; PIDs remain local diagnostics."""
+    from contextlib import nullcontext
+
+    from .changes import notifications, queue_deadline
+
     completed = failed = 0
-    with lease(store.root, "dispatcher:" + store.config.worker_id, reentrant=False):
+    with (
+        nullcontext(None) if once else notifications() as wake,
+        lease(store.root, "dispatcher:" + store.config.worker_id, reentrant=False),
+    ):
         while True:
             from .rollups import schedule
 
@@ -231,7 +238,7 @@ def consume_network(store, *, once, poll, process):
             if row is None:
                 if once:
                     return {"dispatched": completed, "failed": failed}
-                time.sleep(poll or store.config.worker_poll)
+                wake(queue_deadline(store))
                 continue
             try:
                 request = JobRequest(**json.loads(row["request"]))

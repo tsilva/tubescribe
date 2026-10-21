@@ -21,11 +21,16 @@ dialog{border:1px solid var(--border);box-shadow:0 20px 80px #13241c33;border-ra
 
 .brand-mark{display:block;width:44px;height:44px;object-fit:contain;flex:none}
 
+[hidden] { display: none !important; }
+.auth-panel { max-width: 30rem; margin: 4rem auto; padding: 1.5rem; }
+.auth-panel h1 { font-size: 2rem; }
+#user-button { min-width: 2rem; }
 
 .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
 .toolbar select{flex:0 1 210px;min-width:0;max-width:100%;min-height:48px;padding:10px 30px 10px 12px;border:1px solid #cfd5de;border-radius:9px;background:white;color:var(--ink);font-size:14px;text-overflow:ellipsis}
 .video-placeholder{display:flex;align-items:center;justify-content:center;width:100%;height:100%;position:absolute;inset:0;border:1px solid #dde4e6;border-radius:6px;background:linear-gradient(135deg,#edf2f2,#dfe9e5);color:#708b7e;font-size:28px}
 .completion-badge{position:absolute;bottom:6px;right:6px;display:flex;align-items:center;justify-content:center;width:25px;height:25px;border:2px solid white;border-radius:50%;background:var(--green);color:white;font-size:15px;font-weight:750;box-shadow:0 1px 4px #141b2926}
 .reader>.reader-share-status{text-align:right}
+#user-button:empty{display:none}
 @media(max-width:1200px){.toolbar select{flex-basis:180px}}
 @media(max-width:520px){.toolbar select{width:100%;font-size:12px}.toolbar .search-field{min-width:0}.video-placeholder{font-size:24px}.completion-badge{width:23px;height:23px;font-size:14px}}

@@ -8,7 +8,7 @@
 
 <p align="center"><a href="https://tubescribe.tsilva.eu/">Open the library</a></p>
 
-TubeScribe is for people who follow YouTube channels and want to revisit their ideas in writing. It collects videos into a chronological library with one-page summaries, full transcripts, and timestamped subtitles. Read the [hosted library](https://tubescribe.tsilva.eu/) immediately, or run your own archive with the CLI and local processing services.
+TubeScribe is for people who follow YouTube channels and want to revisit their ideas in writing. It collects videos into a chronological library with one-page summaries, full transcripts, and timestamped subtitles. Sign in to the [hosted library](https://tubescribe.tsilva.eu/), or run your own archive with the CLI and local processing services.
 
 ## Try it
 
@@ -16,7 +16,11 @@ TubeScribe is for people who follow YouTube channels and want to revisit their i
 2. The newest video is selected automatically. Select any video to open its saved summary in the reading pane; switch to **Transcript** for the full text or **SRT timestamps** to follow the source video.
 3. Choose **7-day summary** for a recent overview, or use **Open full page** and **Copy link** to keep a particular document.
 
+Libraries are private to each account. The existing archive belongs to its owner; new accounts see **No videos yet**. Local processors continue publishing to the owner’s library.
+
 A useful first result is a readable summary with links to the original video and any saved figures. Videos still awaiting processing show their current state; raw transcripts can be read before the summary is ready. Browsing only reads saved content and never starts processing.
+
+The reader refreshes on entry, when you return to its tab, or when you choose **Refresh**. It does not poll in the background. Local PostgreSQL processors wake on database notifications, with timers only for retries and expiring work or summary windows.
 
 ## Keep the parts worth revisiting
 

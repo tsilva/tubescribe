@@ -19,14 +19,16 @@
   <header class="app-bar">
     <a class="brand" href="/" aria-label="TubeScribe library"><img class="brand-mark" src="/brand/android-chrome-192.png" width="44" height="44" alt=""><span>TubeScribe</span></a>
     <div class="live"><span id="worker-status">Connecting…</span><span id="updated"></span><button id="refresh" class="icon-button" aria-label="Refresh library" title="Refresh library"><img src="/icons/arrow-path.svg" alt=""></button></div>
+    <div id="user-button" aria-label="Your account"></div>
   </header>
-  <main class="workspace">
+  <section id="auth-panel" class="auth-panel" aria-label="Sign in"><h1>Your private video library</h1><p id="auth-message">Connecting securely…</p><div id="sign-in"></div></section>
+  <main class="workspace" hidden>
     <div class="library-column">
       <header class="page-heading"><h1>Your library</h1><p id="archive-summary">Connecting to your library…</p></header>
       <div id="error" class="error hidden" role="alert"></div>
       <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search channels, video titles, or IDs…"></div><select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select><button id="rolling-summary" class="button" aria-pressed="false">7-day summary</button><span id="result-count" class="visually-hidden" role="status"></span></div>
       <div id="feed" class="video-feed" tabindex="-1" aria-label="Video feed"><p class="empty">Loading your videos…</p></div>
-      <footer><a href="/library/">Browse saved content</a> · <a href="/llms.txt">Agent reading guide</a> · Transcripts, context, and the ideas worth keeping.<span>Library updates automatically</span></footer>
+      <footer><a href="/library/">Browse saved content</a> · <a href="/llms.txt">Agent reading guide</a> · Transcripts, context, and the ideas worth keeping.<span>Refresh to check for new videos</span></footer>
     </div>
     <aside id="reader" class="reader" aria-labelledby="reader-title">
       <div class="reader-empty"><p class="eyebrow">YOUR READING SPACE</p><h2 id="reader-title">Find your next idea.</h2><p>Select a video to read its summary or transcript.</p></div>

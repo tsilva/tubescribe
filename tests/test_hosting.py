@@ -55,6 +55,8 @@ class Hosting(unittest.TestCase):
     def environment(self, folder):
         return {
             "TUBESCRIBE_DATA": folder,
+            "CLERK_SECRET_KEY": "sk_test_fixture",
+            "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY": "pk_test_Y2xlcmsudGVzdCQ=",
             "DATABASE_URL_UNPOOLED": "postgresql://unused:unused@localhost/archive",
             "TUBESCRIBE_S3_BUCKET": "private-test",
             "TUBESCRIBE_S3_ENDPOINT": "https://objects.example.test",

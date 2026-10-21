@@ -286,6 +286,8 @@ class CloudRehearsal(unittest.TestCase):
                     RuntimeConfig.load(self.base)
 
     def test_numbered_migrations_are_repeatable(self):
+        from tubescribe.migrations import SCHEMA_VERSION
+
         self.assertEqual(
             [
                 r[0]
@@ -293,7 +295,7 @@ class CloudRehearsal(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ],
-            [1, 2, 3, 4, 5, 6],
+            list(range(1, SCHEMA_VERSION + 1)),
         )
         another = Store(self.base / "migrated")
         self.addCleanup(another.db.close)

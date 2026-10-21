@@ -101,6 +101,12 @@ def restore_archive(store, source):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('claims','schema_migrations')"
             )
         ]
+        tables.sort(key=lambda table: table == "catalogue_revisions")
+        if "reader_library" in tables:
+            from .auth import ensure_reader_schema
+
+            with store.db:
+                ensure_reader_schema(store.db)
         # Reject a live archive before copying any object. Matching partial uploads may resume.
         for table in tables:
             if not re.fullmatch(r"[a-z_]+", table):
@@ -109,7 +115,7 @@ def restore_archive(store, source):
             saved_fields = {r[1] for r in incoming.execute(f"PRAGMA table_info({table})")}
             if not fields or set(fields) != saved_fields:
                 raise ValueError("Backup schema is incompatible with this archive")
-            if store.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]:
+            if table != "catalogue_revisions" and store.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]:
                 raise ValueError("Restore requires an empty archive database")
         objects = {k: v for k, v in inventory.items() if k != "archive.sqlite3"}
         for key in store.blobs.keys():
@@ -145,6 +151,8 @@ def restore_archive(store, source):
 
             assert_owned(store.db, store.root)
             for table in tables:
+                if table == "catalogue_revisions":
+                    store.db.execute("DELETE FROM catalogue_revisions")
                 fields = columns(store.db, table)
                 rows = incoming.execute(f"SELECT {','.join(fields)} FROM {table}")
                 if store.config.network:

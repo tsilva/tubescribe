@@ -8,6 +8,7 @@ dependencies = [
     "yt-dlp[default]>=2026.2.4",
     "boto3>=1.35",
     "psycopg[binary]>=3.2",
+    "clerk-backend-api>=7.0.0",
 ]
 
 [project.optional-dependencies]

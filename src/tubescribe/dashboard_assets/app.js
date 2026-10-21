@@ -17,7 +17,9 @@ let digestRefreshing = false;
 const readingCache = new Map();
 const rowCache = new Map();
 const feedRecords = new Map();
-const feedCacheKey = "tubescribe.feed.v2";
+let signedInUser = null;
+let authEnabled = true;
+let identityGeneration = 0;
 let feedRevision = "";
 let feedLimit = 50;
 let feedSearch = "";
@@ -461,7 +463,7 @@ async function renderReader(jobs, job) {
   pane.replaceChildren(...parts);
   pane.scrollTop = 0;
   if (!sourceUrl) {
-    content.append(node("h3", "The transcript is not ready yet."), node("p", job.stage === "failed" ? "The transcript is currently unavailable." : "This video is in your library. Its transcript will appear here once processing finishes."));
+    content.append(node("h3", "The transcript is not ready yet."), node("p", job.stage === "failed" ? "The transcript is currently unavailable." : "This video is in your library. Refresh after processing finishes to read its transcript."));
     return;
   }
   content.append(node("p", `Loading ${activeTab.label.toLowerCase()}…`, "muted"));
@@ -469,7 +471,7 @@ async function renderReader(jobs, job) {
     const cacheKey = sourceUrl + "|" + signature;
     let documentData = readingCache.get(cacheKey);
     if (!documentData) {
-      const response = await fetch(sourceUrl, {signal: controller.signal});
+      const response = await libraryFetch(sourceUrl, {signal: controller.signal});
       if (!response.ok) throw new Error("This document is temporarily unavailable.");
       documentData = {text: await response.text(), type: response.headers.get("Content-Type") || ""};
     }
@@ -522,35 +524,22 @@ function showArchive(cached = false) {
   syncScopes();
   renderFeed();
 }
-function restoreFeed() {
-  try {
-    const saved = JSON.parse(sessionStorage.getItem(feedCacheKey));
-    if (!saved || !Number.isFinite(saved.savedAt) || Date.now() - saved.savedAt > 86400000 || !Array.isArray(saved.jobs)
-        || !saved.jobs.every((job) => typeof job.key === "string")
-        || !Array.isArray(saved.channels) || !saved.summary || !saved.revision) return;
-    applyFeed({...saved, full: true});
-    showArchive(true);
-  } catch { /* Storage can be disabled or contain an obsolete cache. */ }
-}
 async function refresh() {
-  if (refreshing) return;
+  if (refreshing || !signedInUser) return;
+  const generation = identityGeneration;
   refreshing = true;
   $("refresh").disabled = true;
   try {
-    const response = await fetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`, {cache: feedRevision ? "no-store" : "default"});
+    const response = await libraryFetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`);
     const data = await response.json();
+    if (generation !== identityGeneration) return;
     if (!response.ok) throw new Error(data.error || "Archive unavailable");
-    const previous = feedRevision;
     applyFeed(data);
     $("error").classList.add("hidden");
     showArchive();
     refreshDigests();
-    if (previous !== feedRevision || data.full) {
-      try {
-        sessionStorage.setItem(feedCacheKey, JSON.stringify({...archive, revision: feedRevision, savedAt: Date.now()}));
-      } catch { /* Live updates still work without session storage. */ }
-    }
   } catch (error) {
+    if (generation !== identityGeneration) return;
     $("error").textContent = `${error.message}. ${archive ? "Showing the last available snapshot." : "Could not load the archive."} Refresh will retry.`;
     $("error").classList.remove("hidden");
     $("updated").textContent = "Connection unavailable";
@@ -580,10 +569,8 @@ $("video-search").addEventListener("input", () => {
   renderFeed();
 });
 $("refresh").addEventListener("click", refresh);
-restoreFeed();
-refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, 5000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+// Refresh on entry, explicit request, or returning to the tab; no background polling.
+document.addEventListener("visibilitychange", () => { if (!document.hidden && signedInUser) refresh(); });
 
 function syncScopes() {
   const picker = $("channel-scope");
@@ -619,14 +606,18 @@ function digestBreadcrumbs(channel) {
   return nav;
 }
 async function refreshDigests() {
-  if (digestRefreshing) return;
+  if (digestRefreshing || !signedInUser) return;
+  const generation = identityGeneration;
   digestRefreshing = true;
   try {
-    const response = await fetch("/api/summaries", {cache: "no-store"});
+    const response = await libraryFetch("/api/summaries");
     if (!response.ok) throw new Error("Seven-day summaries are temporarily unavailable.");
-    digests = await response.json();
+    const updatedDigests = await response.json();
+    if (generation !== identityGeneration) return;
+    digests = updatedDigests;
     if (readerLevel === "digest") renderDigest();
   } catch (error) {
+    if (generation !== identityGeneration) return;
     if (readerLevel === "digest") {
       readerSignature = "";
       const heading = node("h2", "Seven-day summary");
@@ -717,7 +708,7 @@ async function renderDigest() {
     const key = entry.url + entry.input_hash + entry.generated_at;
     let text = readingCache.get(key)?.text;
     if (!text) {
-      const response = await fetch(entry.url, {signal: controller.signal});
+      const response = await libraryFetch(entry.url, {signal: controller.signal});
       if (!response.ok) throw new Error("This summary is being refreshed. It will appear automatically.");
       text = await response.text();
       readingCache.set(key, {text});
@@ -747,3 +738,125 @@ async function renderDigest() {
 }
 $("channel-scope").addEventListener("change", (event) => chooseScope(event.target.value));
 $("rolling-summary").addEventListener("click", () => { chooseScope(libraryScope, true); setReaderOpen(true); });
+
+function clearPrivateLibrary() {
+  identityGeneration += 1;
+  readerController?.abort();
+  feedObserver?.disconnect();
+  readingCache.clear(); rowCache.clear(); feedRecords.clear();
+  archive = null; digests = null; feedRevision = ""; rendered = "";
+  selectedVideo = null; selectedProfile = null; libraryScope = "";
+  readerSignature = ""; readerIdentity = ""; readerLevel = "video";
+  $("rolling-summary").setAttribute("aria-pressed", "false");
+  feedLimit = 50; feedSearch = "";
+  $("video-search").value = "";
+  $("channel-scope").replaceChildren(new Option("All channels", ""));
+  delete $("channel-scope").dataset.signature;
+  $("archive-summary").textContent = "Your private library";
+  $("updated").textContent = "";
+  $("result-count").textContent = "";
+  $("error").classList.add("hidden");
+  $("feed").replaceChildren(node("p", "No videos yet", "empty"));
+  resetReader();
+  // Discard the former anonymous feed cache. Private data stays in memory only.
+  try { sessionStorage.removeItem("tubescribe.feed.v2"); } catch { /* Storage disabled. */ }
+}
+async function libraryFetch(url, options = {}) {
+  const generation = identityGeneration;
+  if (!signedInUser) throw new Error("Sign in to read your library");
+  const headers = new Headers(options.headers);
+  if (authEnabled) {
+    const token = await window.Clerk.session?.getToken();
+    if (!token) throw new Error("Your session has ended. Please sign in again");
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const response = await fetch(url, {...options, headers, cache: "no-store", credentials: "same-origin"});
+  if (generation !== identityGeneration) throw new DOMException("Account changed", "AbortError");
+  if (response.status === 401) {
+    signedInUser = null;
+    clearPrivateLibrary();
+    document.querySelector(".workspace").hidden = true;
+    $("auth-panel").hidden = false;
+    $("auth-message").textContent = "Your session has ended. Please sign in again.";
+    throw new Error("Sign in required");
+  }
+  return response;
+}
+async function syncIdentity({user, session}) {
+  const next = user && session ? user.id : null;
+  if (next === signedInUser) return;
+  signedInUser = next;
+  clearPrivateLibrary();
+  const generation = identityGeneration;
+  document.querySelector(".workspace").hidden = !next;
+  $("auth-panel").hidden = Boolean(next);
+  if (!next) {
+    window.Clerk.unmountUserButton($("user-button"));
+    $("worker-status").textContent = "Sign in to continue";
+    $("auth-message").textContent = "Sign in or create an account to read your videos.";
+    window.Clerk.mountSignIn($("sign-in"), {routing: "hash", forceRedirectUrl: "/" + window.location.search});
+    return;
+  }
+  window.Clerk.unmountSignIn($("sign-in"));
+  window.Clerk.mountUserButton($("user-button"));
+  try {
+    const response = await libraryFetch("/api/session");
+    const verified = await response.json();
+    if (generation !== identityGeneration) return;
+    if (!response.ok || verified.user_id !== next) throw new Error("Could not verify your account. Refresh to retry.");
+    const destination = new URLSearchParams(window.location.search).get("return_to");
+    if (destination && destination.startsWith("/") && !destination.startsWith("//")) {
+      const target = new URL(destination, window.location.origin);
+      if (target.origin === window.location.origin && target.pathname !== "/") {
+        window.location.replace(target.href);
+        return;
+      }
+    }
+    await refresh();
+  } catch (error) {
+    if (generation !== identityGeneration) return;
+    $("error").textContent = error.message;
+    $("error").classList.remove("hidden");
+  }
+}
+async function initializeAuthentication() {
+  clearPrivateLibrary();
+  try {
+    const response = await fetch("/auth/config", {cache: "no-store"});
+    if (!response.ok) throw new Error("Sign-in configuration is unavailable. Refresh to retry.");
+    const settings = await response.json();
+    authEnabled = settings.enabled;
+    if (!authEnabled) {
+      signedInUser = "local";
+      $("auth-panel").hidden = true;
+      document.querySelector(".workspace").hidden = false;
+      await refresh();
+      return;
+    }
+    const frontend = new URL(settings.frontend_api);
+    if (frontend.protocol !== "https:" || frontend.pathname !== "/") throw new Error("Invalid sign-in configuration");
+    const scripts = [
+      "/npm/@clerk/ui@1.40.0/dist/ui.browser.js",
+      "/npm/@clerk/clerk-js@6.39.0/dist/clerk.browser.js",
+    ];
+    for (const path of scripts) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = frontend.origin + path;
+        script.crossOrigin = "anonymous";
+        script.dataset.clerkPublishableKey = settings.publishable_key;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error("Sign-in could not load. Refresh to retry."));
+        document.head.append(script);
+      });
+    }
+    await window.Clerk.load({ui: {ClerkUI: window.__internal_ClerkUICtor}});
+    // Force initial signed-out rendering, then clear every cache on account changes.
+    signedInUser = undefined;
+    window.Clerk.addListener((state) => { void syncIdentity(state); });
+  } catch (error) {
+    $("auth-message").textContent = error.message;
+    $("worker-status").textContent = "Sign-in unavailable";
+  }
+}
+void initializeAuthentication();

@@ -375,6 +375,22 @@ wheels = [
 ]
 
 [[package]]
+name = "clerk-backend-api"
+version = "7.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d8/48/de97a14a8fcc9da3f37ed2d6320be489f4dd076e640c9bac60482f620e59/clerk_backend_api-7.0.0.tar.gz", hash = "sha256:2ff8eab7a75d7ff527cadfaf4ebba53ee5316ac1f7bc22f0d0d6f1b8033082f0", size = 291950, upload-time = "2026-08-11T13:50:25.109Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/11/ba1731756d7e8bce06ac3428604629600cde7c17f1b8415277f62f18657c/clerk_backend_api-7.0.0-py3-none-any.whl", hash = "sha256:8df8639dcdaa600dbd1a26878ecaeb6dcc724b2d21247eb6abef4cbd73be9eb5", size = 598066, upload-time = "2026-08-11T13:50:23.67Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1858,6 +1874,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyjwt"
+version = "2.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/ea/5194e52748b0da83d71e082d75496eaec6e58f419f5e184786ded517e6a9/pyjwt-2.15.1.tar.gz", hash = "sha256:4f259e80cdfb6b3fc18a7de51fd1ef9ec79652f25019bae68975ca2468a34df8", size = 121252, upload-time = "2026-09-28T18:40:42.598Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/50/ca/44de4e75f8aadc457f0634be3b542815078ded46dca30efb960edeecad6e/pyjwt-2.15.1-py3-none-any.whl", hash = "sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193", size = 33860, upload-time = "2026-09-28T18:40:41.429Z" },
+]
+
+[[package]]
 name = "pyparsing"
 version = "3.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2537,6 +2562,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
+    { name = "clerk-backend-api" },
     { name = "httpx" },
     { name = "psycopg", extra = ["binary"] },
     { name = "yt-dlp", extra = ["default"] },
@@ -2576,6 +2602,7 @@ requires-dist = [
     { name = "av", marker = "extra == 'asr'", specifier = "<17" },
     { name = "boto3", specifier = ">=1.35" },
     { name = "boto3", marker = "extra == 'cloud'", specifier = ">=1.35" },
+    { name = "clerk-backend-api", specifier = ">=7.0.0" },
     { name = "fastapi", marker = "extra == 'asr'", specifier = ">=0.115" },
     { name = "faster-whisper", marker = "extra == 'asr'", specifier = ">=1.2" },
     { name = "httpx", specifier = ">=0.28" },

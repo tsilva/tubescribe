@@ -223,6 +223,51 @@ class NetworkRuntime(unittest.TestCase):
             ).fetchone()
         )
 
+    def test_notifications_wake_on_committed_work_and_revisions_are_transactional(self):
+        from tubescribe.changes import notifications, revisions
+
+        before = revisions(self.store.db)
+        with notifications() as wait:
+            started = time.monotonic()
+            with self.assertRaises(RuntimeError), self.store.db:
+                self.store.db.execute("UPDATE videos SET title='Rolled back'")
+                raise RuntimeError()
+            wait(time.time() + 0.15)
+            self.assertGreaterEqual(time.monotonic() - started, 0.1)
+            self.assertEqual(revisions(self.store.db), before)
+            # Commit BEFORE entering wait: notifications queued after LISTEN
+            # must not be missed between checking the queue and sleeping.
+            Dispatcher(self.store).submit(JobRequest("work", {"video": [VID]}))
+            started = time.monotonic()
+            wait(time.time() + 2)
+            self.assertLess(time.monotonic() - started, 1)
+        self.assertNotEqual(revisions(self.store.db)["feed"], before["feed"])
+
+    def test_idle_consumer_uses_notification_wait_instead_of_polling(self):
+        from contextlib import contextmanager
+
+        from tubescribe.submission import consume_network
+
+        class StopWait(Exception):
+            pass
+
+        waits = []
+
+        @contextmanager
+        def subscription():
+            def wait(deadline):
+                waits.append(deadline)
+                raise StopWait()
+            yield wait
+
+        with (patch("tubescribe.changes.notifications", subscription),
+              patch("tubescribe.submission.time.sleep", side_effect=AssertionError("polling")),
+              patch("tubescribe.rollups.schedule") as schedule,
+              self.assertRaises(StopWait)):
+            consume_network(self.store, once=False, poll=0.01, process=None)
+        schedule.assert_called_once()
+        self.assertEqual(waits, [None])
+
     def test_explicit_postgres_upgrade_preserves_publications_and_queued_work(self):
         from contextlib import closing
         from urllib.parse import quote, urlencode

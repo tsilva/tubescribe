@@ -311,7 +311,10 @@ def snapshot(root: Path) -> dict:
             # bundle. Resource delivery still validates the manifest and contents.
             job["summary_url"] = artifact_url(job["video_id"], job["profile"], "summary")
             directory = (root / job["summary_dir"]).resolve()
-            if directory.is_relative_to(root / "artifacts") and (directory / "artifact.md").is_file():
+            if (
+                directory.is_relative_to(root / "artifacts")
+                and (directory / "artifact.md").is_file()
+            ):
                 for figure in sorted((directory / "figures").glob("frame_*.png")):
                     if re.fullmatch(r"frame_\d+\.png", figure.name) and figure.is_file():
                         job["cover_url"] = job["summary_url"] + "figures/" + figure.name
@@ -392,9 +395,22 @@ class FeedChanges:
         self.root = root
         self.history = {}
         self.lock = threading.Lock()
+        self.cached = None
+        self.revision = None
 
     def get(self, revision=None):
         with self.lock:
+            views = ArchiveViews(self.root)
+            current = "feed-v2-" + views.revision()
+            if revision == current:
+                return {
+                    **(self.cached["metadata"] if self.cached and self.revision == current
+                       else views.feed_metadata()),
+                    "generated_at": now(), "revision": current, "full": False,
+                    "jobs": [], "removed": [],
+                }
+            if self.cached and self.revision == current:
+                return {**self.cached["full"], "generated_at": now()}
             data = reader_snapshot(self.root)
             jobs = {}
             for source in data["jobs"]:
@@ -416,9 +432,6 @@ class FeedChanges:
                 ],
                 "summary": {k: data["summary"][k] for k in ("channels", "videos")},
             }
-            current = hashlib.sha256(
-                json.dumps([metadata, fingerprints], sort_keys=True).encode()
-            ).hexdigest()
             previous = fingerprints if revision == current else self.history.get(revision)
             result = {
                 **metadata,
@@ -431,6 +444,11 @@ class FeedChanges:
                 "removed": [] if previous is None else [key for key in previous if key not in jobs],
             }
             self.history[current] = fingerprints
+            self.revision = current
+            self.cached = {
+                "metadata": metadata,
+                "full": {**result, "full": True, "jobs": list(jobs.values()), "removed": []},
+            }
             while len(self.history) > 8:
                 del self.history[next(iter(self.history))]
             return result
@@ -442,6 +460,9 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
     config = RuntimeConfig.load(root)
     instance = instance or uuid.uuid4().hex
     feed_changes = FeedChanges(root)
+    from .auth import AuthenticationUnavailable, ClerkAccess
+
+    access = ClerkAccess(root, (config.public_origin, *public_origins))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -464,7 +485,11 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             self.send_header("Content-Length", str(length))
             cache = "no-store"
             path = urlsplit(self.path).path
-            public = not config.access_token and not self.headers.get("Authorization")
+            public = (
+                not access.enabled
+                and not config.access_token
+                and not self.headers.get("Authorization")
+            )
             if status == 200 and public:
                 if path in STATIC_ASSETS:
                     cache = "public, max-age=0, s-maxage=3600, stale-while-revalidate=60"
@@ -473,16 +498,29 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 elif path.endswith("/cover.png"):
                     cache = "public, max-age=300, s-maxage=3600"
             self.send_header("Cache-Control", cache)
+            if access.enabled:
+                self.send_header("CDN-Cache-Control", "no-store")
+                self.send_header("Vercel-CDN-Cache-Control", "no-store")
             self.send_header("Vary", "Accept, Accept-Encoding" if vary_encoding else "Accept")
             if content_encoding:
                 self.send_header("Content-Encoding", content_encoding)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            clerk_csp = (
+                f"default-src 'self'; script-src 'self' {access.issuer} https://challenges.cloudflare.com https://*.protect.clerk.com; "
+                f"connect-src 'self' {access.issuer} https://*.protect.clerk.com https://clerk-telemetry.com https://*.clerk-telemetry.com; style-src 'self' 'unsafe-inline'; "
+                f"img-src 'self' data: https://img.clerk.com {access.issuer}; "
+                "frame-src https://challenges.cloudflare.com https://*.protect.clerk.com; worker-src 'self' blob:; "
+                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+                if access.enabled
+                else None
+            )
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
                 if generated_html
-                else "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                else clerk_csp
+                or "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
             )
             if getattr(self, "resource", None):
                 self.send_header("Link", f'<{self.origin() + self.resource.url}>; rel="canonical"')
@@ -578,6 +616,37 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             query = parse_qs(url.query)
             try:
                 self.resource = None
+                if url.path == "/auth/config":
+                    self.send_json(access.configuration())
+                    return
+                # Check ownership before resolving ANY data URL, including legacy
+                # paths, figures, metadata, downloads, and HEAD requests.
+                static = url.path in STATIC_ASSETS
+                if access.enabled and not static and url.path != "/llms.txt":
+                    identity = access.identify(self.headers)
+                    if identity is None:
+                        if self.headers.get("Sec-Fetch-Dest") == "document" or (
+                            "text/html" in self.headers.get("Accept", "")
+                            and not url.path.startswith("/api/")
+                        ):
+                            self.send_response(302)
+                            self.send_header("Location", "/?return_to=" + quote(self.path, safe=""))
+                            self.send_header("Cache-Control", "no-store")
+                            self.send_header("Content-Length", "0")
+                            self.end_headers()
+                        else:
+                            self.send_json(
+                                {"error": "Sign in to read your library", "sign_in_url": "/"}, 401
+                            )
+                        return
+                    if url.path == "/api/session":
+                        self.send_json(
+                            {"user_id": identity.user_id, "has_library": identity.owns_library}
+                        )
+                        return
+                    if not identity.owns_library:
+                        self.empty_library(url.path, query)
+                        return
                 from .resources import render_video, resolve, segment, video_metadata
                 from .rollups import index as digest_index
                 from .rollups import records as digest_records
@@ -593,11 +662,15 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                         self.write_data(data)
                     else:
                         data = catalogue(root, query, self.origin())
-                        if url.path == "/api/library" or "application/json" in self.headers.get("Accept", ""):
+                        if url.path == "/api/library" or "application/json" in self.headers.get(
+                            "Accept", ""
+                        ):
                             self.send_json(data, compress=True)
                         else:
                             text = render_catalogue(data).encode()
-                            self.send_headers(200, CONTENT_TYPES[".html"], len(text), generated_html=True)
+                            self.send_headers(
+                                200, CONTENT_TYPES[".html"], len(text), generated_html=True
+                            )
                             self.write_data(text)
                     return
 
@@ -722,11 +795,19 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             raise FileNotFoundError()
                         store = Store(root)
                         try:
-                            manifest = json.loads(store.read_key(directory + "/manifest.json", checksum))
-                            names = sorted(n for n in manifest["files"] if re.fullmatch(r"figures/frame_\d+\.png", n))
+                            manifest = json.loads(
+                                store.read_key(directory + "/manifest.json", checksum)
+                            )
+                            names = sorted(
+                                n
+                                for n in manifest["files"]
+                                if re.fullmatch(r"figures/frame_\d+\.png", n)
+                            )
                             if not names:
                                 raise FileNotFoundError()
-                            data = store.read_key(directory + "/" + names[0], manifest["files"][names[0]])
+                            data = store.read_key(
+                                directory + "/" + names[0], manifest["files"][names[0]]
+                            )
                         finally:
                             store.db.close()
                         self.send_headers(200, CONTENT_TYPES[".png"], len(data))
@@ -821,7 +902,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             f"<title>{html.escape(definition['title'])}</title>"
                             '<link rel="stylesheet" href="/style.css"><main>'
                             f"<h1>{html.escape(definition['title'])}</h1><p>{html.escape(row[0])}</p>"
-                            '<p>This summary is not available yet. Please check back later.</p>'
+                            "<p>This summary is not available yet. Please check back later.</p>"
                             f'<p><a href="/processed/{match[1]}/preview.html">Full transcript</a></p></main></html>'
                         ).encode()
                         data = self.document_data(data)
@@ -910,6 +991,8 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     self.write_data(data)
                 else:
                     self.send_json({"error": "Not found"}, 404)
+            except AuthenticationUnavailable:
+                self.send_json({"error": "Sign-in verification is temporarily unavailable"}, 503)
             except (FileNotFoundError, IsADirectoryError):
                 self.send_json({"error": "File is not available"}, 404)
             except ValueError as error:
@@ -922,6 +1005,51 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 self.send_json({"error": "Output file is temporarily unavailable"}, 503)
 
         do_HEAD = do_GET
+
+        def empty_library(self, path, query):
+            """An authenticated new account sees no archive metadata or object reads."""
+            if path == "/api/feed":
+                self.send_json(
+                    {
+                        "generated_at": now(),
+                        "summary": {"channels": 0, "videos": 0},
+                        "channels": [],
+                        "jobs": [],
+                        "revision": "empty",
+                        "full": True,
+                        "removed": [],
+                    }
+                )
+            elif path == "/api/summaries":
+                self.send_json({"days": 7, "items": []})
+            elif path in {"/api/library", "/library", "/library/"}:
+                from .catalogue import render_catalogue
+
+                data = {
+                    "description": "No videos yet",
+                    "total": 0,
+                    "limit": 50,
+                    "offset": 0,
+                    "channels": [],
+                    "items": [],
+                    "links": {
+                        "self": self.origin() + "/api/library",
+                        "next": None,
+                        "previous": None,
+                        "summaries": self.origin() + "/api/summaries",
+                        "guide": self.origin() + "/llms.txt",
+                    },
+                }
+                if path == "/api/library" or "application/json" in self.headers.get("Accept", ""):
+                    self.send_json(data)
+                else:
+                    content = render_catalogue(data).encode()
+                    self.send_headers(
+                        200, CONTENT_TYPES[".html"], len(content), generated_html=True
+                    )
+                    self.write_data(content)
+            else:
+                self.send_json({"error": "File is not available"}, 404)
 
         def do_POST(self):
             if not self.trusted():
@@ -1042,29 +1170,4 @@ def dashboard(root: Path, action="start", port=0):
             }
             atomic_write(root / "dashboard.json", json.dumps(state, indent=2).encode())
             print(json.dumps(state), flush=True)
-            stop_digests = threading.Event()
-
-            def maintain_digests():
-                from .rollups import schedule
-                from .storage import Store
-
-                while not stop_digests.is_set():
-                    store = None
-                    try:
-                        store = Store(root)
-                        schedule(store)
-                    except Exception:
-                        # The reader remains available while durable services/inference recover.
-                        pass
-                    finally:
-                        if store is not None:
-                            store.db.close()
-                    stop_digests.wait(60)
-
-            digest_thread = threading.Thread(target=maintain_digests, daemon=True)
-            digest_thread.start()
-            try:
-                server.serve_forever()
-            finally:
-                stop_digests.set()
-                digest_thread.join(timeout=5)
+            server.serve_forever()

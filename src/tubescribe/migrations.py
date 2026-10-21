@@ -2,7 +2,7 @@
 
 import os
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class SchemaCompatibilityError(ValueError):
@@ -185,6 +185,67 @@ ROLLING = """CREATE TABLE rolling_summaries (
     completed_at TEXT)"""
 
 
+def revision_schema(db):
+    """Transactional invalidation, including writes made by older processors/SQL tools."""
+    import uuid
+
+    postgres = getattr(db, "dialect", "sqlite") == "postgres"
+    db.execute("CREATE TABLE catalogue_revisions(scope TEXT PRIMARY KEY, revision TEXT NOT NULL)")
+    for scope in ("feed", "sources", "summaries"):
+        db.execute("INSERT INTO catalogue_revisions VALUES(?,?)", (scope, uuid.uuid4().hex))
+    scopes = {
+        "channels": ("feed", "sources"),
+        "videos": ("feed", "sources"),
+        "jobs": ("feed", "sources"),
+        "transcripts": ("feed",),
+        "diarizations": ("feed",),
+        "postprocessings": ("feed",),
+        "artifacts": ("feed", "sources"),
+        "submissions": ("feed",),
+        "rolling_summaries": ("summaries",),
+    }
+    if postgres:
+        db.execute("""CREATE FUNCTION tubescribe_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE scope_name text;
+            BEGIN
+                IF TG_OP='UPDATE' AND NEW IS NOT DISTINCT FROM OLD THEN RETURN NULL; END IF;
+                FOREACH scope_name IN ARRAY TG_ARGV LOOP
+                    INSERT INTO catalogue_revisions VALUES(scope_name, md5(random()::text || clock_timestamp()::text))
+                    ON CONFLICT(scope) DO UPDATE SET revision=excluded.revision;
+                END LOOP;
+                PERFORM pg_notify('tubescribe_changes', current_schema());
+                RETURN NULL;
+            END $$""")
+        for table, names in scopes.items():
+            arguments = ",".join("'" + name + "'" for name in names)
+            db.execute(
+                f"CREATE TRIGGER catalogue_change AFTER INSERT OR UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION tubescribe_revision({arguments})"
+            )
+        # Lease heartbeats never wake the scheduler. Releases wake it after video
+        # submissions have drained; expirations are handled by a deadline timer.
+        db.execute("""CREATE FUNCTION tubescribe_release() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF OLD.resource='archive' OR OLD.resource LIKE 'video:%'
+                   OR OLD.resource LIKE 'job:%' OR OLD.resource LIKE 'submission:%' THEN
+                    PERFORM pg_notify('tubescribe_changes', current_schema());
+                END IF;
+                RETURN NULL;
+            END $$""")
+        db.execute(
+            "CREATE TRIGGER work_released AFTER DELETE ON claims FOR EACH ROW EXECUTE FUNCTION tubescribe_release()"
+        )
+    else:
+        for table, names in scopes.items():
+            body = " ".join(
+                f"INSERT INTO catalogue_revisions VALUES('{name}',lower(hex(randomblob(16)))) ON CONFLICT(scope) DO UPDATE SET revision=excluded.revision;"
+                for name in names
+            )
+            for operation in ("INSERT", "UPDATE", "DELETE"):
+                db.execute(
+                    f"CREATE TRIGGER catalogue_{table}_{operation.lower()} AFTER {operation} ON {table} BEGIN {body} END"
+                )
+
+
 def migrate(db):
     schema_version(db)  # Refuse future/corrupt ledgers before any DDL or PRAGMA writes.
     if getattr(db, "dialect", "sqlite") == "postgres":
@@ -234,6 +295,9 @@ def migrate(db):
         if version < 6:
             db.execute(ROLLING)
             db.execute("INSERT INTO schema_migrations VALUES(6)")
+        if version < 7:
+            revision_schema(db)
+            db.execute("INSERT INTO schema_migrations VALUES(7)")
         db.commit()
     except BaseException:
         db.rollback()
@@ -289,3 +353,6 @@ def migrate_postgres(db):
         if version < 6:
             db.execute(ROLLING.replace("REAL", "DOUBLE PRECISION"))
             db.execute("INSERT INTO schema_migrations VALUES(6)")
+        if version < 7:
+            revision_schema(db)
+            db.execute("INSERT INTO schema_migrations VALUES(7)")

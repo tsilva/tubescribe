@@ -23,9 +23,11 @@ def catalogue(root, query, origin):
         if channel and row["channel_id"] != channel:
             continue
         title = row["title"] or row["video_id"]
-        if search and search not in " ".join(
-            [title, row["video_id"], names.get(row["channel_id"], "")]
-        ).casefold():
+        if (
+            search
+            and search
+            not in " ".join([title, row["video_id"], names.get(row["channel_id"], "")]).casefold()
+        ):
             continue
         # An agent starts with readable publications rather than thousands of indexed uploads.
         if not row.get("json_path"):
@@ -48,7 +50,9 @@ def catalogue(root, query, origin):
         links = {
             "self": base,
             "markdown": base
-            + ("processed.md" if row.get("postprocessing_state") == "complete" else "transcript.md"),
+            + (
+                "processed.md" if row.get("postprocessing_state") == "complete" else "transcript.md"
+            ),
             "json": base + "transcript.json",
             "text": base + "transcript.txt",
             "srt": base + "source.srt",
@@ -58,7 +62,9 @@ def catalogue(root, query, origin):
             links.update(summary=summary, summary_markdown=summary + "artifact.md")
         video["transcripts"].append({"profile": row["profile"], "links": links})
     ordered = sorted(
-        videos.values(), key=lambda v: (timestamp(v["published_at"]) or 0, v["video_id"]), reverse=True
+        videos.values(),
+        key=lambda v: (timestamp(v["published_at"]) or 0, v["video_id"]),
+        reverse=True,
     )
 
     def page(position):
@@ -100,7 +106,7 @@ def render_catalogue(data):
     items = []
     for video in data["items"]:
         content = [anchor(video["url"], video["title"])]
-        content.append(f'<p>{escape(video["channel_title"])} · {escape(video["published_at"])}</p>')
+        content.append(f"<p>{escape(video['channel_title'])} · {escape(video['published_at'])}</p>")
         for transcript in video["transcripts"]:
             links = transcript["links"]
             content.append(
@@ -128,7 +134,11 @@ def render_catalogue(data):
         '<a href="/api/library">JSON catalogue</a> · <a href="/llms.txt">Reading guide</a></nav>'
         "<h2>Channel summaries</h2><p>"
         + channels
-        + f'</p><h2>Videos</h2><p>{data["total"]} videos with saved transcripts, newest first.</p><ol>'
+        + (
+            "</p><h2>Videos</h2><p>No videos yet</p><ol>"
+            if not data["items"]
+            else f"</p><h2>Videos</h2><p>{data['total']} videos with saved transcripts, newest first.</p><ol>"
+        )
         + "".join(items)
         + "</ol><nav>"
         + pages
@@ -141,6 +151,9 @@ def guide(origin):
 
 Read-only library of saved YouTube transcripts, video summaries, channel summaries,
 and an all-channel summary. All generation runs separately on the owner's hardware.
+Sign in first. Content routes require your Clerk session cookie or a current Clerk
+session JWT in Authorization: Bearer. Only the owner can read their library; a
+new account has no videos. Never share session tokens in links or query parameters.
 GET and HEAD consume content; the web app accepts no processing requests.
 
 ## Start here

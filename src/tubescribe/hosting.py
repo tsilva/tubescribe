@@ -23,12 +23,14 @@ def hosted_handler():
     origins = tuple(
         "https://" + host
         for name in ("VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL", "VERCEL_BRANCH_URL")
-        if (host := os.environ.get(name))
-        and re.fullmatch(r"[a-zA-Z0-9.-]+\.vercel\.app", host)
+        if (host := os.environ.get(name)) and re.fullmatch(r"[a-zA-Z0-9.-]+\.vercel\.app", host)
     )
     if not os.environ.get("TUBESCRIBE_PUBLIC_ORIGIN") and origins:
         os.environ["TUBESCRIBE_PUBLIC_ORIGIN"] = origins[0]
     config = RuntimeConfig.load(root)
+    from .auth import ClerkAccess
+
+    ClerkAccess(root, (config.public_origin, *origins), required=True)
     if not (
         config.network
         and config.s3_bucket
@@ -38,7 +40,6 @@ def hosted_handler():
         and os.environ["TUBESCRIBE_MIGRATIONS"] == "check"
     ):
         raise ValueError(
-            "Hosting requires PostgreSQL, S3, public origin, queue dispatch, "
-            "migration check mode"
+            "Hosting requires PostgreSQL, S3, public origin, queue dispatch, migration check mode"
         )
     return make_handler(root, public_origins=origins)

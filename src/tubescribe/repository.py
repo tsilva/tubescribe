@@ -754,6 +754,27 @@ class ArchiveViews:
         with closing(connect(self.root, readonly=True)) as db:
             return db.execute(query, values).fetchone()
 
+    def revision(self):
+        from contextlib import closing
+
+        from .changes import revisions
+
+        with closing(connect(self.root, readonly=True)) as db:
+            return revisions(db).get("feed", "empty")
+
+    def feed_metadata(self):
+        """Cold functions can acknowledge a revision without reading video rows."""
+        from contextlib import closing
+
+        with closing(connect(self.root, readonly=True)) as db:
+            channels = [dict(row) for row in db.execute(
+                "SELECT c.id,c.title,c.url,COUNT(v.id) AS videos FROM channels c "
+                "LEFT JOIN videos v ON v.channel_id=c.id GROUP BY c.id,c.title,c.url ORDER BY c.title"
+            )]
+        return {"channels": channels, "summary": {
+            "channels": len(channels), "videos": sum(row["videos"] for row in channels)
+        }}
+
     def owned(self, resource):
         try:
             from contextlib import closing

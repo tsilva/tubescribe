@@ -360,7 +360,7 @@ The pane defaults to the existing summary, preserving links to its saved figures
 
 The web app is consumption-only: visitors can browse the library, seven-day channel and all-channel summaries, video summaries, transcripts, subtitles and published figures. All POST/PUT/PATCH/DELETE requests return 405 with `Allow: GET, HEAD`. There are no processing forms, retry controls, operational snapshots, metrics or arbitrary object-key download routes. Discovery and all generation remain in local CLI/services. The CLI's loopback-only health handshake is not exposed by the hosted app.
 
-The reader checks `/api/feed?revision=REVISION` every five seconds while visible. The feed uses a single database snapshot; it does not inventory object storage, scan local publications, collect operational events, or inspect worker leases. A matching revision returns an empty update even when the next request reaches a different function instance. The first response contains compact video records; subsequent responses contain only changed records and removed keys. Unknown revisions return a fresh full feed; gzip is used when accepted. Reader responses exclude worker identity, retry budgets, service errors, discovery diagnostics and storage keys. A per-tab cache displays saved content immediately while checking for updates. It initially renders 50 videos, then adds older rows in batches of 50. Search covers the cached catalogue; row selection and reader content survive updates. Public HTML/assets are cached at the CDN for up to one hour, with browsers revalidating them. The initial public feed has a five-second CDN lifetime and up to ten seconds of stale-while-revalidate; revision requests, errors, authenticated requests and representation-negotiated documents remain uncached. Token-protected deployments never use shared caching. Thumbnails are resolved lazily through `cover.png?v=PUBLICATION_HASH`: the server verifies the saved manifest and requested image checksum without listing or downloading the whole publication. New publication hashes give new cache keys. No external frontend assets or JavaScript packages are required.
+The reader loads on entry, explicit **Refresh**, and return to the tab; there is no timed feed or digest polling. `/api/feed?revision=REVISION` first reads the small transactional catalogue revision. A matching revision returns an empty update without reading video records, including on a cold function instance (only channel counts/metadata are needed there). Warm instances reuse the last snapshot until that revision changes. The feed never inventories objects, scans publications, collects operational events, or inspects worker leases. Updates contain changed records and removed keys when revision history is available; unknown revisions return a full snapshot. Reader responses exclude worker identity, retry budgets, service errors, discovery diagnostics and storage keys. Private library data is cached in memory only, cleared on account changes, and never shared through the CDN. Public static assets have bounded CDN caching. Rows render in batches of 50; search covers the loaded catalogue and selection survives updates. Thumbnails use `cover.png?v=PUBLICATION_HASH`, validating the manifest and requested checksum without downloading the whole publication.
 
 ### Agent and crawler access
 
@@ -389,9 +389,10 @@ video work is flushed, only affected channels rebuild, then the combined overvie
 rebuilds once. A new batch arriving during generation defers publication; a valid
 saved model response can be reused after the queue drains.
 
-The running dashboard checks once per minute; the independent `queue serve` role
-also checks for due refreshes. Stop both and automatic maintenance stops until one
-resumes. Reads never invoke a model. Source fingerprints detect new/changed summaries,
+The dashboard performs no background maintenance. The independent `queue serve` role
+owns automatic refreshes. PostgreSQL notifications wake it on committed changes;
+actual retry, lease-expiry and seven-day window boundaries are the only idle timers.
+Stopping the consumer stops automatic maintenance. Reads never invoke a model. Source fingerprints detect new/changed summaries,
 coverage changes, and entries aging out of the seven-day window; unchanged inputs
 reuse published bundles. Failed generations retry after five minutes, up to three
 attempts per input version. Empty windows require no model call. Old-window content
@@ -536,7 +537,7 @@ existing local archive.
 | `src/tubescribe/repository.py` | SQLite/PostgreSQL job records, claims, read models, submissions, attempts, events, and fenced commits. `Store` composes the selected adapter. |
 | `src/tubescribe/database.py` | Database connections, PostgreSQL transaction locks, server-clock ownership, and portable SQLite export. |
 | `src/tubescribe/rollups.py` | Source-versioned rolling channel and all-channels summaries; queue-drain scheduling and durable bundles. |
-| `src/tubescribe/migrations.py` | Explicit schema upgrades, startup compatibility checks, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–6. |
+| `src/tubescribe/migrations.py` | Explicit schema upgrades, startup compatibility checks, transactional migrations and adoption of pre-versioned archives; `schema_migrations` currently records versions 1–7. |
 | `src/tubescribe/blobs.py` | Confined object keys, hashes, metadata, streamed file transfer, and verified bundle publication. Local, separate-volume, and in-memory adapters share the interface. `src/tubescribe/s3.py` adds S3-compatible objects with multipart uploads and verified streaming downloads. |
 | `src/tubescribe/storage.py` | Durable checkpoint writes, scratch materialization, fresh publication versions, and recovery. |
 | `src/tubescribe/submission.py` | Deduplicated durable requests, recorded results, and local process or independent queue dispatch. |
@@ -591,6 +592,17 @@ ownership is reclaimed. Unknown upstream model execution remains subject to the 
 operator-review policy below.
 
 ### Independent queue worker
+
+PostgreSQL `queue serve` subscribes to `LISTEN/NOTIFY` before checking the durable
+queue, then waits without querying while idle. Notifications are hints: after each
+wake/reconnect it reads the authoritative queue and reclaims expired ownership.
+Committed submissions/publications and video-lease releases wake it; heartbeat
+renewals do not. `TUBESCRIBE_DATABASE_UNPOOLED_URL` must select the same database
+and schema as the writable URI when a transaction pool is used. LISTEN requires
+one persistent direct connection. SQLite retains its local polling adapter;
+`TUBESCRIBE_WORKER_POLL` controls that adapter and transient-outage retry delay,
+not a PostgreSQL idle poll.
+
 
 `TUBESCRIBE_DISPATCH=process` preserves inline CLI execution and dashboard-spawned workers.
 With `queue`, background submissions are recorded and a separate consumer launches the
@@ -674,12 +686,13 @@ FFmpeg process, inference service or rolling-summary scheduler. Those continue o
 hardware through `queue serve` and the local AgentBridge gateway.
 
 Create a private R2 bucket and connect a Neon database to the Vercel project. Prefer a
-Frankfurt function/database region and the R2 EU jurisdiction. The read-only production site may allow anonymous consumption; keep non-production deployments protected. R2 public access stays off: the app serves published resources through its confined routes. The web app has no administrator role or processing endpoints. Keep the local gateway authenticated and off public ingress.
+Frankfurt function/database region and the R2 EU jurisdiction. The hosted reader requires Clerk sign-in. Keep non-production deployments protected by Vercel as well. R2 public access stays off: the app serves published resources through its confined routes. The web app has no administrator role or processing endpoints. Keep the local gateway authenticated and off public ingress.
 
 Configure these Vercel environment variables before deploying:
 
 | Setting | Hosted value |
 | --- | --- |
+| `CLERK_SECRET_KEY`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Supplied by the native Clerk Vercel Marketplace integration. Connect Production and Preview with their separate production/development Clerk instances. Keys are required by hosted startup. |
 | `DATABASE_URL_UNPOOLED` | Supplied by the Neon integration; alternatively set `TUBESCRIBE_DATABASE_URL` to a direct PostgreSQL URI. Avoid transaction pooling because database sessions use read-only settings. |
 | `TUBESCRIBE_S3_BUCKET` | The private R2 bucket name. |
 | `TUBESCRIBE_S3_ENDPOINT` | R2's jurisdiction-specific S3 endpoint; EU buckets use `https://ACCOUNT.eu.r2.cloudflarestorage.com`. |
@@ -687,6 +700,40 @@ Configure these Vercel environment variables before deploying:
 | `AWS_DEFAULT_REGION` | `auto`. |
 | `TUBESCRIBE_PUBLIC_ORIGIN` | Optional explicit HTTPS origin; otherwise derived from Vercel's deployment URL. Vercel's verified production alias and deployment hostname are both accepted. |
 | `TUBESCRIBE_DISPATCH`, `TUBESCRIBE_MIGRATIONS` | `queue` and `check`; enforced by the hosted entrypoint. |
+
+Clerk is provisioned through Vercel Marketplace on the existing Hobby plan. Configure its
+production domain and the five DNS-only CNAME records shown by Clerk (frontend API,
+account portal, and email/DKIM). The vanilla JavaScript reader uses Clerk's hosted sign-in
+and user components; its pinned ClerkJS/UI versions obey the seven-day package cutoff.
+The Python backend verifies session signatures, expiry, issuer, authorized party, and
+session token type with the official Clerk SDK. Agents use the same authenticated cookie
+or a current Clerk session JWT in the Authorization header; no tokens in URLs.
+
+Initialize the reader ownership registry explicitly against the authoritative database,
+using the existing scoped credential injector for this command:
+
+```bash
+uv --config-file uv.toml run python -m tubescribe.auth --data data/cloud/web \
+  --issuer https://clerk.tubescribe.tsilva.eu --owner-email eng.tiago.silva@gmail.com
+```
+
+This additive `reader_library` registry owns the entire existing archive, including all
+channels, outputs, figures, rollups, and future local publications. It is independent of
+the pipeline schema ledger, so existing workers continue without a migration/restart.
+At the owner's first sign-in, the server checks the email's **verified** status using
+Clerk's Backend API, then atomically binds the library to that immutable Clerk user ID.
+Portable backups retain the ownership registry and immutable binding. Restore into an empty archive before initializing a new ownership row.
+An existing binding is never reassigned by email, and development-instance sessions
+cannot claim the production archive. Other users get **No videos yet**, zero channels,
+and empty catalogues. Guessed resource URLs (including legacy URLs and HEAD) return 404.
+Anonymous content requests return 401; document navigation opens sign-in and then returns
+to the requested page. Only static assets, the sign-in shell/configuration, and the
+content-free agent guide are public. No processing or admin routes are introduced.
+
+Private responses bypass browser and CDN caches. Library data lives only in memory in
+the client; sign-out/account changes abort reading requests and erase rows, documents,
+and metadata. The former anonymous sessionStorage feed is discarded. Shared feed
+revisions never let a new account access the owner's feed.
 
 Scratch defaults to `/tmp/tubescribe`. Startup fails if durable storage is missing, rather than creating an empty SQLite archive. A form secret is no longer needed. `.vercelignore` excludes local
 archives, models, media and secrets from uploads. `vercel.json` preserves canonical
@@ -896,6 +943,18 @@ workers. Deployment still requires service supervision, TLS, backups, and deploy
 credentials. This archive-level design does not provide multi-tenant isolation or user accounts.
 
 ### Schema upgrades and automated verification
+
+Migration 7 adds transactional catalogue revisions and PostgreSQL notification
+triggers. Apply it before starting this version. Triggers include SQL writes by
+processors, deletions and rollback semantics; backups preserve revision state.
+The summary scheduler reuses unchanged input metadata until a source/summary
+revision changes or a video enters/leaves the seven-day window. It does not
+rescan the catalogue or R2 every idle interval. Published files still validate
+when read or used as model input. The durable model gateway selects status
+columns only and waits on local change notifications for up to 25 seconds per
+request; it fetches the full prompt only for execution/idempotency checks.
+Status recovery checks just the requested run, preserving uncertain-run handling.
+
 
 Container and PostgreSQL application roles validate the database at startup rather than
 applying DDL. Both Compose stacks have a one-shot `migrate` service; web and workers wait

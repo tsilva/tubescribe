@@ -165,12 +165,21 @@ def export_sqlite(root, destination):
         migrate(target)
         source.execute("BEGIN ISOLATION LEVEL REPEATABLE READ" if network_database() else "BEGIN")
         try:
+            from .migrations import has_table
+
+            if has_table(source, "reader_library"):
+                from .auth import ensure_reader_schema
+
+                ensure_reader_schema(target)
             tables = [
                 r[0]
                 for r in target.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                 )
             ]
+            # Row-copy triggers invalidate revisions. Copy the source's revision
+            # rows last, after those triggers have run, preserving the snapshot.
+            tables.sort(key=lambda table: table == "catalogue_revisions")
             for table in tables:
                 target.execute(f"DELETE FROM {table}")
                 names = columns(target, table)
