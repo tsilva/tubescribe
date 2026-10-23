@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Scan committed secrets without credentials
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install reviewed secret scanner
+        run: |
+          curl --fail --silent --show-error --location https://github.com/Infisical/cli/releases/download/v0.43.138/cli_0.43.138_linux_amd64.tar.gz --output "$RUNNER_TEMP/scanner.tar.gz"
+          echo "45a98380964650e4cc2b57ff5361d174afb55b3daf7c2465640d3a7bb7550f92  $RUNNER_TEMP/scanner.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/scanner-bin"
+          tar -xzf "$RUNNER_TEMP/scanner.tar.gz" -C "$RUNNER_TEMP/scanner-bin" infisical
+      - name: Scan current committed source without logging matches
+        run: |
+          python3 - <<'PYSCAN'
+          import json, os, pathlib, subprocess, tempfile
+          with tempfile.TemporaryDirectory() as directory:
+              report = pathlib.Path(directory) / "report.json"
+              config = pathlib.Path(directory) / "scanner.toml"
+              config.write_text('[extend]\nuseDefault = true\n')
+              executable = str(pathlib.Path(os.environ['RUNNER_TEMP']) / 'scanner-bin' / 'infisical')
+              result = subprocess.run([executable, 'scan', '--source=.', '--no-git', '--redact', '--silent', '--telemetry=false', '--no-color', '--config='+str(config), '--report-format=json', '--report-path='+str(report)], capture_output=True)
+              if not report.exists():
+                  raise SystemExit('Secret scan did not complete; output suppressed.')
+              findings = json.loads(report.read_text())
+              if not isinstance(findings, list) or result.returncode not in (0, 1) or bool(findings) != (result.returncode == 1):
+                  raise SystemExit('Secret scan result invalid; output suppressed.')
+              print('Committed-source secret scan: '+str(len(findings))+' findings.')
+              raise SystemExit(1 if findings else 0)
+          PYSCAN
+
+  local:
+    needs: secrets
+    name: Local tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.11.13'
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Install media tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Test delivery boundaries without credentials
+        run: python3 -m unittest discover -s .github/scripts -p test_production_delivery.py
+      - name: Lint and verify local recovery and upgrades
+        run: scripts/verify
+
+  containers:
+    name: PostgreSQL and S3 recovery, upgrade and restore
+    needs: local
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rehearse disposable services with synthetic inference
+        run: scripts/rehearse-containers

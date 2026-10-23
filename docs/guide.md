@@ -680,6 +680,21 @@ through their tools.
 
 ### Vercel hosting with local processing
 
+Production delivery on `main` waits for the complete exact-commit `CI` run,
+including the committed-source secret scan, local Python matrix and isolated
+PostgreSQL/S3 rehearsal. It then syncs only `TUBESCRIBE_PUBLIC_ORIGIN` from the
+isolated `tubescribe-production` Infisical Production vault and deploys the exact
+commit to the pinned Vercel project. The project-scoped token is stored only in
+GitHub’s main-only `Production` environment. Direct Vercel Git builds are disabled
+only after the gated replacement is verified. See [Production delivery](production-delivery.md).
+
+This workflow leaves the existing Clerk, Neon and R2 configuration in Vercel.
+Their current shared Production/Preview database and object-storage bindings
+remain a separate credential-isolation migration; this workflow does not rotate
+credentials, change the archive, run migrations, or claim that isolation is fixed.
+Keep Vercel’s Require Separate Values policy enabled; only the explicitly public
+origin setting is synchronized as Config.
+
 `api/index.py` exposes the existing dashboard routes as a Vercel Python Function.
 The hosted role only serves the library, transcripts, summaries, subtitles and published figures. It never starts a worker, download,
 FFmpeg process, inference service or rolling-summary scheduler. Those continue on your
@@ -989,7 +1004,7 @@ scripts/rehearse-network       # opt-in PostgreSQL + HTTP S3 tests
 scripts/rehearse-containers    # complete disposable PostgreSQL/SeaweedFS recovery rehearsal
 ```
 
-`.github/workflows/verify.yaml` runs on PRs, pushes to `main`, `v*` tags, and manual
+`.github/workflows/ci.yml` runs on PRs, pushes to `main`, `v*` tags, and manual
 dispatch. Local checks cover Python 3.11, 3.12, and 3.13; the container rehearsal runs
 after they pass. Actions are pinned to commit hashes, dependencies use `uv.lock`, and
 the workflow has read-only repository permissions with no deployment or production
