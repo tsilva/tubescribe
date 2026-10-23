@@ -8,7 +8,7 @@ x-runtime: &runtime
   restart: unless-stopped
   stop_grace_period: 45s
   environment: &environment
-    TUBESCRIBE_DATABASE_URL: postgresql://tubescribe:local-only-rehearsal-password@database:5432/tubescribe
+    TUBESCRIBE_DATABASE_URL: postgresql://tubescribe:local-only-rehearsal-password@database:5432/tubescribe # gitleaks:allow -- disposable local rehearsal only
     TUBESCRIBE_S3_BUCKET: tubescribe
     TUBESCRIBE_S3_ENDPOINT: http://objects:8333
     AWS_ACCESS_KEY_ID: tubescribe-rehearsal
@@ -41,7 +41,7 @@ services:
     environment:
       POSTGRES_DB: tubescribe
       POSTGRES_USER: tubescribe
-      POSTGRES_PASSWORD: local-only-rehearsal-password
+      POSTGRES_PASSWORD: local-only-rehearsal-password # gitleaks:allow -- disposable local rehearsal only
     volumes: ['database:/var/lib/postgresql/data']
     ports: ['127.0.0.1::5432']
     healthcheck:

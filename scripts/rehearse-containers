@@ -296,7 +296,7 @@ def main():
             "--rm",
             "--no-deps",
             "-e",
-            "TUBESCRIBE_TEST_DATABASE_URL=postgresql://tubescribe:local-only-rehearsal-password@database:5432/tubescribe",
+            "TUBESCRIBE_TEST_DATABASE_URL=postgresql://tubescribe:local-only-rehearsal-password@database:5432/tubescribe",  # gitleaks:allow -- disposable local rehearsal only
             "-e",
             "TUBESCRIBE_TEST_S3_ENDPOINT=http://objects:8333",
             "--entrypoint",
