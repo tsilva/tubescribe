@@ -86,3 +86,9 @@ python3 -m unittest discover -p 'test*delivery*.py'
 these source files, runs the copied regression suite, and exercises sync followed
 by deployment with a mocked provider that enforces secret separation. It makes
 no real network requests and changes no provider settings.
+
+A READY build is not a completed release until Vercel confirms Production domain
+assignment. Required integration checks, including Clerk DNS verification,
+remain enforced. The workflow waits for assignment, fails on alias errors or
+timeout, and rechecks the current main commit before reporting `Production
+READY`. Never bypass a failed integration check to make delivery green.

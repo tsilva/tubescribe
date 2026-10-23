@@ -422,6 +422,16 @@ def wait_for_ci(config, sha):
     raise DeliveryError("CI did not finish in time; production delivery held.")
 
 
+def production_aliases_assigned(deployment):
+    if deployment.get("aliasError"):
+        raise DeliveryError(
+            "Production domain assignment failed; inspect Vercel deployment checks."
+        )
+    assigned = deployment.get("aliasAssigned")
+    # Vercel returns a boolean or the assignment timestamp, depending on API view.
+    return assigned is True or (type(assigned) is int and assigned > 0)
+
+
 def deploy_vercel(config, sha):
     wait_for_ci(config, sha)
     context(config)
@@ -466,11 +476,14 @@ def deploy_vercel(config, sha):
         if state == "READY":
             if deployment.get("meta", {}).get("githubCommitSha") != sha:
                 raise DeliveryError("Deployment commit verification failed.")
-            print("Production READY: " + deployment_id + " commit " + sha)
-            return
+            if production_aliases_assigned(deployment):
+                context(config)
+                print("Production READY: " + deployment_id + " commit " + sha)
+                return
         time.sleep(15)
     raise DeliveryError(
-        "Vercel production deployment timed out; check its status before retrying."
+        "Vercel release timed out; inspect build, required checks and "
+        "Production domain assignment before retrying."
     )
 
 
