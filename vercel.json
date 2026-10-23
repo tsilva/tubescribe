@@ -1,11 +1,21 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "regions": ["fra1"],
+  "regions": [
+    "fra1"
+  ],
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
       "excludeFiles": "{data/**,models/**,tests/**,scripts/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
     }
   },
-  "rewrites": [{"source": "/(.*)", "destination": "/api/index"}]
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index"
+    }
+  ],
+  "git": {
+    "deploymentEnabled": false
+  }
 }

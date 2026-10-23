@@ -51,5 +51,6 @@ The [operations guide](docs/guide.md) contains the complete reference:
 - [Recent-video catch-up](docs/guide.md#rolling-recent-video-catch-up), [artifact workflows](docs/guide.md#artifact-workflows), and [backup and restore](docs/guide.md#background-import-and-backup).
 - [Local and network architecture](docs/guide.md#local-runtime-and-network-adapters), [Vercel hosting](docs/guide.md#vercel-hosting-with-local-processing), and [configuration](docs/guide.md#configuration-access-and-inference-roles).
 - [Verification and schema upgrades](docs/guide.md#schema-upgrades-and-automated-verification), plus the [branding asset inventory](image-assets/manifest.json).
+- [Production delivery](docs/production-delivery.md) — complete CI, public-origin sync and exact-commit deployment. Existing backend credential isolation is documented in the [hosting guide](docs/guide.md#vercel-hosting-with-local-processing).
 
 For development, run `scripts/verify` for lint and local tests. The [container rehearsal](docs/guide.md#local-postgresql-and-s3-rehearsal) checks CLI readiness and metrics alongside HTTP delivery, outages, recovery, and restore.
