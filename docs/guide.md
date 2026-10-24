@@ -7,7 +7,7 @@ historical verification notes previously kept in the README.
 
 ## Personal newsletter
 
-The project-local Codex skill [tubescribe-newsletter](../.agents/skills/tubescribe-newsletter/SKILL.md) creates a newsletter grouped by followed channel, with each video's saved summary presented separately, newest first. Invoke `$tubescribe-newsletter` for the last seven days, or `$tubescribe-newsletter last 14 days` for a different window. It selects videos by publication date, links its sources, and reports missing summaries or dates. It reads no transcripts and does not start processing.
+The project-local Codex skill [tubescribe_newsletter](../.agents/skills/tubescribe_newsletter/SKILL.md) creates a newsletter grouped by followed channel, with each video's saved summary presented separately, newest first. Invoke `$tubescribe_newsletter` for the last seven days, or `$tubescribe_newsletter last 14 days` for a different window. It selects videos by publication date, links its sources, and reports missing summaries or dates. It reads no transcripts and does not start processing.
 
 ## Install
 

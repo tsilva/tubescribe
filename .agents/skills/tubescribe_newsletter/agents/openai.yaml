@@ -1,0 +1,4 @@
+interface:
+  display_name: "TubeScribe Newsletter"
+  short_description: "Read saved video summaries grouped by followed channel"
+  default_prompt: "Use $tubescribe_newsletter to create my newsletter from the last 7 days of saved summaries, grouped by channel, for all channels I follow."

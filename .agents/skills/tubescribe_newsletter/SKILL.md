@@ -1,5 +1,5 @@
 ---
-name: tubescribe-newsletter
+name: tubescribe_newsletter
 description: Create a personal newsletter grouped by followed TubeScribe channel, using saved summaries of videos published in the last N days. Defaults to 7 days. Use for weekly digests or catching up on followed YouTube channels in the TubeScribe archive.
 ---
 
@@ -14,7 +14,7 @@ Create a readable, comprehensive newsletter from TubeScribe's existing one-page 
 - For a local SQLite archive, run the bundled, standard-library-only collector:
 
   ```sh
-  python3 .agents/skills/tubescribe-newsletter/scripts/collect_summaries.py --days 7
+  python3 .agents/skills/tubescribe_newsletter/scripts/collect_summaries.py --days 7
   ```
 
   Run from this repository's root and substitute the requested days. Options include `--archive`, `--database`, `--objects` for directory object storage, `--timezone`, and timezone-aware `--as-of` for reproducing an issue. The collector opens SQLite read-only, selects one available summary per video across profiles, and returns complete summary text plus coverage metadata as JSON. It reads only `artifact.md` files belonging to completed `summary` artifacts. Redirect large packets to a temporary file and read all summaries in bounded batches; do not truncate the sources or silently sample them.

@@ -26,7 +26,7 @@ The reader refreshes on entry, when you return to its tab, or when you choose **
 
 - **Read at your own pace.** Move between concise summaries, speaker-labelled transcripts, and subtitles without leaving the reader.
 - **Return to the source.** Timestamp links open the original YouTube moment. Inspected screenshots preserve relevant charts, slides, and demonstrations when available.
-- **Catch up across channels.** Rolling seven-day overviews cover a single channel or the whole library. The project-local [newsletter skill](.agents/skills/tubescribe-newsletter/SKILL.md) turns saved summaries into a digest grouped by channel.
+- **Catch up across channels.** Rolling seven-day overviews cover a single channel or the whole library. The project-local [newsletter skill](.agents/skills/tubescribe_newsletter/SKILL.md) turns saved summaries into a digest grouped by channel.
 - **Keep portable copies.** Download transcript formats, Markdown with figures, or verified archive backups. Failed processing resumes from saved stages rather than repeating completed work.
 
 Transcription and generated summaries can contain mistakes. Speaker numbers are local to each video; a person’s name is used only when supported by recorded evidence. Check the source before relying on a quote or figure.
