@@ -1,0 +1,17 @@
+{
+  "name": "tubescribe-reader",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build:reader": "node scripts/build-reader.mjs",
+    "check:reader": "node scripts/build-reader.mjs --check",
+    "test:reader": "node --test tests/realtime.test.mjs"
+  },
+  "dependencies": {
+    "@neon/realtime": "0.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

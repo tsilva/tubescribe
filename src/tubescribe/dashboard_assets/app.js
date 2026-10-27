@@ -24,6 +24,9 @@ let feedRevision = "";
 let feedLimit = 50;
 let feedSearch = "";
 let feedObserver = null;
+let realtimeSettings = {enabled: false};
+let liveFeed = null;
+let ownsLibrary = true;
 const dateFormatter = new Intl.DateTimeFormat(undefined, {day: "numeric", month: "short", year: "numeric"});
 const narrowReader = window.matchMedia("(max-width: 900px)");
 
@@ -524,8 +527,44 @@ function showArchive(cached = false) {
   syncScopes();
   renderFeed();
 }
-async function refresh() {
+async function refresh(event) {
   if (refreshing || !signedInUser) return;
+  if (realtimeSettings.enabled && ownsLibrary) {
+    if (liveFeed && liveFeed.status !== "error") {
+      await liveFeed.wake();
+      if (event?.type === "click") refreshDigests();
+      return;
+    }
+    liveFeed?.close();
+    const generation = identityGeneration;
+    let initial = true;
+    liveFeed = TubeScribeRealtime.connect({
+      getCapabilities: async () => {
+        const response = await libraryFetch(realtimeSettings.endpoint);
+        if (!response.ok) throw new Error("Live updates are unavailable. Refresh to retry.");
+        return response.json();
+      },
+      onFeed: data => {
+        if (generation !== identityGeneration) return;
+        applyFeed(data);
+        $("error").classList.add("hidden");
+        showArchive();
+        $("worker-status").textContent = liveFeed.status === "live" ? "Library live" : "Reconnecting…";
+        if (initial) {initial = false; refreshDigests();}
+      },
+      onState: state => {
+        if (generation !== identityGeneration) return;
+        $("worker-status").textContent = state === "live" ? "Library live" :
+          state === "error" ? "Live connection unavailable" : "Reconnecting…";
+        if (state === "error") {
+          $("error").textContent = "Live updates stopped. Refresh to reconnect. Your last snapshot is preserved.";
+          $("error").classList.remove("hidden");
+        }
+      },
+    });
+    await liveFeed.start();
+    return;
+  }
   const generation = identityGeneration;
   refreshing = true;
   $("refresh").disabled = true;
@@ -570,7 +609,14 @@ $("video-search").addEventListener("input", () => {
 });
 $("refresh").addEventListener("click", refresh);
 // Refresh on entry, explicit request, or returning to the tab; no background polling.
-document.addEventListener("visibilitychange", () => { if (!document.hidden && signedInUser) refresh(); });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && signedInUser) {
+    if (realtimeSettings.enabled && ownsLibrary) liveFeed?.wake();
+    else refresh();
+  }
+});
+window.addEventListener("pagehide", () => {liveFeed?.close(); liveFeed = null;});
+window.addEventListener("pageshow", event => {if (event.persisted && signedInUser) refresh();});
 
 function syncScopes() {
   const picker = $("channel-scope");
@@ -741,6 +787,9 @@ $("rolling-summary").addEventListener("click", () => { chooseScope(libraryScope,
 
 function clearPrivateLibrary() {
   identityGeneration += 1;
+  liveFeed?.close();
+  liveFeed = null;
+  ownsLibrary = true;
   readerController?.abort();
   feedObserver?.disconnect();
   readingCache.clear(); rowCache.clear(); feedRecords.clear();
@@ -804,6 +853,7 @@ async function syncIdentity({user, session}) {
     const verified = await response.json();
     if (generation !== identityGeneration) return;
     if (!response.ok || verified.user_id !== next) throw new Error("Could not verify your account. Refresh to retry.");
+    ownsLibrary = verified.has_library;
     const destination = new URLSearchParams(window.location.search).get("return_to");
     if (destination && destination.startsWith("/") && !destination.startsWith("//")) {
       const target = new URL(destination, window.location.origin);
@@ -826,6 +876,8 @@ async function initializeAuthentication() {
     if (!response.ok) throw new Error("Sign-in configuration is unavailable. Refresh to retry.");
     const settings = await response.json();
     authEnabled = settings.enabled;
+    realtimeSettings = settings.realtime || {enabled: false};
+    $("feed-help").textContent = realtimeSettings.enabled ? "New videos appear automatically" : "Refresh to check for new videos";
     if (!authEnabled) {
       signedInUser = "local";
       $("auth-panel").hidden = true;

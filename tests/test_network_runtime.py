@@ -166,6 +166,35 @@ class NetworkRuntime(unittest.TestCase):
         self.assertEqual(record["operation"], "agent.status")
         self.assertEqual((record["queries"], record["rows"], record["result_bytes"]), (1, 1, 8))
 
+    def test_realtime_queries_keep_owner_scope_and_revoke_access_without_polling(self):
+        import json
+
+        from tubescribe.auth import initialize_library
+
+        initialize_library(self.store.root, issuer="https://clerk.test", owner_email="owner@example.test")
+        self.store.db.execute("UPDATE reader_library SET clerk_user_id='user_owner' WHERE id='archive'")
+        query_source = subprocess.check_output([
+            "node", "--input-type=module", "-e",
+            "import {queries} from './src/reader/queries.js'; console.log(JSON.stringify(queries))",
+        ], text=True, cwd=Path(__file__).resolve().parents[1])
+        queries = json.loads(query_source)
+        for name, sql in queries.items():
+            sql = sql.replace("$1", "%s").replace("$2", "%s")
+            with self.subTest(query=name):
+                rows = self.store.db.connection.execute(sql, ("user_owner", "https://clerk.test")).fetchall()
+                if name in {"channels", "feed"}:
+                    self.assertTrue(rows)
+                self.assertEqual(
+                    self.store.db.connection.execute(sql, ("user_other", "https://clerk.test")).fetchall(), []
+                )
+                self.assertEqual(
+                    self.store.db.connection.execute(sql, ("user_owner", "https://wrong.test")).fetchall(), []
+                )
+        self.store.db.execute("UPDATE reader_library SET clerk_user_id=NULL WHERE id='archive'")
+        for sql in queries.values():
+            sql = sql.replace("$1", "%s").replace("$2", "%s")
+            self.assertEqual(self.store.db.connection.execute(sql, ("user_owner", "https://clerk.test")).fetchall(), [])
+
     def test_parallel_videos_overlap_agents_with_independent_connections_and_gpu_leases(self):
         from test_pipeline import CID, RESULT
 

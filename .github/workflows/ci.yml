@@ -80,7 +80,10 @@ jobs:
           fi
           ffmpeg -version
           ffprobe -version
+      - name: Install pinned reader package manager
+        run: npm install --global pnpm@10.33.0 --ignore-scripts
       - name: Lint and verify local recovery and upgrades
+        # Lifecycle scripts stay disabled; package versions satisfy the age cutoff.
         run: scripts/verify
 
   containers:

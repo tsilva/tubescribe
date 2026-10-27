@@ -82,7 +82,7 @@ class ClerkAccess:
             ),
         }
 
-    def identify(self, headers):
+    def session_user(self, headers):
         """Only Clerk session JWTs, bound to this instance and allowed web origins."""
         from clerk_backend_api.security import AuthenticateRequestOptions, authenticate_request
 
@@ -110,7 +110,11 @@ class ClerkAccess:
             or not all(name in payload for name in ("exp", "iat", "nbf"))
         ):
             return None
-        return ReaderIdentity(user_id, self.owns_library(user_id))
+        return user_id
+
+    def identify(self, headers):
+        user_id = self.session_user(headers)
+        return ReaderIdentity(user_id, self.owns_library(user_id)) if user_id else None
 
     def owns_library(self, user_id):
         with closing(connect(self.root, readonly=True)) as db:

@@ -1019,16 +1019,70 @@ session to be available; this is an early warning, not an instantaneous hard cap
 Rounded console values and provider reporting delays can delay a threshold.
 The existing quota-reset/resumption follow-up remains separate.
 
-Neon Realtime is an optional future reader feature, not required for transfer
-monitoring. Its subscriptions start with a full result and then receive changes.
-Against repeated full polling that can save transfer; TubeScribe already uses
-revision-first reads, no timed reader polling, and queue LISTEN notifications.
-Realtime still consumes the database transfer allowance, is currently beta, and
-requires logical replication plus server-authorized sealed queries. Compare
-measured egress under the same active-reader workload before adopting it; do not
-enable it merely to address the retired polling behavior. See Neon's
+Realtime's browser-to-Neon subscriptions bypass the Python SQL wrapper, so the
+Python operation counters do not attribute their bytes. The provider quota
+warnings still include this traffic. Compare provider growth under idle and
+active-reader workloads after activation; the initial result and genuine
+reconnections still transfer data.
+
+### Neon Realtime reader
+
+With Realtime configured, the hosted reader uses the official Neon SDK and one
+WebSocket with fixed live queries for feed metadata, channels, and safe queued-work
+options. It receives an initial result and then committed row changes. It does
+not periodically request `/api/feed`, resubscribe on visibility changes, or fall
+back to HTTP polling on errors. A failed stream preserves its last snapshot and
+offers manual reconnection. Summaries and documents remain on-demand reads;
+ordinary feed updates do not reread them. Local SQLite readers retain their
+existing on-demand HTTP path. Worker scheduling already uses PostgreSQL LISTEN
+and is separate from this browser feature.
+
+The Node `/api/live` endpoint uses the official server SDK to seal only source-owned,
+parameterized queries. It reuses Python's Clerk session verifier through
+`/api/realtime-authorization`, which performs no database lookup. Every live query
+also checks `reader_library.clerk_user_id` and issuer in SQL, so another account
+sees no rows and changing ownership removes rows from the live result. The normal
+sign-in flow still claims the preassigned library through the existing verified
+email check. Shared capability renewal runs before the 60-second expiry; it
+reauthorizes the session and renews the existing subscriptions without polling
+table contents or replacing unchanged rows. Any renewal failure stops the stream
+until manual retry. Sign-out/account changes cancel subscriptions, renewal timers
+and pending private-data callbacks. Capabilities remain in memory, never URLs,
+browser storage or logs.
+
+Activation requires enabling Realtime on TubeScribe's existing `main` branch
+(`twilight-dream-42009655` / `br-orange-shape-b90ef63q`), allowing the production
+origins, and configuring these **Production-only** values:
+
+| Variable | Classification | Purpose |
+| --- | --- | --- |
+| `NEON_REALTIME_URL` | Config | The branch's `wss://` endpoint; also scopes the reader CSP. |
+| `NEON_REALTIME_SECRET` | Secret | Server-only SDK sealing credential. Never expose it to frontend code. |
+
+The target database is the existing `neondb`. Store the source values in the
+TubeScribe Infisical project (`1f9874ad-12bc-44a6-b0aa-59027a494b70`), in a dedicated
+`/neon-realtime` folder, and mirror them to Vercel Production using the authorized
+secret workflow. Preserve Require Separate Values and leave Preview/Development
+unset. The currently pinned shared delivery allowlist contains only
+`TUBESCRIBE_PUBLIC_ORIGIN`; it does not automatically sync these new values.
+Until that allowlist is separately extended, an explicitly scoped credential
+sync is required on setup/rotation before deploying. Do not bypass the CI gates
+or change the shared OIDC trust policy merely to deploy the application code.
+
+Enabling Realtime enables logical replication and can restart the Neon compute.
+Keep local processing services paused while quota is exhausted. Activation and
+an end-to-end insert/update/delete/revocation check require an available database;
+source tests alone do not establish live operation. Realtime remains in beta and
+its traffic still consumes the transfer allowance. See Neon's
 [subscription design](https://neon.com/docs/realtime/how-it-works) and
 [beta limits and billing](https://neon.com/docs/realtime/overview).
+
+The browser bundle is committed for Python/container packaging. Rebuild it with
+`pnpm install --frozen-lockfile --ignore-scripts && pnpm run build:reader`.
+`scripts/verify` runs Node lifecycle/security tests, checks bundle reproducibility,
+then runs the Python suite. The official SDK is pinned to `0.1.1`, published more
+than seven days before its adoption; the package manager's age and exotic-source
+guards remain enabled. Neither build nor verification activates cloud Realtime.
 
 ### Schema upgrades and automated verification
 

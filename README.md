@@ -57,4 +57,6 @@ For development, run `scripts/verify` for lint and local tests. The [container r
 
 For Neon, [transfer monitoring](docs/guide.md#neon-transfer-monitoring) records result bytes by operation and checks provider usage against 3 GB and 4 GB warning thresholds.
 
+The hosted reader supports [Neon Realtime](docs/guide.md#neon-realtime-reader): once configured, new videos and status changes arrive live without catalogue polling.
+
 Production delivery uses the reviewed shared workflow in `tsilva/.github`, pinned to a full commit SHA. A standalone signed Infisical relay triggers sync and deployment; see [production delivery](docs/production-delivery.md) for the trust boundary and recovery.

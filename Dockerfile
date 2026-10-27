@@ -6,7 +6,7 @@ COPY --from=uv /uv /bin/uv
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates libgomp1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY pyproject.toml uv.lock uv.toml README.md ./
+COPY pyproject.toml uv.lock uv.toml README.md package.json ./
 COPY src ./src
 ENV UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/opt/venv PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 TUBESCRIBE_DATA=/scratch
 RUN useradd --uid 10001 --create-home tubescribe && mkdir -p /scratch /state /objects /home/tubescribe/.cache/tubescribe/models && chown -R tubescribe:tubescribe /scratch /state /objects /home/tubescribe/.cache

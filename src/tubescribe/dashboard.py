@@ -34,6 +34,7 @@ ASSETS = Path(__file__).with_name("dashboard_assets")
 STATIC_ASSETS = {
     "/": "index.html",
     "/app.js": "app.js",
+    "/realtime.js": "realtime.js",
     "/style.css": "style.css",
     "/favicon.ico": "brand/favicon.ico",
     **{
@@ -508,9 +509,12 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 self.send_header("Content-Encoding", content_encoding)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            from .realtime import origin as realtime_origin
+
+            live_origin = realtime_origin() or ""
             clerk_csp = (
                 f"default-src 'self'; script-src 'self' {access.issuer} https://challenges.cloudflare.com https://*.protect.clerk.com; "
-                f"connect-src 'self' {access.issuer} https://*.protect.clerk.com https://clerk-telemetry.com https://*.clerk-telemetry.com; style-src 'self' 'unsafe-inline'; "
+                f"connect-src 'self' {access.issuer} {live_origin} https://*.protect.clerk.com https://clerk-telemetry.com https://*.clerk-telemetry.com; style-src 'self' 'unsafe-inline'; "
                 f"img-src 'self' data: https://img.clerk.com {access.issuer}; "
                 "frame-src https://challenges.cloudflare.com https://*.protect.clerk.com; worker-src 'self' blob:; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
@@ -619,7 +623,19 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             try:
                 self.resource = None
                 if url.path == "/auth/config":
-                    self.send_json(access.configuration())
+                    from .realtime import configuration
+
+                    self.send_json({**access.configuration(), "realtime": configuration()})
+                    return
+                if url.path == "/api/realtime-authorization":
+                    if not access.enabled:
+                        self.send_json({"error": "Hosted authentication is required"}, 503)
+                        return
+                    user_id = access.session_user(self.headers)
+                    if not user_id:
+                        self.send_json({"error": "Sign in required"}, 401)
+                        return
+                    self.send_json({"user_id": user_id, "issuer": access.issuer})
                     return
                 # Check ownership before resolving ANY data URL, including legacy
                 # paths, figures, metadata, downloads, and HEAD requests.

@@ -12,6 +12,7 @@
   <link rel="manifest" href="/brand/site.webmanifest">
   <link rel="stylesheet" href="/style.css">
   <link rel="alternate" type="application/json" href="/api/library">
+  <script src="/realtime.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body class="library-app">
@@ -28,7 +29,7 @@
       <div id="error" class="error hidden" role="alert"></div>
       <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search channels, video titles, or IDs…"></div><select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select><button id="rolling-summary" class="button" aria-pressed="false">7-day summary</button><span id="result-count" class="visually-hidden" role="status"></span></div>
       <div id="feed" class="video-feed" tabindex="-1" aria-label="Video feed"><p class="empty">Loading your videos…</p></div>
-      <footer><a href="/library/">Browse saved content</a> · <a href="/llms.txt">Agent reading guide</a> · Transcripts, context, and the ideas worth keeping.<span>Refresh to check for new videos</span></footer>
+      <footer><a href="/library/">Browse saved content</a> · <a href="/llms.txt">Agent reading guide</a> · Transcripts, context, and the ideas worth keeping.<span id="feed-help">Refresh to check for new videos</span></footer>
     </div>
     <aside id="reader" class="reader" aria-labelledby="reader-title">
       <div class="reader-empty"><p class="eyebrow">YOUR READING SPACE</p><h2 id="reader-title">Find your next idea.</h2><p>Select a video to read its summary or transcript.</p></div>

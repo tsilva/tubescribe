@@ -16,6 +16,17 @@ Native Infisical syncs are disabled after this workflow has successfully replace
 
 The GitHub Production environment, project-scoped deployment credential, existing application CI and disabled direct Vercel Git deployments remain required.
 
+Neon Realtime uses the TubeScribe Infisical project's dedicated `/neon-realtime`
+folder in `prod`. `NEON_REALTIME_SECRET` is mirrored as a write-only Secret and
+`NEON_REALTIME_URL` as public Config, both in Vercel Production only. The currently
+pinned shared allowlist still manages only `TUBESCRIBE_PUBLIC_ORIGIN`; it preserves
+these separately provisioned variables but does not synchronize their rotation.
+After changing the source credential, explicitly mirror these two values through
+the authorized Production settings workflow before running Production delivery.
+Do not expand shared OIDC trust or enable another sync as an application-release
+workaround. See [the Realtime reader](guide.md#neon-realtime-reader) for its scope
+and verification limits.
+
 Production credentials must differ from Development and Preview; explicitly public configuration stays Config, while private credentials stay write-only Secret. Require Separate Values remains enabled.
 
 Vercel Production domain assignment and required integration checks, including Clerk DNS verification, must succeed before release is reported live. A READY build alone is insufficient. Backend PostgreSQL, media/S3, local processing and protected administration remain governed by [the hosting guide](guide.md#vercel-hosting-with-local-processing).

@@ -112,6 +112,31 @@ class ClerkReader(unittest.TestCase):
     def headers(self, user="user_owner", **claims):
         return {"Authorization": "Bearer " + self.token(user, **claims)}
 
+    def test_realtime_renewal_verifies_session_without_database_ownership_reads(self):
+        with patch("tubescribe.auth.connect", side_effect=AssertionError("renewal polled database")):
+            response = self.client.get("/api/realtime-authorization", headers=self.headers())
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"user_id": "user_owner", "issuer": ISSUER})
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            self.assertEqual(self.client.get("/api/realtime-authorization").status_code, 401)
+            self.assertEqual(
+                self.client.get("/api/realtime-authorization", headers=self.headers(sts="pending")).status_code,
+                401,
+            )
+
+    def test_realtime_configuration_exposes_no_secret_and_scopes_websocket_csp(self):
+        with patch.dict(os.environ, {
+            "NEON_REALTIME_URL": "wss://project.realtime.neon.tech/live",
+            "NEON_REALTIME_SECRET": "test-fixture-secret",
+            "VERCEL": "1",
+        }):
+            response = self.client.get("/auth/config")
+            self.assertEqual(response.json()["realtime"], {"enabled": True, "endpoint": "/api/live"})
+            self.assertNotIn("test-fixture-secret", response.text)
+            page = self.client.get("/")
+            self.assertIn("wss://project.realtime.neon.tech", page.headers["content-security-policy"])
+            self.assertNotIn("wss:", response.text)
+
     def test_owner_claims_once_and_new_users_have_an_empty_feed(self):
         owner = self.client.get("/api/feed", headers=self.headers())
         self.assertEqual(owner.status_code, 200)

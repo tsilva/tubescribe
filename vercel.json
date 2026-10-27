@@ -6,10 +6,14 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
-      "excludeFiles": "{data/**,models/**,tests/**,scripts/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
+      "excludeFiles": "{data/**,models/**,tests/**,scripts/**,node_modules/**,src/reader/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
     }
   },
   "rewrites": [
+    {
+      "source": "/api/live",
+      "destination": "/api/realtime"
+    },
     {
       "source": "/(.*)",
       "destination": "/api/index"
