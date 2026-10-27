@@ -80,8 +80,6 @@ jobs:
           fi
           ffmpeg -version
           ffprobe -version
-      - name: Test delivery boundaries without credentials
-        run: python3 -m unittest discover -s .github/scripts -p test_production_delivery.py
       - name: Lint and verify local recovery and upgrades
         run: scripts/verify
 
