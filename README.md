@@ -55,4 +55,6 @@ The [operations guide](docs/guide.md) contains the complete reference:
 
 For development, run `scripts/verify` for lint and local tests. The [container rehearsal](docs/guide.md#local-postgresql-and-s3-rehearsal) checks CLI readiness and metrics alongside HTTP delivery, outages, recovery, and restore.
 
+For Neon, [transfer monitoring](docs/guide.md#neon-transfer-monitoring) records result bytes by operation and checks provider usage against 3 GB and 4 GB warning thresholds.
+
 Production delivery uses the reviewed shared workflow in `tsilva/.github`, pinned to a full commit SHA. A standalone signed Infisical relay triggers sync and deployment; see [production delivery](docs/production-delivery.md) for the trust boundary and recovery.

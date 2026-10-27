@@ -20,6 +20,7 @@ from .postprocessing_worker import bridge_endpoint
 from .repository import now
 from .resources import artifact_url
 from .storage import atomic_write, durable_writes
+from .transfer import operation
 
 DAYS = 7
 _INDEX_CACHE = OrderedDict()
@@ -171,6 +172,7 @@ def channel_input(channel):
     }
 
 
+@operation("rollup.index")
 def index(store, *, clock=None):
     """Only changed inputs or window/retry deadlines require a catalogue read."""
     from .changes import revisions
@@ -574,6 +576,7 @@ def run(store, *, bridge=None, force=False, agent_runner=None, clock=None):
     return {"completed": completed, "failed": failed, "skipped": skipped}
 
 
+@operation("rollup.schedule")
 def schedule(store, *, background=True):
     from .submission import Dispatcher, JobRequest
 

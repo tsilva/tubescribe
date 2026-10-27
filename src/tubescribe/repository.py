@@ -11,6 +11,7 @@ from pathlib import Path
 from .database import clock as database_clock
 from .database import columns, connect, database_errors, network_database, serialize
 from .pipeline import STAGES, Plan
+from .transfer import operation
 
 
 class ProfileChanged(RuntimeError):
@@ -167,6 +168,7 @@ class SQLJobRepository:
             )
         ]
 
+    @operation("jobs.read")
     def jobs(
         self,
         *,
@@ -499,6 +501,7 @@ class SQLJobRepository:
 
         self.record_event(identifier, "submission_" + values.get("state", "dispatched"), {})
 
+    @operation("queue.read")
     def submission_records(self):
         return [
             dict(r)
@@ -626,6 +629,7 @@ class SQLiteJobRepository(SQLJobRepository):
 class PostgreSQLJobRepository(SQLJobRepository):
     """Network database adapter with atomic claims and queue reservation."""
 
+    @operation("queue.read")
     def claim_submission(self, worker_id):
         with self.db:
             row = self.db.execute(
@@ -891,6 +895,7 @@ class ArchiveViews:
             (job_id,),
         )
 
+    @operation("feed.snapshot")
     def snapshot(self):
         import contextlib
 

@@ -74,9 +74,9 @@ class Parallel(unittest.TestCase):
             patch("tubescribe.database.PostgreSQLConnection") as connection,
         ):
             connect(Path("/scratch"), readonly=True)
-            connection.assert_called_with("postgresql://direct/db", readonly=True)
+            connection.assert_called_with("postgresql://direct/db", readonly=True, root=Path("/scratch"))
             connect(Path("/scratch"))
-            connection.assert_called_with("postgresql://pool/db", readonly=False)
+            connection.assert_called_with("postgresql://pool/db", readonly=False, root=Path("/scratch"))
 
     def run_jobs(self, *, limit=None, pause=False):
         videos = [f"video-{i}" for i in range(6)]

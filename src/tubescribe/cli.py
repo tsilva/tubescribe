@@ -129,6 +129,12 @@ def main():
     c.add_argument("source", type=Path)
     c = sub.add_parser("operations", help="Durable-service readiness and ledger metrics")
     c.add_argument("action", choices=["ready", "metrics"])
+    c = sub.add_parser("transfer", help="Local result-byte measurements and Neon quota warnings")
+    c.add_argument("action", choices=["metrics", "observe"])
+    c.add_argument("--project", default="twilight-dream-42009655")
+    c.add_argument("--used-bytes", type=int)
+    c.add_argument("--period-start", help="Provider billing-period start, ISO timestamp")
+    c.add_argument("--period-end", help="Provider billing-period end, ISO timestamp")
     c = sub.add_parser("subtitles", help="Generate/export SRT and Markdown speaker turns")
     c.add_argument(
         "destination",
@@ -179,6 +185,33 @@ def main():
         or (getattr(args, "limit", None) is not None and args.limit < 1)
     ):
         p.error("Days, counts, limits and attempt bounds must be positive")
+    if args.command == "transfer":
+        from .transfer import metrics, observe
+
+        if args.action == "observe" and any(
+            value is None
+            for value in (
+                args.used_bytes,
+                args.period_start,
+                args.period_end,
+            )
+        ):
+            p.error("transfer observe requires --used-bytes, --period-start and --period-end")
+        try:
+            out(
+                metrics(args.data)
+                if args.action == "metrics"
+                else observe(
+                    args.data,
+                    project=args.project,
+                    used_bytes=args.used_bytes,
+                    period_start=args.period_start,
+                    period_end=args.period_end,
+                )
+            )
+            return 0
+        except (ValueError, OSError) as error:
+            p.error(str(error))
     if args.command == "operations":
         from .operations import metrics, readiness
 

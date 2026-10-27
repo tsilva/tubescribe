@@ -6,6 +6,8 @@ import sqlite3
 import time
 from contextlib import closing
 
+from .transfer import Meter, operation
+
 
 def network_database():
     return os.environ.get("TUBESCRIBE_DATABASE_URL")
@@ -69,13 +71,14 @@ def record_factory(cursor):
 class PostgreSQLConnection:
     dialect = "postgres"
 
-    def __init__(self, url, *, readonly=False):
+    def __init__(self, url, *, readonly=False, root=None):
         import psycopg
 
         self.connection = psycopg.connect(
             url, autocommit=True, row_factory=record_factory, connect_timeout=5
         )
         self.depth = 0
+        self.meter = Meter(root) if root is not None else None
         if readonly:
             self.connection.execute("SET default_transaction_read_only = on")
 
@@ -86,7 +89,16 @@ class PostgreSQLConnection:
         if values:
             sql = sql.replace("%", "%%")
         sql = re.sub(r"'(?:[^']|'')*'|\?", lambda m: "%s" if m[0] == "?" else m[0], sql)
-        return self.connection.execute(sql, tuple(values) if values else None)
+        started = time.monotonic()
+        try:
+            cursor = self.connection.execute(sql, tuple(values) if values else None)
+        except Exception:
+            if self.meter:
+                self.meter.record(None, time.monotonic() - started, error=True)
+            raise
+        if self.meter:
+            self.meter.record(cursor, time.monotonic() - started)
+        return cursor
 
     def __enter__(self):
         if self.depth == 0:
@@ -106,7 +118,11 @@ class PostgreSQLConnection:
         self.connection.rollback()
 
     def close(self):
-        self.connection.close()
+        try:
+            self.connection.close()
+        finally:
+            if self.meter:
+                self.meter.flush()
 
 
 def connect(root, *, readonly=False, must_exist=False):
@@ -117,7 +133,7 @@ def connect(root, *, readonly=False, must_exist=False):
             # Session-level read-only settings must not enter a transaction pool
             # that can later lend that backend to a writing worker.
             url = os.environ.get("TUBESCRIBE_DATABASE_UNPOOLED_URL") or url
-        return PostgreSQLConnection(url, readonly=readonly)
+        return PostgreSQLConnection(url, readonly=readonly, root=root)
     path = database_path(root)
     db = (
         sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=3)
@@ -154,6 +170,7 @@ def serialize(db, key):
         db.execute("BEGIN IMMEDIATE")
 
 
+@operation("backup.export")
 def export_sqlite(root, destination):
     """Portable snapshot for either backend, using one consistent source transaction."""
     from .migrations import migrate

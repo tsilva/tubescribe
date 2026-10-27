@@ -144,6 +144,28 @@ class NetworkRuntime(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         return store
 
+    def test_transfer_counts_real_buffered_postgres_values_without_consuming_rows(self):
+        from tubescribe.database import connect
+        from tubescribe.transfer import metrics, operation
+
+        root = Path(self.base.name) / (self.schema + "-transfer")
+
+        @operation("agent.status")
+        def read(db):
+            # Text protocol returns bytea as \\x00ff (six bytes), plus two UTF-8 bytes.
+            return db.execute("SELECT 'é'::text, NULL::text, decode('00ff','hex')")
+
+        db = connect(root)
+        try:
+            cursor = read(db)
+            self.assertEqual(tuple(cursor.fetchone()), ("é", None, b"\x00\xff"))
+            self.assertIsNone(cursor.fetchone())
+        finally:
+            db.close()
+        record = metrics(root)["operations"][0]
+        self.assertEqual(record["operation"], "agent.status")
+        self.assertEqual((record["queries"], record["rows"], record["result_bytes"]), (1, 1, 8))
+
     def test_parallel_videos_overlap_agents_with_independent_connections_and_gpu_leases(self):
         from test_pipeline import CID, RESULT
 

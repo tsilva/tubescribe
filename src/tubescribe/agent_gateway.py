@@ -24,6 +24,7 @@ from .execution import capacity, lease
 from .inference import AgentRunner, LocalTools
 from .migrations import open_runtime
 from .storage import Store, durable_writes
+from .transfer import operation
 
 SCHEMA = """CREATE TABLE IF NOT EXISTS agent_runs (
  id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, request TEXT NOT NULL,
@@ -37,10 +38,12 @@ class Runs:
         self.db = open_runtime(root)
         self.changed = changed
 
+    @operation("agent.request")
     def get(self, identifier):
         row = self.db.execute("SELECT * FROM agent_runs WHERE id=?", (identifier,)).fetchone()
         return dict(row) if row else None
 
+    @operation("agent.status")
     def status(self, identifier):
         row = self.db.execute(
             "SELECT id,state,response_key,error,created,updated,cancelled FROM agent_runs WHERE id=?",
@@ -82,6 +85,7 @@ class Runs:
         if self.changed:
             self.changed()
 
+    @operation("agent.recover")
     def recover(self, identifier=None):
         # Status polls also reconcile leases that had not expired at gateway startup.
         query = "SELECT id FROM agent_runs WHERE state='active'"

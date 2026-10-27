@@ -957,6 +957,79 @@ network filesystem**. PostgreSQL and S3 now provide the network boundaries for m
 workers. Deployment still requires service supervision, TLS, backups, and deployment
 credentials. This archive-level design does not provide multi-tenant isolation or user accounts.
 
+### Neon transfer monitoring
+
+PostgreSQL connections automatically measure returned value bytes, row and query
+counts, errors, and execution seconds. Fixed operation names distinguish feed
+revision reads and snapshots, rollup indexing/scheduling, agent status and request
+reads, queue/job reads, exports, and readiness/metrics. Remaining statements use
+`database.other`; nested operations use the innermost label. SQL, parameters,
+database URLs, prompts, row contents, and job/user IDs are never recorded.
+
+```bash
+scripts/tubescribe --data data transfer metrics
+```
+
+Counters live in the runtime's ignored, owner-only
+`monitoring/transfer.sqlite3`. Each connection flushes on close, after a 1 MB
+batch, or on its next statement after 60 seconds. Measurements keep three UTC
+calendar months. A long-lived idle connection can retain its last small batch
+until its next query or close; abrupt process termination can lose that batch.
+Each successful flush also emits a content-free `database_transfer` JSON delta to
+stderr for host log collection. These deltas can be summed across runtimes;
+do not add them to the same runtime's persisted totals a second time. Local worker,
+gateway, and hosted scratch directories have separate counters. Vercel scratch
+counters are ephemeral, so use its retained function logs for hosted history.
+Collection failures emit `database_transfer_measurement_unavailable` without
+breaking database work; unpersisted batches retry on the next flush.
+
+This measures values in the buffered result of each normal, single-statement
+`PostgreSQLConnection.execute` call, even when the application does not fetch all
+rows. It excludes PostgreSQL framing, connection/TLS traffic, error text, direct
+driver connections (including LISTEN notifications), COPY, external clients, and
+additional result sets in multi-statement scripts. It is a lower bound useful for
+attribution, **not Neon's billing counter**. SQLite archives produce no PostgreSQL
+transfer measurements. Telemetry performs local writes only and makes no extra
+Neon queries.
+
+The independent quota check takes current **provider** usage and its visible
+billing period, without connecting to the database. For this installation it is
+restricted to TubeScribe project `twilight-dream-42009655`:
+
+```bash
+scripts/tubescribe --data data transfer observe \
+  --used-bytes 3000000000 \
+  --period-start 2026-11-01T00:00:00Z --period-end 2026-12-01T00:00:00Z
+```
+
+This example is for November only; supply the current period shown by Neon.
+The JSON `warnings` array emits each decimal 3 GB / 4 GB threshold once per
+billing period, including both if usage jumps across them. Restarting the checker
+does not repeat a warning; a new provider period resets its warning state. A
+decreasing observation within the same period retains the previous high-water
+mark. Invalid/stale periods and other projects are rejected. This command records
+a warning as emitted when it returns; its caller must deliver that result.
+
+The configured Codex heartbeat checks the signed-in Brave Agents Neon console
+hourly and delivers newly emitted warnings in the originating chat. It uses
+visible project usage and billing metadata, requires no new Neon API key, and
+does not wake the database with SQL. It stays quiet for unchanged usage and
+deduplicates access failures. Checks require the Mac/Codex scheduler and Brave
+session to be available; this is an early warning, not an instantaneous hard cap.
+Rounded console values and provider reporting delays can delay a threshold.
+The existing quota-reset/resumption follow-up remains separate.
+
+Neon Realtime is an optional future reader feature, not required for transfer
+monitoring. Its subscriptions start with a full result and then receive changes.
+Against repeated full polling that can save transfer; TubeScribe already uses
+revision-first reads, no timed reader polling, and queue LISTEN notifications.
+Realtime still consumes the database transfer allowance, is currently beta, and
+requires logical replication plus server-authorized sealed queries. Compare
+measured egress under the same active-reader workload before adopting it; do not
+enable it merely to address the retired polling behavior. See Neon's
+[subscription design](https://neon.com/docs/realtime/how-it-works) and
+[beta limits and billing](https://neon.com/docs/realtime/overview).
+
 ### Schema upgrades and automated verification
 
 Migration 7 adds transactional catalogue revisions and PostgreSQL notification

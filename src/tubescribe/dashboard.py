@@ -28,6 +28,7 @@ from .pipeline import status as stage
 from .repository import ArchiveViews
 from .resources import artifact_url, transcript_url
 from .storage import atomic_write, now
+from .transfer import operation
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
 STATIC_ASSETS = {
@@ -398,6 +399,7 @@ class FeedChanges:
         self.cached = None
         self.revision = None
 
+    @operation("feed.read")
     def get(self, revision=None):
         with self.lock:
             views = ArchiveViews(self.root)

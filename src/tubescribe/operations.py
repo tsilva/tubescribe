@@ -6,8 +6,10 @@ from .blobs import DirectoryObjects, LocalArtifacts
 from .config import RuntimeConfig
 from .database import clock, connect
 from .migrations import check_schema
+from .transfer import operation
 
 
+@operation("operations.readiness")
 def readiness(root):
     checks = {"database": False, "schema": False, "objects": False}
     try:
@@ -46,6 +48,7 @@ def readiness(root):
     return {"ready": all(checks.values()), "checks": checks}
 
 
+@operation("operations.metrics")
 def metrics(root):
     with closing(connect(root, readonly=True)) as db:
         check_schema(db)
