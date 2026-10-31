@@ -1146,6 +1146,16 @@ the equivalent historical schema-4 layout rather than claiming an earlier Postgr
 
 ## Verification
 
+Historical evidence provenance (documentation review: 2026-10-27): the undated
+ASR smoke, archive-integration and expanded postprocessing results below were
+recorded in `README.md` at commit `7b3f8fd4e2f177aa5bf18ad16216019336218451`
+on 2026-10-09. This dates the source snapshot; exact per-run timestamps are not
+supplied in those summaries. Original artifact paths and limitations remain
+below, including ignored `data/quality/` evidence that needs a separate backup.
+This documentation review ran no tests or inference and refreshed no result;
+the explicitly dated reports retain their own dates. The commands and workflow
+instructions in this guide remain separate from these historical observations.
+
 ```bash
 uv --config-file uv.toml run --locked python -m unittest discover -s tests -v
 ```
@@ -1274,6 +1284,8 @@ Section coverage validation accepts a YouTube timestamp link appended to a match
 Markdown heading. The link remains clickable; cue ranges must still cover the entire
 transcript in order, and arbitrary heading suffixes remain invalid.
 
+**Historical archive-integration result — source snapshot 2026-10-09:**
+
 Archive integration was verified on the full 22-minute `Domk77rYJhU` transcript: one native
 agent run took 188 seconds and produced six inspected figures plus an evidence-backed
 Jordi Visser speaker label. The normal worker rerun skipped it; all 145 existing raw
@@ -1399,6 +1411,8 @@ uv run --frozen python scripts/postprocess-evaluate.py \
   --output data/quality/postprocessing-pilot/evaluation
 ```
 
+**Historical expanded postprocessing results — source snapshot 2026-10-09:**
+
 The expanded local evaluation ran 15 new model trials across nine videos: five complete
 sources and four excerpts, totaling 301 minutes of distinct supplied content. All nine
 selected results passed the structural/resource audit; all 29 archived SRTs also passed
@@ -1418,5 +1432,9 @@ Artifacts, comparisons including regressions, and review notes are under ignored
 `data/quality/postprocessing-expanded/`; rerun the evaluator to refresh its index.
 
 ### Speaker diarization experiment
+
+The linked trial record dates the original Nemotron run to **9 October 2026**;
+the separate Pyannote retirement date below is **10 October 2026**. Neither date
+is a new trial or a current service-health check.
 
 An isolated [diarization trial](../experiments/diarization/README.md) tested NVIDIA Nemotron 3 on beast-3's RTX 4090 against a Jordi/Marty interview and a Jordi monologue. It downloaded without authentication and detected two speakers and one speaker respectively. The ten-minute interview took 1.03 seconds for diarization after loading, with 97.9% agreement on speech covered by approximate publisher labels; this is not general accuracy. Speaker-labelled SRT and detailed evidence are under ignored `data/diarization/`. The unrun Pyannote Community-1 comparison was retired on 2026-10-10 because no compatible patched Torch/audio stack was available; its source and dependency snapshot remain recoverable from Git history. Nemotron trials now use the patched root lock. The production pipeline now uses Nemotron for speaker labels; person names in the original trial were reference-guided.

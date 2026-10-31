@@ -19,3 +19,5 @@ models/
 *.log
 *.mp4
 *.opus
+/INBOX.md
+/.local/repo-inbox/

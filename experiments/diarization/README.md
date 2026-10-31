@@ -39,3 +39,7 @@ Markdown merges consecutive cues from the same voice into turns with a speaker-n
 ## Dependency security
 
 The root lock uses patched Torch 2.13 and supplies the maintained Nemotron trial. The old Pyannote environment is retired, rather than upgraded through an incompatible binary pairing. Removing its dependency project does not remove source history, saved results, or model caches.
+
+## License
+
+[MIT License](../../LICENSE).

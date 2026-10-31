@@ -59,4 +59,8 @@ For Neon, [transfer monitoring](docs/guide.md#neon-transfer-monitoring) records 
 
 The hosted reader supports [Neon Realtime](docs/guide.md#neon-realtime-reader): once configured, new videos and status changes arrive live without catalogue polling.
 
+## License
+
+[MIT License](LICENSE).
+
 Production delivery uses the reviewed shared workflow in `tsilva/.github`, pinned to a full commit SHA. A standalone signed Infisical relay triggers sync and deployment; see [production delivery](docs/production-delivery.md) for the trust boundary and recovery.
