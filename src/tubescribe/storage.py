@@ -309,7 +309,7 @@ class Store:
 
         recover_artifacts(self, job_ids=job_ids)
 
-    def save(self, job: dict, result: dict, *, keep_audio=False):
+    def save(self, job: dict, result: dict, *, keep_audio=False, hosted_speakers=None):
         import uuid
 
         folder = (
@@ -377,7 +377,8 @@ class Store:
                 result["processing_seconds"],
                 result["duration"],
                 result["saved_at"],
-            )
+            ),
+            hosted_speakers=hosted_speakers,
         )
         # Never delete the retry source until all formats and the SQLite commit are durable.
         if job.get("audio_path") and not keep_audio:

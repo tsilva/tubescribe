@@ -522,9 +522,11 @@ def build(store, scope, *, bridge=None, force=False, agent_runner=None, clock=No
 def video_work_pending(store):
     """Submitted video work blocks aggregation; untouched catalogue entries do not."""
     from .database import clock as database_clock
+    from .manual_queue import lane_filter
 
     for row in store.db.execute(
-        "SELECT request FROM submissions WHERE state IN ('queued','active')"
+        "SELECT request FROM submissions WHERE state IN ('queued','active') AND "
+        + lane_filter(store.config.manual_queue)
     ):
         request = json.loads(row[0])
         if request.get("command") in {"work", "diarize", "postprocess", "artifacts"}:

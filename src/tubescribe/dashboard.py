@@ -625,7 +625,13 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 if url.path == "/auth/config":
                     from .realtime import configuration
 
-                    self.send_json({**access.configuration(), "realtime": configuration()})
+                    settings = {**access.configuration(), "realtime": configuration()}
+                    if access.enabled and config.manual_queue:
+                        from .manual_queue import PROFILE
+                        from .openrouter import PRICE_PER_SECOND
+
+                        settings["processing"] = {"profile": PROFILE, "price_per_second": PRICE_PER_SECOND}
+                    self.send_json(settings)
                     return
                 if url.path == "/api/realtime-authorization":
                     if not access.enabled:
@@ -665,6 +671,11 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     if not identity.owns_library:
                         self.empty_library(url.path, query)
                         return
+                if url.path == "/api/processing" and access.enabled and config.manual_queue:
+                    from .manual_queue import status
+
+                    self.send_json({"videos": status(root)})
+                    return
                 from .resources import render_video, resolve, segment, video_metadata
                 from .rollups import index as digest_index
                 from .rollups import records as digest_records
@@ -1070,6 +1081,38 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 self.send_json({"error": "File is not available"}, 404)
 
         def do_POST(self):
+            if access.enabled and config.manual_queue and self.path == "/api/processing":
+                if not self.trusted():
+                    return
+                self.resource = None
+                self.close_connection = True
+                if not self.headers.get("Origin"):
+                    self.send_json({"error": "A same-site origin is required"}, 403)
+                    return
+                try:
+                    identity = access.identify(self.headers)
+                    if identity is None or not identity.owns_library:
+                        self.send_json({"error": "Library owner access is required"}, 401 if identity is None else 403)
+                        return
+                    if self.headers.get_content_type() != "application/json" or self.headers.get("Transfer-Encoding"):
+                        raise ValueError("A JSON selection is required")
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 4096:
+                        raise ValueError("Invalid selection size")
+                    payload = json.loads(self.rfile.read(length))
+                    if not isinstance(payload, dict) or set(payload) != {"action", "video_ids"}:
+                        raise ValueError("Invalid processing selection")
+                    from .manual_queue import change
+
+                    self.send_json(change(root, payload["action"], payload["video_ids"]))
+                except (ValueError, TypeError):
+                    self.send_json({"error": "Invalid queue action or video selection"}, 400)
+                except Exception:
+                    self.send_json({"error": "Processing queue is unavailable"}, 503)
+                return
+            self.read_only()
+
+        def read_only(self):
             if not self.trusted():
                 return
             self.resource = None
@@ -1082,9 +1125,9 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             self.end_headers()
             self.write_data(data)
 
-        do_PUT = do_POST
-        do_PATCH = do_POST
-        do_DELETE = do_POST
+        do_PUT = read_only
+        do_PATCH = read_only
+        do_DELETE = read_only
 
     return Handler
 

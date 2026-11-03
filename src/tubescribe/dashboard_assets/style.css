@@ -34,3 +34,8 @@ dialog{border:1px solid var(--border);box-shadow:0 20px 80px #13241c33;border-ra
 #user-button:empty{display:none}
 @media(max-width:1200px){.toolbar select{flex-basis:180px}}
 @media(max-width:520px){.toolbar select{width:100%;font-size:12px}.toolbar .search-field{min-width:0}.video-placeholder{font-size:24px}.completion-badge{width:23px;height:23px;font-size:14px}}
+#discovered-view,#processing-controls{margin:0 24px 12px}
+#processing-estimate,#processing-message{font-size:13px;color:var(--muted)}
+#processing-estimate{margin-inline-start:8px}
+#processing-message:not(:empty){margin-top:8px}
+.video-bottom label{cursor:pointer}

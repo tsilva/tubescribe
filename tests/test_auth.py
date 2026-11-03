@@ -112,6 +112,37 @@ class ClerkReader(unittest.TestCase):
     def headers(self, user="user_owner", **claims):
         return {"Authorization": "Bearer " + self.token(user, **claims)}
 
+    def test_processing_admission_requires_owner_and_same_origin(self):
+        video = "abcdefghijk"
+        self.store.index(
+            "private-channel",
+            "upload",
+            [{"id": video, "title": "New upload", "url": f"https://youtube.com/watch?v={video}"}],
+            None,
+        )
+        with patch.dict(os.environ, {"TUBESCRIBE_MANUAL_QUEUE": "1"}):
+            server = make_server(self.root)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with httpx.Client(base_url=f"http://127.0.0.1:{server.server_port}", trust_env=False) as client:
+            route = "/api/processing"
+            payload = {"action": "queue", "video_ids": [video]}
+            self.assertEqual(client.get(route, headers=self.headers()).json(), {"videos": []})
+            self.assertEqual(client.get(route, headers=self.headers("user_other")).status_code, 404)
+            for headers, expected in (
+                ({"Origin": ORIGIN}, 401),
+                ({**self.headers("user_other"), "Origin": ORIGIN}, 403),
+                (self.headers(), 403),
+                ({**self.headers(), "Origin": "https://other.test"}, 403),
+            ):
+                self.assertEqual(client.post(route, json=payload, headers=headers).status_code, expected)
+            self.assertEqual(self.store.submission_records(), [])
+            headers = {**self.headers(), "Origin": ORIGIN}
+            self.assertEqual(client.post(route, json=payload, headers=headers).json(), {"changed": 1})
+            self.assertEqual(client.get(route, headers=headers).json()["videos"][0]["state"], "queued")
+            self.assertEqual(self.client.post(route, json=payload, headers=headers).status_code, 405)
+
     def test_realtime_renewal_verifies_session_without_database_ownership_reads(self):
         with patch("tubescribe.auth.connect", side_effect=AssertionError("renewal polled database")):
             response = self.client.get("/api/realtime-authorization", headers=self.headers())

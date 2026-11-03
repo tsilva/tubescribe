@@ -118,6 +118,9 @@ class Dispatcher:
             return identifier
 
     def execute(self, request, adapter, *, identifier=None):
+        from .manual_queue import PREFIX, authorize_execution
+
+        authorize_execution(self.store, request, identifier)
         identifier = identifier or self.submit(request)
         with lease(self.store.root, "submission:" + identifier):
             row = self.store.submission(identifier)
@@ -143,6 +146,14 @@ class Dispatcher:
                     result = adapter.execute()
                 finally:
                     CURRENT_SUBMISSION.reset(token)
+                if row["dedupe"].startswith(PREFIX) and not result.get("failed"):
+                    from .pipeline import Plan
+
+                    jobs = self.store.pipeline_jobs(
+                        ids=request.options["video"], profile=request.options["profile"]
+                    )
+                    if not jobs or not all(Plan().complete(job) for job in jobs):
+                        result = {**result, "failed": 1}
             except BaseException as error:
                 from contextlib import suppress
 
@@ -179,6 +190,10 @@ def execute_cli(store, args, operation):
 
 def consume(store, *, once=False, poll=None, process=None):
     """Independent dispatcher; durable queued requests survive the web process."""
+    if store.config.manual_queue:
+        from .openrouter import launcher
+
+        launcher()
     process = process or LocalProcess()
     if store.config.network:
         return consume_network(store, once=once, poll=poll, process=process)
@@ -188,11 +203,20 @@ def consume(store, *, once=False, poll=None, process=None):
             from .rollups import schedule
 
             schedule(store, background=False)
-            store.reclaim_submissions()
-            rows = store.queued_submissions()
+            store.reclaim_submissions(manual=store.config.manual_queue)
+            rows = store.queued_submissions(manual=store.config.manual_queue)
             for row in rows:
                 request = JobRequest(**json.loads(row["request"]))
                 try:
+                    if store.config.manual_queue:
+                        with store.db:
+                            reserved = store.db.execute(
+                                "UPDATE submissions SET state='active',worker_id=?,updated=? "
+                                "WHERE id=? AND state='queued' AND pid IS NULL AND worker_id IS NULL",
+                                (store.config.worker_id, time.time(), row["id"]),
+                            ).rowcount
+                        if not reserved:
+                            continue
                     pid = process.start(store.root, request, row["id"])
                     store.update_submission(row["id"], pid=pid)
                     # Keep archive capacity conservative; child handles submission/job fencing.
@@ -209,6 +233,8 @@ def consume(store, *, once=False, poll=None, process=None):
                             except ProcessLookupError:
                                 break
                             time.sleep(poll or store.config.worker_poll)
+                    if store.config.manual_queue and store.submission(row["id"])["state"] == "active":
+                        store.update_submission(row["id"], state="interrupted", pid=None, worker_id=None)
                     completed += 1
                 except Exception as error:
                     store.update_submission(row["id"], state="failed", error=str(error), pid=None)
@@ -233,8 +259,8 @@ def consume_network(store, *, once, poll, process):
             from .rollups import schedule
 
             schedule(store, background=False)
-            store.reclaim_submissions()
-            row = store.claim_submission(store.config.worker_id)
+            store.reclaim_submissions(manual=store.config.manual_queue)
+            row = store.claim_submission(store.config.worker_id, manual=store.config.manual_queue)
             if row is None:
                 if once:
                     return {"dispatched": completed, "failed": failed}
@@ -248,6 +274,10 @@ def consume_network(store, *, once, poll, process):
                 if child is not None:
                     child.wait()
                 current = store.submission(row["id"])
+                if store.config.manual_queue and current["state"] == "active":
+                    store.update_submission(row["id"], state="interrupted", pid=None, worker_id=None)
+                    failed += 1
+                    continue
                 if current["state"] == "queued":
                     # A transient service failure retains this exact request for retry.
                     if once:

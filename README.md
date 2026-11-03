@@ -18,6 +18,8 @@ TubeScribe is for people who follow YouTube channels and want to revisit their i
 
 Libraries are private to each account. The existing archive belongs to its owner; new accounts see **No videos yet**. Local processors continue publishing to the owner’s library.
 
+With [owner-selected processing](docs/guide.md#owner-selected-processing-on-the-mac) enabled, followed channels are checked automatically. The owner can open **Discovered**, select uploads and review the estimated transcription cost before choosing **Queue selected**. A Mac worker sends their audio to OpenRouter and publishes the transcript and summary to the same library.
+
 A useful first result is a readable summary with links to the original video and any saved figures. Videos still awaiting processing show their current state; raw transcripts can be read before the summary is ready. Browsing only reads saved content and never starts processing.
 
 The reader refreshes on entry, when you return to its tab, or when you choose **Refresh**. It does not poll in the background. Local PostgreSQL processors wake on database notifications, with timers only for retries and expiring work or summary windows.
@@ -41,7 +43,7 @@ scripts/tubescribe --help
 scripts/tubescribe dashboard serve --port auto
 ```
 
-Open the URL printed by the last command. A fresh installation starts with an empty library. Follow the [installation and inference setup](docs/guide.md#install), then [add channels and process videos](docs/guide.md#archive-commands) to populate it. Full processing uses separate Whisper and Nemotron services on an RTX 4090 plus AgentBridge/Codex; installing the reader alone does not start those services. The dependency lock and seven-day package age cutoff are retained.
+Open the URL printed by the last command. A fresh installation starts with an empty library. Follow the [installation guide](docs/guide.md#install), then [add channels](docs/guide.md#archive-commands). The [Mac and OpenRouter setup](docs/guide.md#owner-selected-processing-on-the-mac) supports manual selections. The [local GPU setup](docs/guide.md#configuration-access-and-inference-roles) uses separate Whisper and Nemotron services. Both use AgentBridge/Codex for summaries.
 
 ## Further reading
 

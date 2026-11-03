@@ -34,7 +34,9 @@ def ensure_recent(
     bridge=None,
     video_cache=None,
     clock=None,
+    catalog_only=False,
 ):
+    catalog_only = catalog_only or store.config.manual_queue
     if days < 1 or max_attempts < 1:
         raise ValueError("Days and attempt bounds must be positive")
     channels = store.channels(channel)
@@ -88,7 +90,7 @@ def ensure_recent(
                                     "duration": info.get("duration"),
                                 }
                             ],
-                            profile,
+                            None if catalog_only else profile,
                         )
                         selected.add(video["id"])
                         if not exact:
@@ -127,7 +129,7 @@ def ensure_recent(
     }
     # Never let an empty selection become an unscoped worker request. Defer processing
     # altogether after a bot/rate-limit response instead of issuing more downloads.
-    if not selected or rate_limited:
+    if catalog_only or not selected or rate_limited:
         return result
     request = JobRequest(
         "work",

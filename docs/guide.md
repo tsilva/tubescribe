@@ -358,7 +358,7 @@ Processing stages, model/profile, timings, failures, and retry details are avail
 
 The pane defaults to the existing summary, preserving links to its saved figures; otherwise it opens the full saved transcript. The transcript tab displays all speaker turns and figures, and the SRT tab displays all cues with clickable YouTube timestamps. Raw transcripts are also available before postprocessing completes. Loading, unavailable documents, and videos still awaiting processing have explicit states. The full-page transcript provides Markdown, text, SRT, and JSON downloads, including raw ASR transcripts awaiting diarization. Reading only fetches published documents and never starts inference. The pane caches up to eight documents, cancels obsolete requests on selection changes, and preserves the active tab, selection, reader scroll, and expanded details during unchanged live updates. Source HTML is rebuilt from an allowlist of text elements, same-origin links/images, and YouTube watch links; it cannot add scripts, forms, external media, or inline event handlers. The legacy format preview remains available for older archive snapshots, limited to 2 MiB; downloads contain the complete file.
 
-The web app is consumption-only: visitors can browse the library, seven-day channel and all-channel summaries, video summaries, transcripts, subtitles and published figures. All POST/PUT/PATCH/DELETE requests return 405 with `Allow: GET, HEAD`. There are no processing forms, retry controls, operational snapshots, metrics or arbitrary object-key download routes. Discovery and all generation remain in local CLI/services. The CLI's loopback-only health handshake is not exposed by the hosted app.
+The web app serves the library, summaries, transcripts, subtitles and published figures. With [owner-selected processing](#owner-selected-processing-on-the-mac) enabled, the signed-in library owner can queue selections, remove waiting selections and retry failed processing from **Discovered**. The queue endpoint requires a verified owner session and a trusted same-site origin for writes. Other writes return 405 with `Allow: GET, HEAD`. Discovery and generation run in local services. The CLI's loopback-only health handshake is not exposed by the hosted app.
 
 The reader loads on entry, explicit **Refresh**, and return to the tab; there is no timed feed or digest polling. `/api/feed?revision=REVISION` first reads the small transactional catalogue revision. A matching revision returns an empty update without reading video records, including on a cold function instance (only channel counts/metadata are needed there). Warm instances reuse the last snapshot until that revision changes. The feed never inventories objects, scans publications, collects operational events, or inspects worker leases. Updates contain changed records and removed keys when revision history is available; unknown revisions return a full snapshot. Reader responses exclude worker identity, retry budgets, service errors, discovery diagnostics and storage keys. Private library data is cached in memory only, cleared on account changes, and never shared through the CDN. Public static assets have bounded CDN caching. Rows render in batches of 50; search covers the loaded catalogue and selection survives updates. Thumbnails use `cover.png?v=PUBLICATION_HASH`, validating the manifest and requested checksum without downloading the whole publication.
 
@@ -678,6 +678,23 @@ The source model remains `codex/gpt-6.1-sol` with high reasoning for both Markdo
 summary generation. Models still inspect only the bounded, relevant figures requested
 through their tools.
 
+### Owner-selected processing on the Mac
+
+Enable `TUBESCRIBE_MANUAL_QUEUE=1` in the hosted reader, Mac feed watcher and Mac queue consumer. They share the existing archive database, and the consumer shares the archive object store. The reader's database binding must permit the owner endpoint to insert jobs and submissions and update their queue state. Use the existing Clerk ownership registry.
+
+1. Provision a reviewed TubeScribe OpenRouter credential binding in Infisical. Use a dedicated key and configure its spending limit in OpenRouter. Create a Mac launcher for the native sandboxed `infisical secrets agent-proxy run` route with unmatched hosts blocked and egress restricted to `openrouter.ai`. The route must supply `tubescribe_openrouter_proxy_placeholder` as `OPENROUTER_API_KEY`, a loopback `HTTPS_PROXY`, and the process-local `SSL_CERT_FILE`. The launcher runs the project's Python with `-m tubescribe.openrouter`, forwarding request JSON on stdin and returning response JSON on stdout. Verify the route with fake credentials and a bounded authenticated check before enabling it for selected videos.
+2. Review any outstanding legacy work and stop the legacy automatic watcher and consumer before the cutover. Use the existing Mac archive and AgentBridge configuration with these commands. Set `TUBESCRIBE_OPENROUTER_LAUNCHER` to the absolute path of the reviewed executable in the consumer's environment. The consumer handles audio download and conversion with FFmpeg and uses the existing AgentBridge stages for cleanup and summaries.
+
+   ```bash
+   TUBESCRIBE_MANUAL_QUEUE=1 scripts/tubescribe --data /absolute/scratch/watch feed-poll --watch
+   TUBESCRIBE_MANUAL_QUEUE=1 TUBESCRIBE_OPENROUTER_LAUNCHER=/absolute/path/to/proxy-launcher \
+     scripts/tubescribe --data /absolute/scratch/worker queue serve
+   ```
+
+3. Open **Discovered** as the library owner. Select up to 50 untranscribed uploads and choose **Queue selected**. Discovery adds catalogue metadata. A selection creates a durable job for that video, and the consumer takes one selection at a time. The estimate covers transcription audio at the displayed rate, currently about $0.12 per hour, with the billed cost shown when OpenRouter returns it. After a failure, **Retry** resumes saved work. **Remove** is available while a selection is waiting.
+
+The fixed `nemotron-openrouter-v1` profile uses [OpenRouter's Nemotron 3.5 Transcribe route](https://openrouter.ai/nvidia/nemotron-3.5-transcribe) and requires timestamped words. [DeepInfra's OpenAI-compatible API](https://deepinfra.com/blog/nvidia-nemotron-3-5-transcribe-release) supports word timestamps and lists speaker attribution as forthcoming. The worker publishes timestamped transcripts and summaries when speaker labels are unavailable and preserves labels when returned. Long videos are split into eight-minute audio parts. Speaker identifiers are scoped to each part. The worker saves each successful response before moving on. For an ambiguous request failure it records a pending checkpoint and blocks a second request for that part. Review the provider's billing and activity before clearing the affected `.pending` checkpoint in the video's `openrouter/` transcript directory and retrying.
+
 ### Vercel hosting with local processing
 
 Production delivery on `main` waits for the complete exact-commit `CI` run,
@@ -696,12 +713,12 @@ Keep Vercel’s Require Separate Values policy enabled; only the explicitly publ
 origin setting is synchronized as Config.
 
 `api/index.py` exposes the existing dashboard routes as a Vercel Python Function.
-The hosted role only serves the library, transcripts, summaries, subtitles and published figures. It never starts a worker, download,
+The hosted role serves the library, transcripts, summaries, subtitles and published figures and can admit owner selections. It never starts a worker, download,
 FFmpeg process, inference service or rolling-summary scheduler. Those continue on your
 hardware through `queue serve` and the local AgentBridge gateway.
 
 Create a private R2 bucket and connect a Neon database to the Vercel project. Prefer a
-Frankfurt function/database region and the R2 EU jurisdiction. The hosted reader requires Clerk sign-in. Keep non-production deployments protected by Vercel as well. R2 public access stays off: the app serves published resources through its confined routes. The web app has no administrator role or processing endpoints. Keep the local gateway authenticated and off public ingress.
+Frankfurt function/database region and the R2 EU jurisdiction. The hosted reader requires Clerk sign-in. Keep non-production deployments protected by Vercel as well. R2 public access stays off: the app serves published resources through its confined routes. Keep the local gateway authenticated and off public ingress.
 
 Configure these Vercel environment variables before deploying:
 
@@ -715,6 +732,7 @@ Configure these Vercel environment variables before deploying:
 | `AWS_DEFAULT_REGION` | `auto`. |
 | `TUBESCRIBE_PUBLIC_ORIGIN` | Optional explicit HTTPS origin; otherwise derived from Vercel's deployment URL. Vercel's verified production alias and deployment hostname are both accepted. |
 | `TUBESCRIBE_DISPATCH`, `TUBESCRIBE_MIGRATIONS` | `queue` and `check`; enforced by the hosted entrypoint. |
+| `TUBESCRIBE_MANUAL_QUEUE` | Set to `1` to enable the owner queue when the Mac watcher and consumer are configured for the same mode. |
 
 Clerk is provisioned through Vercel Marketplace on the existing Hobby plan. Configure its
 production domain and the five DNS-only CNAME records shown by Clerk (frontend API,

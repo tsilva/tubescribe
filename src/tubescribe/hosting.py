@@ -1,4 +1,4 @@
-"""Vercel web role: durable storage delivery, no processing or administrative routes."""
+"""Vercel web role for archive delivery and optional owner queue admission."""
 
 import os
 import re

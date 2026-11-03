@@ -12,6 +12,7 @@ import httpx
 
 from . import postprocessing as engine
 from .agent_gateway import DurableRunFailed
+from .config import OPENROUTER_PROFILE
 from .database import database_errors, transient_errors
 from .execution import capacity, job_stage, pipeline_lock
 from .inference import PostprocessingUnavailable
@@ -159,9 +160,12 @@ def recover(store, *, job_ids=None):
 
 def initialize(store, job, mode):
     source = store.transcript(job["id"])
-    diarization = store.stage_row("diarization", job["id"])
-    if not source or not diarization or diarization["state"] != "complete":
-        raise ValueError("Postprocessing requires a completed diarized transcript")
+    if not source:
+        raise ValueError("Postprocessing requires a completed transcript")
+    if job.get("profile") != OPENROUTER_PROFILE:
+        diarization = store.stage_row("diarization", job["id"])
+        if not diarization or diarization["state"] != "complete":
+            raise ValueError("Postprocessing requires a completed diarized transcript")
     path = archive_path(store, source["json_path"])
     if digest(path) != source["json_sha256"]:
         raise ValueError("Authoritative transcript is corrupt; repair it before postprocessing")

@@ -45,7 +45,8 @@ def validate(result: dict):
             raise ValueError("ASR timestamps are out of order or audio bounds")
         if not isinstance(s.get("text"), str) or not s["text"].strip():
             raise ValueError("ASR segment lacks text")
-        previous = end
+        # Concurrent provider speaker turns can overlap; their starts remain ordered.
+        previous = start if result.get("backend") == "openrouter" else end
     return result
 
 

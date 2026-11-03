@@ -55,6 +55,7 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
     cutoff = (end - timedelta(days=days)).timestamp()
     result = {"checked_at": end.isoformat(), "videos": [], "errors": [], "reconciled": []}
     selected = set()
+    catalog_only = store.config.manual_queue
 
     def reconcile(source):
         store.discovery(source["id"], "feed-reconcile", "active")
@@ -68,6 +69,7 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                 enqueue_only=True,
                 bridge=bridge,
                 clock=end,
+                catalog_only=catalog_only,
             )
         except BaseException as error:
             store.discovery(source["id"], "feed-reconcile", "failed", error=str(error))
@@ -88,12 +90,13 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
             )
         }
         covered = set()
-        for pending in store.db.execute(
-            "SELECT request FROM submissions WHERE state IN ('queued','active')"
-        ):
-            request = json.loads(pending[0])
-            if request["options"].get("profile", "turbo-v1") == profile:
-                covered.update(request["options"].get("video") or [])
+        if not catalog_only:
+            for pending in store.db.execute(
+                "SELECT request FROM submissions WHERE state IN ('queued','active')"
+            ):
+                request = json.loads(pending[0])
+                if request["options"].get("profile", "turbo-v1") == profile:
+                    covered.update(request["options"].get("video") or [])
         for source in store.channels():
             try:
                 if source["id"] in pending_gaps:
@@ -104,10 +107,20 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                     feed = fetch_feed(source["id"])
                 if not feed:
                     continue
-                known = {
-                    r["video_id"]: r
-                    for r in store.pipeline_jobs(profile=profile, ids=[v["id"] for v in feed])
-                }
+                ids = [v["id"] for v in feed]
+                if catalog_only:
+                    known = {
+                        row["id"]: dict(row)
+                        for row in store.db.execute(
+                            "SELECT id,channel_id,published_at,duration FROM videos WHERE id IN ("
+                            + ",".join("?" for _ in ids) + ")", ids
+                        )
+                    }
+                else:
+                    known = {
+                        r["video_id"]: r
+                        for r in store.pipeline_jobs(profile=profile, ids=ids)
+                    }
                 # Feeds expose only the latest 15 publications. An overlap anchors
                 # normal incremental polling; a full unanchored recent feed needs
                 # authoritative all-tab reconciliation, rather than silently skipping.
@@ -143,7 +156,9 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                     if row:
                         if row["channel_id"] != source["id"]:
                             raise ValueError("Indexed channel identity mismatch")
-                        if Plan().complete(row) or Plan().due(row) is None:
+                        if catalog_only and stamp is not None and row.get("duration"):
+                            continue
+                        if not catalog_only and (Plan().complete(row) or Plan().due(row) is None):
                             continue
                         if stamp is not None and (
                             row.get("audio_path") or row.get("asr_state") == "complete"
@@ -163,6 +178,8 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                         if info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
                             continue
                         stamp = publication_time(info.get("timestamp"))
+                        if catalog_only and stamp is None:
+                            stamp = approximate or publication_time(info.get("upload_date"))
                         if stamp is None:
                             raise ValueError("Watch-page exact publication date unavailable")
                         if stamp > end.timestamp():
@@ -179,7 +196,7 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                                     "duration": info.get("duration"),
                                 }
                             ],
-                            profile,
+                            None if catalog_only else profile,
                         )
                         if stamp >= cutoff:
                             selected.add(video["id"])
@@ -202,6 +219,9 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                 if isinstance(error, youtube.YouTubeError) and error.kind == "rate_limit":
                     defer_downloads(store.root)
                     break
+        if catalog_only:
+            result["videos"] = sorted(selected)
+            return result
         # Avoid overlapping requests as well as exact submission deduplication.
         for row in store.db.execute(
             "SELECT request FROM submissions WHERE state IN ('queued','active')"

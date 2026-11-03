@@ -255,6 +255,8 @@ def main():
         signal.signal(signal.SIGTERM, stop_worker)
 
     def endpoint():
+        if store.config.manual_queue:
+            return None
         if args.endpoint:
             return args.endpoint
         config = store.root / "tunnel.json"
@@ -267,6 +269,8 @@ def main():
             from .submission import Dispatcher, JobRequest, consume
 
             if args.action == "submit":
+                if store.config.manual_queue:
+                    raise ValueError("Select videos in the library's Discovered view")
                 if not args.request:
                     raise ValueError("queue submit requires --request")
                 request = JobRequest(**json.loads(args.request.read_text()))
@@ -440,7 +444,7 @@ def main():
                                 v["duration"] = info.get("duration")
                                 candidates.append((kind, v))
                         else:
-                            store.index(channel["id"], kind, videos, args.profile)
+                            store.index(channel["id"], kind, videos, None if store.config.manual_queue else args.profile)
                         if args.command == "latest":
                             store.discovery(channel["id"], kind, "complete", len(videos))
                         out({"channel_id": channel["id"], "kind": kind, "discovered": len(videos)})
@@ -461,7 +465,7 @@ def main():
                     for kind in youtube.TABS:
                         selected = [v for k, v in chosen if k == kind]
                         if selected:
-                            store.index(channel["id"], kind, selected, args.profile)
+                            store.index(channel["id"], kind, selected, None if store.config.manual_queue else args.profile)
                     out({"latest": [v for _, v in chosen]})
             if errors:
                 return 1
@@ -502,6 +506,8 @@ def main():
                 )
             )
         elif args.command == "work":
+            if store.config.manual_queue:
+                args.endpoint = None
             result = execute_cli(
                 store,
                 args,

@@ -74,10 +74,19 @@ def work(
     _recover=True,
     _parallel=True,
 ):
+    from .manual_queue import PROFILE, authorize_execution, request_for
+
+    hosted = profile == PROFILE
+    if hosted or store.config.manual_queue:
+        from .execution import CURRENT_SUBMISSION
+
+        if not hosted or not ids or len(ids) != 1 or channel:
+            raise ValueError("OpenRouter work requires one manually selected video per job")
+        authorize_execution(store, request_for(ids[0]), CURRENT_SUBMISSION.get())
     if postprocessing not in {"video", "text", "off"}:
         raise ValueError("Postprocessing must be video, text, or off")
     summary = summary and postprocessing != "off"
-    if _parallel and store.config.network and store.config.agent_concurrency > 1:
+    if not hosted and _parallel and store.config.network and store.config.agent_concurrency > 1:
         from .parallel import work_parallel
 
         return work_parallel(
@@ -111,7 +120,15 @@ def work(
         log("skip_completed", count=skipped)
         from .inference import client_options
 
-        client = asr_client or Client(endpoint, **client_options())
+        if hosted:
+            from .openrouter import OpenRouter
+
+            client = OpenRouter()
+        else:
+            client = asr_client or Client(endpoint, **client_options())
+
+        def asr_health():
+            return client.health() if hosted else ensure_ready(client, store, endpoint)
         health = None
         while True:
             jobs = store.jobs(
@@ -131,7 +148,7 @@ def work(
                         continue
                 break
             if health is None and any(row["asr_state"] != "complete" for row in jobs):
-                health = ensure_ready(client, store, endpoint)
+                health = asr_health()
                 store.bind_profile(profile, health)
                 log("asr_ready", **health)
             for row in jobs:
@@ -173,17 +190,20 @@ def work(
                         if postprocessing != "off" and job.get("diarization_state") == "complete":
                             done += int(finish())
                             continue
-                        try:
-                            diarization_client = (diarization_factory or ready_diarization)(
-                                store.root
-                            )
-                            bind_diarization_profile(store, profile, diarization_client.health())
-                        except Exception as error:
-                            raise InferenceUnavailable(
-                                f"Diarization unavailable: {error}"
-                            ) from error
+                        if not hosted:
+                            try:
+                                diarization_client = (diarization_factory or ready_diarization)(
+                                    store.root
+                                )
+                                bind_diarization_profile(store, profile, diarization_client.health())
+                            except Exception as error:
+                                raise InferenceUnavailable(
+                                    f"Diarization unavailable: {error}"
+                                ) from error
                         if job["asr_state"] == "complete":
                             stage = "diarization"
+                            if hosted:
+                                raise ValueError("Saved OpenRouter transcript is missing its speaker completion record")
                             completed = enrich_one(
                                 store, job, diarization_client, keep_audio=keep_audio
                             )
@@ -191,7 +211,7 @@ def work(
                                 completed = finish() or completed
                             done += int(completed)
                             continue
-                        store.bind_profile(profile, ensure_ready(client, store, endpoint))
+                        store.bind_profile(profile, asr_health())
                         path = store.cached_media(job["audio_path"])
                         if not path or not path.is_file():
                             store.update(
@@ -223,7 +243,7 @@ def work(
                                 bytes=path.stat().st_size,
                             )
                         stage = "asr"
-                        store.bind_profile(profile, ensure_ready(client, store, endpoint))
+                        store.bind_profile(profile, asr_health())
                         store.update(
                             job["id"],
                             state="active",
@@ -233,8 +253,11 @@ def work(
                         log("asr_start", video_id=job["video_id"])
                         attempt = store.begin_attempt(job["id"], "asr")
                         try:
-                            with capacity(store.root, "gpu"):
-                                result = client.transcribe(path)
+                            if hosted:
+                                result = client.transcribe(store, job, path)
+                            else:
+                                with capacity(store.root, "gpu"):
+                                    result = client.transcribe(path)
                         except BaseException as error:
                             store.finish_attempt(
                                 attempt,
@@ -250,6 +273,7 @@ def work(
                             metrics={
                                 "processing_seconds": result["processing_seconds"],
                                 "duration": result["duration"],
+                                **({"cost": result.get("cost")} if hosted else {}),
                             },
                         )
                         # Recheck each result: a remote deployment may change mid-import.
@@ -262,9 +286,14 @@ def work(
                                 "Decoded audio duration differs from video metadata; audio retained for inspection"
                             )
                         stage = "save"
-                        store.save(job, result, keep_audio=True)
-                        stage = "diarization"
-                        enrich_one(store, job, diarization_client, keep_audio=keep_audio)
+                        if hosted:
+                            speakers = {segment["speaker_id"] for segment in result["segments"]}
+                            store.save(job, result, keep_audio=keep_audio,
+                                       hosted_speakers=len(speakers) if None not in speakers else None)
+                        else:
+                            store.save(job, result, keep_audio=True)
+                            stage = "diarization"
+                            enrich_one(store, job, diarization_client, keep_audio=keep_audio)
                         if postprocessing != "off":
                             finish()
                         done += 1

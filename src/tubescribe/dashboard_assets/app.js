@@ -27,6 +27,12 @@ let feedObserver = null;
 let realtimeSettings = {enabled: false};
 let liveFeed = null;
 let ownsLibrary = true;
+let processingSettings = null;
+let discoveredView = false;
+let processingRecords = null;
+let processingRevision = 0;
+let processingBusy = false;
+const selectedForProcessing = new Set();
 const dateFormatter = new Intl.DateTimeFormat(undefined, {day: "numeric", month: "short", year: "numeric"});
 const narrowReader = window.matchMedia("(max-width: 900px)");
 
@@ -114,6 +120,68 @@ function selectVideo(jobs, job = bestJob(jobs), open = true) {
   renderReader(jobs, job);
   if (open) setReaderOpen(true);
 }
+function processingRecord(jobs) {
+  return processingRecords?.get(jobs[0].video_id);
+}
+function canQueue(jobs) {
+  const state = processingRecord(jobs)?.state;
+  return Boolean(processingRecords) && (!state || state === "cancelled") && !jobs.some(job => job.transcript_url);
+}
+function updateProcessingEstimate() {
+  const selected = [...selectedForProcessing];
+  const durations = selected.map(id => archive?.jobs.find(job => job.video_id === id)?.duration);
+  const known = durations.filter(seconds => Number.isFinite(seconds) && seconds > 0);
+  const total = known.reduce((sum, seconds) => sum + seconds, 0);
+  const estimate = processingSettings ? total * processingSettings.price_per_second : 0;
+  const missing = known.length < selected.length ? " · Some durations unknown" : "";
+  const cost = known.length ? `Estimated transcription $${estimate.toFixed(3)}${missing}` : "Duration unavailable";
+  $("processing-estimate").textContent = selected.length ? `${selected.length} selected · ${cost}` : "Select videos to process";
+  $("queue-selected").disabled = processingBusy || !selected.length;
+}
+async function refreshProcessing() {
+  if (!discoveredView || !ownsLibrary) return;
+  const revision = ++processingRevision;
+  try {
+    const response = await libraryFetch("/api/processing");
+    if (!response.ok) throw new Error("Processing status is unavailable. Refresh to retry.");
+    const data = await response.json();
+    if (revision !== processingRevision) return;
+    processingRecords = new Map(data.videos.map(record => [record.video_id, record]));
+    for (const id of selectedForProcessing) {
+      const jobs = archive?.jobs.filter(job => job.video_id === id) || [];
+      if (!jobs.length || !canQueue(jobs)) selectedForProcessing.delete(id);
+    }
+    renderFeed();
+    updateProcessingEstimate();
+  } catch (error) {
+    if (revision === processingRevision) $("processing-message").textContent = error.message;
+  }
+}
+async function changeProcessing(action, ids) {
+  if (processingBusy) return;
+  const generation = identityGeneration;
+  processingBusy = true;
+  updateProcessingEstimate();
+  try {
+    const response = await libraryFetch("/api/processing", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({action, video_ids: ids}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not update the processing queue");
+    if (generation !== identityGeneration) return;
+    for (const id of ids) selectedForProcessing.delete(id);
+    $("processing-message").textContent = result.changed ? `${result.changed} video${result.changed === 1 ? "" : "s"} ${action === "cancel" ? "removed from the queue" : "queued"}.` : "No videos changed. The queue may have already advanced.";
+    await refreshProcessing();
+  } catch (error) {
+    if (generation === identityGeneration) $("processing-message").textContent = error.message;
+  } finally {
+    if (generation === identityGeneration) {
+      processingBusy = false;
+      updateProcessingEstimate();
+    }
+  }
+}
 function videoRow(jobs) {
   const job = bestJob(jobs);
   const video = jobs[0];
@@ -159,7 +227,43 @@ function videoRow(jobs) {
   const meta = [channel, date(video.published_at, true)].filter(Boolean);
   const bottom = node("div", undefined, "video-bottom");
   description.append(title, node("p", meta.join(" · "), "video-meta"));
-  if (displayStage(job) !== "complete") {
+  if (discoveredView) {
+    const record = processingRecord(jobs);
+    const state = record?.state;
+    const current = jobs.find(job => job.profile === processingSettings.profile);
+    if (state === "active" && current) bottom.append(statusBadge(current));
+    else if (state && state !== "cancelled") bottom.append(node("span", human(state)));
+    else bottom.append(node("span", "Discovered"));
+    if (record?.cost != null) bottom.append(node("span", `Transcription $${record.cost.toFixed(3)}`));
+    if (current?.transcript_url && current.diarization_state !== "complete") {
+      bottom.append(node("span", "Speaker labels unavailable", "muted"));
+    }
+    if (canQueue(jobs)) {
+      const checkbox = node("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selectedForProcessing.has(video.video_id);
+      checkbox.setAttribute("aria-label", `Queue ${video.title}`);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked && selectedForProcessing.size >= 50) {
+          checkbox.checked = false;
+          $("processing-message").textContent = "Select up to 50 videos at a time.";
+          return;
+        }
+        if (checkbox.checked) selectedForProcessing.add(video.video_id);
+        else selectedForProcessing.delete(video.video_id);
+        updateProcessingEstimate();
+      });
+      const label = node("label");
+      label.append(checkbox, " Select");
+      bottom.append(label);
+    } else if (["queued", "failed", "interrupted"].includes(state)) {
+      const action = state === "queued" ? "cancel" : "retry";
+      const button = node("button", action === "cancel" ? "Remove" : "Retry", "button");
+      button.addEventListener("click", () => changeProcessing(action, [video.video_id]));
+      bottom.append(button);
+    }
+    description.append(bottom);
+  } else if (displayStage(job) !== "complete") {
     bottom.append(statusBadge(job));
     description.append(bottom);
   }
@@ -170,7 +274,7 @@ function videoRow(jobs) {
 function renderFeed() {
   if (!archive) return;
   const search = $("video-search").value.trim().toLowerCase();
-  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs]);
+  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, discoveredView, processingRecords && [...processingRecords], [...selectedForProcessing]]);
   if (signature === rendered) return;
   rendered = signature;
   const focused = document.activeElement?.dataset.focus;
@@ -187,7 +291,9 @@ function renderFeed() {
     const second = Number.isFinite(b.published) ? b.published : -Infinity;
     return (first === second ? 0 : second - first) || a.jobs[0].video_id.localeCompare(b.jobs[0].video_id);
   });
-  const matches = videos.filter(({jobs}) => (!libraryScope || jobs[0].channel_id === libraryScope) && (!search || jobs.some((job) =>
+  const matches = videos.filter(({jobs}) => (!discoveredView || !jobs.some(job => job.transcript_url) ||
+    Boolean(processingRecord(jobs))) &&
+    (!libraryScope || jobs[0].channel_id === libraryScope) && (!search || jobs.some((job) =>
     `${job.channel_title} ${job.channel_id} ${job.title} ${job.video_id}`.toLowerCase().includes(search))));
   if (!matches.some(({jobs}) => jobs[0].video_id === selectedVideo)) {
     const initial = matches[0]?.jobs;
@@ -228,7 +334,7 @@ function renderFeed() {
   const visible = matches.slice(0, Math.max(feedLimit, selectedIndex + 1));
   const rows = visible.map(({jobs}) => {
     const id = jobs[0].video_id;
-    const signature = JSON.stringify([jobs]);
+    const signature = JSON.stringify([jobs, discoveredView, Boolean(processingRecords), processingRecord(jobs), selectedForProcessing.has(id)]);
     let cached = rowCache.get(id);
     if (!cached || cached.signature !== signature) {
       cached = {signature, row: videoRow(jobs)};
@@ -526,6 +632,7 @@ function showArchive(cached = false) {
   $("updated").textContent = cached ? "Cached library" : `Updated ${new Date(archive.generated_at).toLocaleTimeString()}`;
   syncScopes();
   renderFeed();
+  void refreshProcessing();
 }
 async function refresh(event) {
   if (refreshing || !signedInUser) return;
@@ -784,12 +891,33 @@ async function renderDigest() {
 }
 $("channel-scope").addEventListener("change", (event) => chooseScope(event.target.value));
 $("rolling-summary").addEventListener("click", () => { chooseScope(libraryScope, true); setReaderOpen(true); });
+$("discovered-view").addEventListener("click", () => {
+  discoveredView = !discoveredView;
+  $("discovered-view").setAttribute("aria-pressed", String(discoveredView));
+  $("discovered-view").textContent = discoveredView ? "Back to library" : "Discovered";
+  $("processing-controls").hidden = !discoveredView;
+  feedLimit = 50;
+  renderFeed();
+  updateProcessingEstimate();
+  void refreshProcessing();
+});
+$("queue-selected").addEventListener("click", () => changeProcessing("queue", [...selectedForProcessing]));
 
 function clearPrivateLibrary() {
   identityGeneration += 1;
   liveFeed?.close();
   liveFeed = null;
   ownsLibrary = true;
+  discoveredView = false;
+  processingRecords = null;
+  processingRevision += 1;
+  processingBusy = false;
+  selectedForProcessing.clear();
+  $("processing-controls").hidden = true;
+  $("processing-message").textContent = "";
+  $("discovered-view").hidden = true;
+  $("discovered-view").setAttribute("aria-pressed", "false");
+  $("discovered-view").textContent = "Discovered";
   readerController?.abort();
   feedObserver?.disconnect();
   readingCache.clear(); rowCache.clear(); feedRecords.clear();
@@ -854,6 +982,7 @@ async function syncIdentity({user, session}) {
     if (generation !== identityGeneration) return;
     if (!response.ok || verified.user_id !== next) throw new Error("Could not verify your account. Refresh to retry.");
     ownsLibrary = verified.has_library;
+    $("discovered-view").hidden = !ownsLibrary || !processingSettings;
     const destination = new URLSearchParams(window.location.search).get("return_to");
     if (destination && destination.startsWith("/") && !destination.startsWith("//")) {
       const target = new URL(destination, window.location.origin);
@@ -876,6 +1005,7 @@ async function initializeAuthentication() {
     if (!response.ok) throw new Error("Sign-in configuration is unavailable. Refresh to retry.");
     const settings = await response.json();
     authEnabled = settings.enabled;
+    processingSettings = settings.processing || null;
     realtimeSettings = settings.realtime || {enabled: false};
     $("feed-help").textContent = realtimeSettings.enabled ? "New videos appear automatically" : "Refresh to check for new videos";
     if (!authEnabled) {

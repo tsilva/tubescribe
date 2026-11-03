@@ -50,7 +50,7 @@ class SQLJobRepository:
                 (channel["id"], channel["url"], channel["title"], now()),
             )
 
-    def index(self, channel_id: str, kind: str, videos: list[dict], profile: str):
+    def index(self, channel_id: str, kind: str, videos: list[dict], profile: str | None):
         with self.db:
             for v in videos:
                 self.db.execute(
@@ -68,10 +68,11 @@ class SQLJobRepository:
                         now(),
                     ),
                 )
-                self.db.execute(
-                    "INSERT INTO jobs(video_id,profile,updated_at) VALUES(?,?,?) ON CONFLICT DO NOTHING",
-                    (v["id"], profile, now()),
-                )
+                if profile is not None:
+                    self.db.execute(
+                        "INSERT INTO jobs(video_id,profile,updated_at) VALUES(?,?,?) ON CONFLICT DO NOTHING",
+                        (v["id"], profile, now()),
+                    )
             self.discovery(channel_id, kind, "complete", len(videos))
 
     def discovery(self, channel_id, kind, state, count=0, error=None):
@@ -510,19 +511,25 @@ class SQLJobRepository:
             )
         ]
 
-    def queued_submissions(self):
+    def queued_submissions(self, *, manual=False):
+        from .manual_queue import lane_filter
+
         return [
             dict(r)
             for r in self.db.execute(
-                "SELECT * FROM submissions WHERE state='queued' AND pid IS NULL ORDER BY created"
+                "SELECT * FROM submissions WHERE state='queued' AND pid IS NULL AND "
+                + lane_filter(manual) + " ORDER BY created"
             )
         ]
 
-    def reclaim_submissions(self):
+    def reclaim_submissions(self, *, manual=None):
+        from .manual_queue import lane_filter
+
         stamp = database_clock(self.db)
         with self.db:
             result = self.db.execute(
-                "UPDATE submissions SET state='queued',pid=NULL,worker_id=NULL,updated=? WHERE state IN ('active','queued') AND (state='active' OR pid IS NOT NULL) AND updated<? AND NOT EXISTS (SELECT 1 FROM claims WHERE resource='submission:' || submissions.id AND expires>?)",
+                "UPDATE submissions SET state='queued',pid=NULL,worker_id=NULL,updated=? WHERE state IN ('active','queued') AND (state='active' OR pid IS NOT NULL) AND updated<? AND NOT EXISTS (SELECT 1 FROM claims WHERE resource='submission:' || submissions.id AND expires>?)"
+                + (" AND " + lane_filter(manual) if manual is not None else ""),
                 (stamp, stamp - 90, stamp),
             )
         return result.rowcount
@@ -600,7 +607,7 @@ class SQLJobRepository:
             values,
         ).fetchall()
 
-    def commit_transcript(self, record):
+    def commit_transcript(self, record, *, hosted_speakers=None):
         from .execution import assert_owned
 
         with self.db:
@@ -620,6 +627,14 @@ class SQLJobRepository:
                 "UPDATE jobs SET state='complete',asr_state='complete',completed_at=?,updated_at=?,error=NULL,error_kind=NULL,failed_stage=NULL WHERE id=?",
                 (now(), now(), record[0]),
             )
+            if hosted_speakers is not None:
+                self.db.execute(
+                    "INSERT INTO diarizations(job_id,state,stage,updated_at,completed_at,speaker_count) "
+                    "VALUES(?,'complete','complete',?,?,?) ON CONFLICT(job_id) DO UPDATE SET "
+                    "state='complete',stage='complete',error=NULL,next_retry=0,updated_at=excluded.updated_at,"
+                    "completed_at=excluded.completed_at,speaker_count=excluded.speaker_count",
+                    (record[0], now(), now(), hosted_speakers),
+                )
 
 
 class SQLiteJobRepository(SQLJobRepository):
@@ -630,10 +645,13 @@ class PostgreSQLJobRepository(SQLJobRepository):
     """Network database adapter with atomic claims and queue reservation."""
 
     @operation("queue.read")
-    def claim_submission(self, worker_id):
+    def claim_submission(self, worker_id, *, manual=False):
+        from .manual_queue import lane_filter
+
         with self.db:
             row = self.db.execute(
-                "SELECT id FROM submissions WHERE state='queued' AND worker_id IS NULL ORDER BY created FOR UPDATE SKIP LOCKED LIMIT 1"
+                "SELECT id FROM submissions WHERE state='queued' AND worker_id IS NULL AND "
+                + lane_filter(manual) + " ORDER BY created FOR UPDATE SKIP LOCKED LIMIT 1"
             ).fetchone()
             if not row:
                 return None

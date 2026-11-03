@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from .blobs import ArtifactRef
+from .config import OPENROUTER_PROFILE
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,11 @@ class Plan:
         ]
 
     def next_stage(self, job):
-        return next((s for s in self.stages if job.get(s.state) != "complete"), None)
+        stages = self.stages
+        if job.get("profile") == OPENROUTER_PROFILE:
+            # Hosted transcription can carry speaker labels, but has no separate diarization step.
+            stages = (stage for stage in stages if stage.name != "diarization")
+        return next((stage for stage in stages if job.get(stage.state) != "complete"), None)
 
     def complete(self, job):
         return self.next_stage(job) is None

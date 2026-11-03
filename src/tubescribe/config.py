@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 _DATABASES = {}
 _WORKER_ID = uuid.uuid4().hex
+OPENROUTER_PROFILE = "nemotron-openrouter-v1"
 
 
 def default_data():
@@ -56,6 +57,7 @@ class RuntimeConfig:
     downloads: int = 1
     gpu_slots: int = 1
     agent_slots: int = 1
+    manual_queue: bool = False
 
     @classmethod
     def load(cls, root):
@@ -80,6 +82,7 @@ class RuntimeConfig:
             downloads=int(os.environ.get("TUBESCRIBE_DOWNLOAD_SLOTS", "1")),
             gpu_slots=int(os.environ.get("TUBESCRIBE_GPU_SLOTS", "1")),
             agent_slots=int(os.environ.get("TUBESCRIBE_AGENT_SLOTS", "1")),
+            manual_queue=os.environ.get("TUBESCRIBE_MANUAL_QUEUE") == "1",
         )
         if config.network:
             if urlsplit(os.environ["TUBESCRIBE_DATABASE_URL"]).scheme not in {
