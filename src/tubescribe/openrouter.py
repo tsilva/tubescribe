@@ -48,6 +48,8 @@ def proxy_request(payload):
         or not ca
     ):
         raise ValueError("The reviewed loopback proxy and process-local CA are required")
+    request = json.loads(payload)
+    audio = base64.b64decode(request["input_audio"]["data"], validate=True)
     with httpx.Client(
         proxy=proxy,
         verify=ssl.create_default_context(cafile=ca),
@@ -56,8 +58,13 @@ def proxy_request(payload):
     ) as client:
         response = client.post(
             "https://openrouter.ai/api/v1/audio/transcriptions",
-            content=payload,
-            headers={"Authorization": "Bearer " + PLACEHOLDER, "Content-Type": "application/json"},
+            files={"file": ("speech.wav", audio, "audio/wav")},
+            data={
+                "model": request["model"],
+                "response_format": request["response_format"],
+                "timestamp_granularities[]": request["timestamp_granularities"],
+            },
+            headers={"Authorization": "Bearer " + PLACEHOLDER},
         )
         if response.status_code != 200:
             return {"status": response.status_code}

@@ -43,6 +43,11 @@ def fetch_feed(channel_id):
             "title": entry.get("title") or identifier,
             "url": "https://www.youtube.com/watch?v=" + identifier,
             "published_at": str(stamp) if stamp is not None else None,
+            "duration": entry.get("duration"),
+            "live_status": entry.get("live_status"),
+            "kind": "stream"
+            if entry.get("was_live") or entry.get("live_status") == "was_live"
+            else "upload",
         }
     return list(videos.values())
 
@@ -99,7 +104,7 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                     covered.update(request["options"].get("video") or [])
         for source in store.channels():
             try:
-                if source["id"] in pending_gaps:
+                if not catalog_only and source["id"] in pending_gaps:
                     if reconcile(source):
                         break
                     continue
@@ -110,17 +115,33 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                 ids = [v["id"] for v in feed]
                 if catalog_only:
                     known = {
-                        row["id"]: dict(row)
+                        row[0]
                         for row in store.db.execute(
-                            "SELECT id,channel_id,published_at,duration FROM videos WHERE id IN ("
+                            "SELECT id FROM videos WHERE id IN ("
                             + ",".join("?" for _ in ids) + ")", ids
                         )
                     }
-                else:
-                    known = {
-                        r["video_id"]: r
-                        for r in store.pipeline_jobs(profile=profile, ids=ids)
-                    }
+                    # The uploads listing already carries catalogue metadata. Keep the
+                    # watcher bounded even when a channel has a large unindexed history.
+                    additions = {"upload": [], "stream": []}
+                    for video in feed:
+                        stamp = publication_time(video["published_at"])
+                        if video["id"] in known or video.get("live_status") in (
+                            "is_live", "is_upcoming", "post_live"
+                        ):
+                            continue
+                        if stamp is not None and not cutoff - 86400 <= stamp <= end.timestamp():
+                            continue
+                        additions[video.get("kind", "upload")].append(video)
+                    for kind, videos in additions.items():
+                        if videos:
+                            store.index(source["id"], kind, videos, None)
+                            selected.update(video["id"] for video in videos)
+                    continue
+                known = {
+                    r["video_id"]: r
+                    for r in store.pipeline_jobs(profile=profile, ids=ids)
+                }
                 # Feeds expose only the latest 15 publications. An overlap anchors
                 # normal incremental polling; a full unanchored recent feed needs
                 # authoritative all-tab reconciliation, rather than silently skipping.
@@ -156,9 +177,7 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                     if row:
                         if row["channel_id"] != source["id"]:
                             raise ValueError("Indexed channel identity mismatch")
-                        if catalog_only and stamp is not None and row.get("duration"):
-                            continue
-                        if not catalog_only and (Plan().complete(row) or Plan().due(row) is None):
+                        if Plan().complete(row) or Plan().due(row) is None:
                             continue
                         if stamp is not None and (
                             row.get("audio_path") or row.get("asr_state") == "complete"
@@ -178,8 +197,6 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                         if info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
                             continue
                         stamp = publication_time(info.get("timestamp"))
-                        if catalog_only and stamp is None:
-                            stamp = approximate or publication_time(info.get("upload_date"))
                         if stamp is None:
                             raise ValueError("Watch-page exact publication date unavailable")
                         if stamp > end.timestamp():
@@ -196,7 +213,7 @@ def poll_feeds(store, endpoint, *, profile="turbo-v1", days=7, bridge=None, cloc
                                     "duration": info.get("duration"),
                                 }
                             ],
-                            None if catalog_only else profile,
+                            profile,
                         )
                         if stamp >= cutoff:
                             selected.add(video["id"])
