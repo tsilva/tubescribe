@@ -14,7 +14,7 @@ import httpx
 from tubescribe.cli import main
 from tubescribe.feed_watch import poll_feeds
 from tubescribe.manual_queue import PROFILE, change, status
-from tubescribe.openrouter import PLACEHOLDER, cached_response, cues, proxy_request
+from tubescribe.openrouter import MODEL, PLACEHOLDER, cached_response, cues, proxy_request
 from tubescribe.postprocessing_worker import initialize
 from tubescribe.rollups import video_work_pending
 from tubescribe.storage import Store
@@ -44,6 +44,7 @@ class ManualProcessing(unittest.TestCase):
                 "title": vid,
                 "url": f"https://www.youtube.com/watch?v={vid}",
                 "published_at": str(now.timestamp()),
+                "duration": 1,
             }
             for vid in (VIDEO, OTHER)
         ]
@@ -51,12 +52,7 @@ class ManualProcessing(unittest.TestCase):
             patch("tubescribe.feed_watch.fetch_feed", return_value=videos),
             patch(
                 "tubescribe.feed_watch.youtube.details",
-                side_effect=lambda vid: {
-                    "id": vid,
-                    "channel_id": CHANNEL,
-                    "timestamp": now.timestamp(),
-                    "duration": 1,
-                },
+                side_effect=AssertionError("Discovery must not open a watch page"),
             ),
         ):
             result = poll_feeds(self.store, None, clock=now)
@@ -184,19 +180,27 @@ class ManualProcessing(unittest.TestCase):
             os.environ.update(HTTPS_PROXY="http://127.0.0.1:1234", SSL_CERT_FILE="fixture-ca.pem")
             transport = client.return_value.__enter__.return_value
             transport.post.return_value = httpx.Response(200, json={"text": "fixture"})
+            payload = json.dumps({
+                "model": MODEL,
+                "input_audio": {"data": "YXVkaW8=", "format": "wav"},
+                "response_format": "verbose_json",
+                "timestamp_granularities": ["word"],
+            }).encode()
             self.assertEqual(
-                proxy_request(b"{}"),
+                proxy_request(payload),
                 {"status": 200, "generation_id": None, "response": {"text": "fixture"}},
             )
             tls.assert_called_once_with(cafile="fixture-ca.pem")
             self.assertFalse(client.call_args.kwargs["trust_env"])
             transport.post.assert_called_once_with(
                 "https://openrouter.ai/api/v1/audio/transcriptions",
-                content=b"{}",
-                headers={
-                    "Authorization": "Bearer " + PLACEHOLDER,
-                    "Content-Type": "application/json",
+                files={"file": ("speech.wav", b"audio", "audio/wav")},
+                data={
+                    "model": MODEL,
+                    "response_format": "verbose_json",
+                    "timestamp_granularities[]": ["word"],
                 },
+                headers={"Authorization": "Bearer " + PLACEHOLDER},
             )
 
     def test_speaker_labels_are_scoped_to_each_part(self):
