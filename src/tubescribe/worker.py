@@ -7,6 +7,7 @@ import time
 
 import httpx
 
+from .agent_gateway import DurableRunPending
 from .asr import Client
 from .database import database_errors, transient_errors
 from .diarization_tunnel import ready as ready_diarization
@@ -307,7 +308,7 @@ def work(
                             processing_seconds=result["processing_seconds"],
                             speed=result["duration"] / result["processing_seconds"],
                         )
-                    except transient_errors():
+                    except (DurableRunPending, *transient_errors()):
                         from contextlib import suppress
 
                         if stage not in {"diarization", "postprocessing", "summary"}:

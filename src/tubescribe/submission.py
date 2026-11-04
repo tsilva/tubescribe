@@ -157,19 +157,23 @@ class Dispatcher:
             except BaseException as error:
                 from contextlib import suppress
 
+                from .agent_gateway import DurableRunPending
                 from .database import database_errors, transient_errors
 
-                temporary = isinstance(error, transient_errors())
+                temporary = isinstance(error, (DurableRunPending, *transient_errors()))
                 with suppress(*database_errors()):
-                    self.store.update_submission(
-                        identifier,
-                        state="queued" if temporary else "interrupted",
-                        error="Durable service unavailable; checkpoints retained"
-                        if temporary
-                        else str(error),
-                        pid=None,
-                        worker_id=None,
-                    )
+                    if temporary and row["dedupe"].startswith(PREFIX):
+                        self.store.defer_submission(identifier)
+                    else:
+                        self.store.update_submission(
+                            identifier,
+                            state="queued" if temporary else "interrupted",
+                            error="Durable service unavailable; checkpoints retained"
+                            if temporary
+                            else str(error),
+                            pid=None,
+                            worker_id=None,
+                        )
                 raise
             self.store.update_submission(
                 identifier,

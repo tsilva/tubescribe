@@ -66,6 +66,10 @@ def change(root, action, ids):
                     "WHERE dedupe=? AND state='queued' AND pid IS NULL AND worker_id IS NULL",
                     (stamp, dedupe),
                 ).rowcount
+                db.execute(
+                    "DELETE FROM claims WHERE resource IN (SELECT 'submission-retry:' || id "
+                    "FROM submissions WHERE dedupe=? AND state='cancelled')", (dedupe,),
+                )
                 continue
             latest = db.execute(
                 "SELECT state FROM submissions WHERE dedupe=? ORDER BY created DESC,id DESC LIMIT 1",
@@ -123,13 +127,15 @@ def status(root):
                 "video_id": row[0][len(PREFIX) :],
                 "state": row[1],
                 "cost": json.loads(row[2] or "{}").get("cost"),
+                **({"retry_at": row[3]} if row[3] and row[1] == "queued" else {}),
             }
             for row in db.execute(
                 "SELECT s.dedupe,s.state,(SELECT a.metrics FROM attempts a WHERE a.job_id=j.id "
-                "AND a.stage='asr' AND a.state='complete' ORDER BY a.started DESC LIMIT 1) "
-                "FROM (SELECT dedupe,state,ROW_NUMBER() OVER (PARTITION BY dedupe ORDER BY created DESC,id DESC) AS ordinal "
+                "AND a.stage='asr' AND a.state='complete' ORDER BY a.started DESC LIMIT 1),c.expires "
+                "FROM (SELECT id,dedupe,state,ROW_NUMBER() OVER (PARTITION BY dedupe ORDER BY created DESC,id DESC) AS ordinal "
                 "FROM submissions WHERE dedupe LIKE ?) s "
-                "LEFT JOIN jobs j ON j.video_id=SUBSTR(s.dedupe,?) AND j.profile=? WHERE s.ordinal=1",
+                "LEFT JOIN jobs j ON j.video_id=SUBSTR(s.dedupe,?) AND j.profile=? "
+                "LEFT JOIN claims c ON c.resource='submission-retry:' || s.id WHERE s.ordinal=1",
                 (PREFIX + "%", len(PREFIX) + 1, PROFILE),
             )
         ]

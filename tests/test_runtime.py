@@ -339,7 +339,7 @@ class Runtime(unittest.TestCase):
             )
 
     def test_durable_terminal_failure_is_distinct_from_uncertain_or_cancelled(self):
-        from tubescribe.agent_gateway import DurableAgentRunner, DurableRunFailed
+        from tubescribe.agent_gateway import DurableAgentRunner, DurableRunFailed, DurableRunPending
 
         for state in ("failed", "uncertain", "cancelled"):
             with self.subTest(state=state):
@@ -354,6 +354,17 @@ class Runtime(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as caught:
                     runner.run({"timeout_seconds": 30}, None)
                 self.assertEqual(isinstance(caught.exception, DurableRunFailed), state == "failed")
+                self.assertNotIsInstance(caught.exception, DurableRunPending)
+
+    def test_durable_authentication_failure_is_not_automatically_retried(self):
+        from tubescribe.agent_gateway import DurableAgentRunner
+
+        transport = Mock(return_value=httpx.Response(401))
+        runner = DurableAgentRunner("http://127.0.0.1:1", store=self.store,
+                                    run_key="runs/authentication", transport=httpx.MockTransport(transport))
+        with self.assertRaises(httpx.HTTPStatusError):
+            runner.run({"timeout_seconds": 30}, None)
+        self.assertEqual(transport.call_count, 1)
 
     def test_durable_status_retries_reconnect_to_same_run_without_new_model_request(self):
         from tubescribe.agent_gateway import DurableAgentRunner
@@ -382,12 +393,12 @@ class Runtime(unittest.TestCase):
         self.assertEqual(calls[0][2], calls[1][2])
 
     def test_durable_unavailable_gateway_has_bounded_transport_attempts(self):
-        from tubescribe.agent_gateway import DurableAgentRunner
+        from tubescribe.agent_gateway import DurableAgentRunner, DurableRunPending
 
         transport = Mock(return_value=httpx.Response(503))
         runner = DurableAgentRunner("http://127.0.0.1:1", store=self.store,
                                     run_key="runs/unavailable", transport=httpx.MockTransport(transport))
-        with patch("tubescribe.agent_gateway.time.sleep"), self.assertRaises(httpx.HTTPStatusError):
+        with patch("tubescribe.agent_gateway.time.sleep"), self.assertRaises(DurableRunPending):
             runner.run({"timeout_seconds": 30}, None)
         self.assertEqual(transport.call_count, 3)
 

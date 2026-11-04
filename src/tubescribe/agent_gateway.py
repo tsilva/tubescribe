@@ -405,6 +405,10 @@ class DurableRunFailed(RuntimeError):
     """A terminal failed run can be retried with a new idempotency key."""
 
 
+class DurableRunPending(RuntimeError):
+    """The saved run may still finish; reconnect to its existing idempotency key."""
+
+
 class DurableAgentRunner:
     def __init__(self, endpoint, *, store, run_key, headers=None, transport=None):
         self.endpoint = endpoint.rstrip("/")
@@ -436,7 +440,8 @@ class DurableAgentRunner:
         url = self.endpoint + "/api/v1/durable/runs/" + identifier
         deadline = time.monotonic() + request["timeout_seconds"] + 60
         with httpx.Client(
-            headers=self.headers, transport=self.transport, timeout=30, trust_env=False
+            headers=self.headers, transport=self.transport,
+            timeout=httpx.Timeout(60, connect=10), trust_env=False
         ) as client:
 
             def fetch(method):
@@ -461,7 +466,9 @@ class DurableAgentRunner:
                         ) and error.response.status_code not in {502, 503, 504}:
                             raise
                         if attempt == 2 or time.monotonic() >= deadline:
-                            raise
+                            raise DurableRunPending(
+                                "Durable agent result unavailable; saved run retained for retry"
+                            ) from error
                         time.sleep(min(2**attempt, max(0, deadline - time.monotonic())))
 
             response = fetch("POST")
@@ -475,8 +482,8 @@ class DurableAgentRunner:
                 if row["state"] in {"uncertain", "cancelled"} or row.get("cancelled"):
                     raise RuntimeError(row.get("error") or "Agent run " + row["state"])
                 if time.monotonic() > deadline:
-                    raise httpx.ReadTimeout(
-                        "Durable run still pending; rerun to retrieve its result"
+                    raise DurableRunPending(
+                        "Durable run still pending; saved run retained for retry"
                     )
                 response = fetch("GET")
 

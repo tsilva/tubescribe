@@ -64,6 +64,9 @@ test("Process queues exactly the clicked library video and shows its queued stat
   assert.equal(f.button(), undefined);
   assert.ok(descendants(f.context.videoRow([video])).some(node => node.text === "Queued"));
   assert.equal(f.controls.get("processing-message").textContent, "1 video queued.");
+  f.context.processingRecords = new Map([[video.video_id, {state: "queued", retry_at: 100}]]);
+  assert.equal(f.button(), undefined);
+  assert.ok(descendants(f.context.videoRow([video])).some(node => node.text === "Retry scheduled"));
 });
 
 test("Process is hidden for unavailable queues, other owners and videos already admitted or transcribed", async () => {

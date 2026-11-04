@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from .agent_gateway import DurableRunPending
 from .database import database_errors, transient_errors
 from .execution import job_stage, pipeline_lock
 from .inference import LocalTools
@@ -628,7 +629,7 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             run_pid=None,
             next_retry=0,
         )
-    except transient_errors():
+    except (DurableRunPending, *transient_errors()):
         from contextlib import suppress
 
         counter = "save_attempts" if stage == "save" else "attempts"
