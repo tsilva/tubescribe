@@ -658,7 +658,7 @@ async function refresh(event) {
         }
         return response.json();
       },
-      onError: failure => console.warn("TubeScribe live update failure", failure),
+      onError: failure => console.warn("TubeScribe live update failure " + JSON.stringify(failure)),
       onFeed: data => {
         if (generation !== identityGeneration) return;
         applyFeed(data);
