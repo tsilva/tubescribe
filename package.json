@@ -6,7 +6,7 @@
   "scripts": {
     "build:reader": "node scripts/build-reader.mjs",
     "check:reader": "node scripts/build-reader.mjs --check",
-    "test:reader": "node --test tests/realtime.test.mjs"
+    "test:reader": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@neon/realtime": "0.1.1"
