@@ -1,16 +1,14 @@
 import {createRealtimeClient} from "@neon/realtime/client";
-import {buildFeed} from "./feed.js";
 
-export function connect({getCapabilities, onFeed, onState, onError = () => {}, createClient = createRealtimeClient,
-  setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now}) {
-  let closed = false, client, timer, config, renewal;
-  let rowUpdate = false;
+export function connect({getCapabilities, getFeed, onFeed, onState, onError = () => {},
+  createClient = createRealtimeClient, setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now}) {
+  let closed = false, client, subscription, timer, config, renewal;
+  let revision = null, loadedRevision, loading = false, generation = 0;
   let phase = "connecting";
-  const subscriptions = new Map(), data = {}, states = {};
   function validate(value) {
     if (!value || typeof value.url !== "string" || !value.queries ||
-        Object.keys(value.queries).sort().join() !== "channels,feed,queue" ||
-        !Object.values(value.queries).every(query => Number.isFinite(query.expiresAt) && query.expiresAt > now())) {
+        Object.keys(value.queries).join() !== "revision" ||
+        !Number.isFinite(value.queries.revision?.expiresAt) || value.queries.revision.expiresAt <= now()) {
       throw Object.assign(new Error("Invalid live query response"), {code: "invalid_live_query_response"});
     }
     return value;
@@ -18,9 +16,9 @@ export function connect({getCapabilities, onFeed, onState, onError = () => {}, c
   const notify = status => {phase = status; onState(status);};
   function close() {
     closed = true;
+    generation++;
     clearTimer(timer);
-    for (const subscription of subscriptions.values()) subscription.unsubscribe();
-    subscriptions.clear();
+    subscription?.unsubscribe();
     client?.close();
   }
   function fail(error, phase) {
@@ -31,7 +29,7 @@ export function connect({getCapabilities, onFeed, onState, onError = () => {}, c
     close();
     notify("error");
   }
-  const expires = () => Math.min(...Object.values(config.queries).map(query => query.expiresAt));
+  const expires = () => config.queries.revision.expiresAt;
   function schedule() {
     clearTimer(timer);
     if (!closed) timer = setTimer(() => renew(), Math.max(0, expires() - now() - 10_000));
@@ -42,29 +40,42 @@ export function connect({getCapabilities, onFeed, onState, onError = () => {}, c
       const next = validate(await getCapabilities());
       if (closed) return;
       if (next.url !== config.url) throw new Error("Realtime endpoint changed");
-      await Promise.all([...subscriptions].map(([kind, subscription]) => subscription.renew(next.queries[kind])));
+      await subscription.renew(next.queries.revision);
       if (!closed) {config = next; schedule();}
     })().catch(error => fail(error, "renewal")).finally(() => {renewal = undefined;});
     return renewal;
   }
-  function receive(kind, snapshot) {
-    if (closed) return;
-    states[kind] = snapshot.status;
-    if (snapshot.status === "error") return fail(snapshot.error, kind);
-    if (snapshot.data !== undefined && snapshot.data !== data[kind]) {
-      data[kind] = snapshot.data;
-      if (!rowUpdate) {
-        rowUpdate = true;
-        queueMicrotask(() => {
-          rowUpdate = false;
-          try {
-            if (!closed && Object.keys(config.queries).every(key => Array.isArray(data[key]))) onFeed(buildFeed(data));
-          } catch (error) {fail(error, "render");}
-        });
+  async function load() {
+    if (loading || closed || revision === undefined) return;
+    loading = true;
+    try {
+      while (!closed && revision !== undefined && revision !== loadedRevision) {
+        const expected = revision, current = generation;
+        const feed = await getFeed();
+        if (closed) return;
+        if (current !== generation) continue;
+        onFeed(feed);
+        loadedRevision = expected;
       }
+    } catch (error) {fail(error, "snapshot");}
+    finally {loading = false;}
+  }
+  function receive(snapshot) {
+    if (closed) return;
+    if (snapshot.status === "error") return fail(snapshot.error, "revision");
+    notify(snapshot.status);
+    if (!Array.isArray(snapshot.data)) return;
+    const next = snapshot.data[0]?.revision;
+    if (next === revision) return;
+    revision = next;
+    generation++;
+    if (next === undefined) {
+      loadedRevision = undefined;
+      onFeed({full: true, revision: "", generated_at: new Date(now()).toISOString(),
+        channels: [], jobs: [], removed: [], summary: {channels: 0, videos: 0}});
+    } else {
+      void load();
     }
-    notify(Object.values(states).includes("stale") ? "stale" :
-      Object.keys(config.queries).every(key => states[key] === "live") ? "live" : "connecting");
   }
   async function start() {
     let phase = "authorization";
@@ -73,15 +84,10 @@ export function connect({getCapabilities, onFeed, onState, onError = () => {}, c
       const received = await getCapabilities();
       if (closed) return;
       config = validate(received);
-      // One WebSocket multiplexes all queries. SDK diagnostics stay out of logs.
       phase = "client";
       client = createClient({url: config.url, logLevel: "silent"});
-      for (const [kind, query] of Object.entries(config.queries)) {
-        phase = "subscribe_" + kind;
-        const subscription = client.subscribe(query);
-        subscriptions.set(kind, subscription);
-        subscription.onChange(snapshot => receive(kind, snapshot));
-      }
+      subscription = client.subscribe(config.queries.revision);
+      subscription.onChange(receive);
       schedule();
     } catch (error) {fail(error, phase);}
   }

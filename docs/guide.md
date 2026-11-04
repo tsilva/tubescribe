@@ -1039,44 +1039,46 @@ session to be available; this is an early warning, not an instantaneous hard cap
 Rounded console values and provider reporting delays can delay a threshold.
 The existing quota-reset/resumption follow-up remains separate.
 
-Realtime's browser-to-Neon subscriptions bypass the Python SQL wrapper, so the
-Python operation counters do not attribute their bytes. The provider quota
-warnings still include this traffic. Compare provider growth under idle and
-active-reader workloads after activation; the initial result and genuine
-reconnections still transfer data.
+Realtime revision notifications bypass the Python SQL wrapper. Channel and
+video updates use the existing versioned feed API, so their database reads
+remain attributed to the Python operation counters. Provider quota warnings
+also cover the small revision stream.
 
 ### Neon Realtime reader
 
 With Realtime configured, the hosted reader uses the official Neon SDK and one
-WebSocket with fixed live queries for feed metadata, channels, and safe queued-work
-options. On entry, it loads one authenticated HTTP snapshot before starting the
-subscription, so saved channels and videos remain visible if the stream fails
-before its first result. The stream then delivers committed row changes. It does
-not periodically request `/api/feed`, resubscribe on visibility changes, or fall
-back to HTTP polling on errors. A failed stream preserves its last snapshot and
-offers manual reconnection. Explicit **Refresh** also reloads the HTTP snapshot
-when the stream is unavailable. Summaries and documents remain on-demand reads;
-ordinary feed updates do not reread them. Local SQLite readers retain their
-existing on-demand HTTP path. Worker scheduling already uses PostgreSQL LISTEN
-and is separate from this browser feature.
+WebSocket subscription to the archive's transactional catalogue revision. A
+committed change triggers a versioned `/api/feed` request that reuses the existing
+metadata, scheduling and delta logic. Repeated notifications for the same
+revision do not reread the catalogue. Changes that arrive during a request are
+coalesced, and an obsolete response is discarded before it reaches the page.
+Catalogue data is fetched on entry, a committed change, or an explicit refresh.
 
-The Node `/api/live` endpoint uses the official server SDK to seal only source-owned,
-parameterized queries. It reuses Python's Clerk session verifier through
-`/api/realtime-authorization`, which performs no database lookup. Every live query
-joins the owning `reader_library` row and checks its Clerk user ID and issuer in
-SQL, so another account sees no rows and changing ownership removes rows from
-the live result. The live queries project primitive fields; the reader constructs
-row keys, scheduling arrays and safe queue options. SQL JSON-formatting functions
-are excluded because the Realtime planner can reject their scalar dependencies.
-The normal sign-in flow still claims the preassigned library through the existing verified
-email check. Shared capability renewal runs before the 60-second expiry; it
-reauthorizes the session and renews the existing subscriptions without polling
-table contents or replacing unchanged rows. Any renewal failure stops the stream
-until manual retry. Sign-out/account changes cancel subscriptions, renewal timers
-and pending private-data callbacks. Capabilities remain in memory, never URLs,
-browser storage or logs. Failure diagnostics log only the connection phase, a
-validated error code and an optional SQLSTATE. Provider messages and query
-capabilities are excluded.
+On entry, the reader loads an authenticated snapshot before starting the
+subscription. A failed stream preserves that snapshot and offers manual
+reconnection. Explicit **Refresh** also reloads the snapshot when the stream is
+unavailable. Summaries and documents remain on-demand reads; ordinary feed
+updates do not reread them. Local SQLite readers retain their existing
+on-demand HTTP path. Worker scheduling uses PostgreSQL LISTEN separately.
+
+The Node `/api/live` endpoint seals only the source-owned revision query. It reuses
+Python's Clerk session verifier through `/api/realtime-authorization`, which
+performs no database lookup. The revision query joins the owning
+`reader_library` row and checks its Clerk user ID and issuer. Another account
+receives no revision rows. Ownership revocation clears the browser's library
+and invalidates any in-flight snapshot, while the feed API independently
+verifies ownership on every data request. The normal sign-in flow claims the
+preassigned library through the existing verified email check.
+
+The subscription projects only the revision marker. SQL formatting and complex
+metadata joins stay in the existing feed API because the Realtime planner can
+reject their scalar dependencies. Capability renewal runs before the 60-second
+expiry and renews the existing subscription without reading table contents.
+Renewal failure stops the stream until manual retry. Sign-out/account changes
+cancel the subscription, renewal timer and pending private-data callbacks.
+Capabilities remain in memory, never URLs, browser storage or logs. Failure
+diagnostics include only the connection phase, a validated error code and an
+optional SQLSTATE.
 
 Activation requires enabling Realtime on TubeScribe's existing `main` branch
 (`twilight-dream-42009655` / `br-orange-shape-b90ef63q`), allowing the production

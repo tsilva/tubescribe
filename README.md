@@ -59,7 +59,7 @@ For development, run `scripts/verify` for lint and local tests. The [container r
 
 For Neon, [transfer monitoring](docs/guide.md#neon-transfer-monitoring) records result bytes by operation and checks provider usage against 3 GB and 4 GB warning thresholds.
 
-The hosted reader supports [Neon Realtime](docs/guide.md#neon-realtime-reader): once configured, new videos and status changes arrive live without catalogue polling. The channel list and videos update as discovery commits new entries. An initial snapshot keeps saved channels and videos visible when the live connection is unavailable.
+Once configured, the hosted reader receives catalogue change notifications through [Neon Realtime](docs/guide.md#neon-realtime-reader). It loads new videos and status changes automatically through the versioned feed API. An initial snapshot keeps saved channels and videos visible when the live connection is unavailable.
 
 ## License
 

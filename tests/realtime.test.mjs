@@ -5,7 +5,6 @@ import test from "node:test";
 import {runInNewContext} from "node:vm";
 import {makeHandler, realtimeURL} from "../api/realtime.js";
 import {connect} from "../src/reader/realtime.js";
-import {buildFeed, stage} from "../src/reader/feed.js";
 import {queries} from "../src/reader/queries.js";
 
 const key = randomBytes(32);
@@ -71,64 +70,111 @@ test("issuer fails closed for unauthenticated, arbitrary-query and unavailable r
   }
 });
 
-function fixture() {
-  let count = 0, callback, tick, timerCleared = 0, clientClosed = 0, now = 1_000_000;
-  const subscriptions = new Map(), feeds = [], states = [];
-  const capabilities = {url: env.NEON_REALTIME_URL, queries: Object.fromEntries(
-    ["channels", "feed", "queue"].map(kind => [kind, {capability: kind, expiresAt: now + 60_000, queryFingerprint: kind}]))};
-  const client = {subscribe(query) {
-    const subscription = {onChange(fn) {callback = fn; this.receive = fn;},
-      renew: async next => {assert.equal(next.queryFingerprint, query.queryFingerprint); subscription.renewed = true;},
-      unsubscribe() {subscription.closed = true;}};
-    subscriptions.set(query.capability, subscription);
-    return subscription;
-  }, close() {clientClosed++;}};
-  const stream = connect({getCapabilities: async () => {count++; return structuredClone(capabilities);},
+function fixture(loadFeed = async count => ({revision: "feed-" + count, jobs: [{key: "saved"}]})) {
+  let count = 0, feedReads = 0, tick, clientClosed = 0, now = 1_000_000;
+  const feeds = [], states = [];
+  const capabilities = {url: env.NEON_REALTIME_URL,
+    queries: {revision: {capability: "revision", expiresAt: now + 60_000, queryFingerprint: "revision"}}};
+  const subscription = {
+    onChange(callback) {this.receive = callback;},
+    renew: async query => {assert.equal(query.queryFingerprint, "revision"); subscription.renewed = true;},
+    unsubscribe() {subscription.closed = true;},
+  };
+  const client = {subscribe: () => subscription, close() {clientClosed++;}};
+  const stream = connect({
+    getCapabilities: async () => {count++; return structuredClone(capabilities);},
+    getFeed: async () => loadFeed(++feedReads),
     onFeed: feed => feeds.push(feed), onState: state => states.push(state), createClient: () => client,
-    now: () => now, setTimer: fn => {tick = fn; return 1;}, clearTimer: () => {timerCleared++;}});
-  return {stream, subscriptions, feeds, states, capabilities,
-    count: () => count, closed: () => clientClosed, cleared: () => timerCleared,
-    tick: () => tick(), advance: ms => {now += ms;}};
+    now: () => now, setTimer: callback => {tick = callback; return 1;}, clearTimer() {},
+  });
+  return {stream, subscription, feeds, states, capabilities,
+    count: () => count, feedReads: () => feedReads, closed: () => clientClosed,
+    tick: () => tick(), advance: milliseconds => {now += milliseconds;}};
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-test("one socket applies row changes without polling; capability renewal preserves rows", async () => {
-  const fixture = fixtureStream();
-  await fixture.stream.start();
-  assert.equal(fixture.count(), 1);
-  for (const [kind, subscription] of fixture.subscriptions) subscription.receive({status: "live", data: []});
+test("revision notifications load changed data once and renew without reading the catalogue", async () => {
+  const f = fixture();
+  await f.stream.start();
+  assert.equal(f.count(), 1);
+  assert.equal(f.feedReads(), 0);
+  f.subscription.receive({status: "live", data: [{revision: "first"}]});
   await settle();
-  assert.equal(fixture.feeds.length, 1);
-  assert.equal(fixture.stream.status, "live");
-  fixture.advance(51_000);
-  await fixture.stream.wake();
-  assert.equal(fixture.count(), 2);
-  assert.equal(fixture.feeds.length, 1);
-  assert.ok([...fixture.subscriptions.values()].every(s => s.renewed));
-  fixture.stream.close();
-  assert.ok([...fixture.subscriptions.values()].every(s => s.closed));
-  assert.equal(fixture.closed(), 1);
+  assert.equal(f.feedReads(), 1);
+  f.subscription.receive({status: "live", data: [{revision: "first"}]});
+  await settle();
+  assert.equal(f.feedReads(), 1);
+  f.subscription.receive({status: "live", data: [{revision: "second"}]});
+  await settle();
+  assert.equal(f.feedReads(), 2);
+  assert.equal(f.feeds.length, 2);
+  assert.equal(f.stream.status, "live");
+  f.advance(51_000);
+  await f.stream.wake();
+  assert.equal(f.count(), 2);
+  assert.equal(f.feedReads(), 2);
+  assert.ok(f.subscription.renewed);
+  f.stream.close();
+  assert.ok(f.subscription.closed);
+  assert.equal(f.closed(), 1);
 });
-// Keep the helper separate from test-local variable names.
-const fixtureStream = fixture;
 
-test("closing during authorization ignores late private data; terminal errors never poll", async () => {
+test("closing during authorization ignores private data and terminal errors never poll", async () => {
   let finish;
   const updates = [];
   const stream = connect({getCapabilities: () => new Promise(resolve => {finish = resolve;}),
-    onFeed: data => updates.push(data), onState() {}, createClient() {throw new Error("closed session opened socket");}});
+    getFeed() {throw new Error("closed session read data");},
+    onFeed: data => updates.push(data), onState() {},
+    createClient() {throw new Error("closed session opened socket");}});
   const starting = stream.start();
   stream.close();
   finish({url: env.NEON_REALTIME_URL, queries: {}});
   await starting;
   assert.deepEqual(updates, []);
-  const fixture = fixtureStream();
-  await fixture.stream.start();
-  fixture.subscriptions.get("feed").receive({status: "error"});
-  await fixture.stream.wake();
-  assert.equal(fixture.stream.status, "error");
-  assert.equal(fixture.count(), 1);
-  assert.equal(fixture.closed(), 1);
+  const f = fixture();
+  await f.stream.start();
+  f.subscription.receive({status: "error"});
+  await f.stream.wake();
+  assert.equal(f.stream.status, "error");
+  assert.equal(f.count(), 1);
+  assert.equal(f.feedReads(), 0);
+  assert.equal(f.closed(), 1);
+});
+
+test("ownership revocation clears the library and rejects an in-flight snapshot", async () => {
+  let finish;
+  const f = fixture(() => new Promise(resolve => {finish = resolve;}));
+  await f.stream.start();
+  f.subscription.receive({status: "live", data: [{revision: "first"}]});
+  f.subscription.receive({status: "live", data: []});
+  assert.equal(f.feeds.length, 1);
+  assert.deepEqual(f.feeds[0].jobs, []);
+  finish({revision: "old", jobs: [{key: "private"}]});
+  await settle();
+  assert.equal(f.feeds.length, 1);
+  f.stream.close();
+  const empty = fixture();
+  await empty.stream.start();
+  empty.subscription.receive({status: "live", data: []});
+  assert.equal(empty.feeds.length, 1);
+  assert.equal(empty.feedReads(), 0);
+  empty.stream.close();
+});
+
+test("changes during a snapshot are coalesced and stale snapshots are discarded", async () => {
+  let finish;
+  const f = fixture(count => count === 1 ? new Promise(resolve => {finish = resolve;}) :
+    {revision: "latest", jobs: [{key: "current"}]});
+  await f.stream.start();
+  f.subscription.receive({status: "live", data: [{revision: "first"}]});
+  f.subscription.receive({status: "live", data: [{revision: "second"}]});
+  f.subscription.receive({status: "live", data: [{revision: "third"}]});
+  finish({revision: "old", jobs: [{key: "stale"}]});
+  await settle();
+  assert.equal(f.feedReads(), 2);
+  assert.equal(f.feeds.length, 1);
+  assert.equal(f.feeds[0].revision, "latest");
+  f.stream.close();
 });
 
 test("live failure diagnostics exclude provider messages and credentials", async () => {
@@ -192,41 +238,4 @@ test("the reader loads its channel snapshot before a failed live connection and 
   await context.refresh();
   assert.equal(context.archive, null);
   assert.equal(context.liveFeed, null);
-});
-
-test("feed keeps source URLs, status and queued budget rules without prompt fields", () => {
-  const job = {key: "1", video_id: "video", channel_id: "c", job_id: "1", profile: "turbo-v1",
-    state: "complete", diarization_state: "complete", postprocessing_state: "complete", summary_state: "pending",
-    scheduling: [["complete"],["complete"],["complete"],["pending","save",0,0,9,0]],
-    transcript_ready: true, processed_ready: true, summary_ready: false, figures: 1, cover_revision: "hash"};
-  const feed = buildFeed({feed: [job], channels: [{id: "c", title: "Channel"}], queue: [{options: {}}]}, 1);
-  assert.equal(feed.jobs[0].stage, "awaiting_summary");
-  assert.equal(feed.jobs[0].scheduled, true);
-  assert.equal(feed.jobs[0].transcript_url, "/videos/video/transcripts/turbo-v1/");
-  assert.match(feed.jobs[0].cover_url, /cover.png\?v=hash$/);
-  assert.equal(feed.jobs[0].scheduling, undefined);
-  assert.equal(feed.channels[0].videos, 1);
-  assert.equal(stage({...job, summary_state: "failed"}), "failed");
-  const exhausted = structuredClone(job); exhausted.scheduling[3][5] = 3;
-  assert.equal(buildFeed({feed: [exhausted], channels: [], queue: [{options: {}}]}, 1).jobs[0].scheduled, false);
-});
-
-test("scalar live rows retain legacy scheduling and exclude internal counters", () => {
-  const job = {video_id: "video", channel_id: "c", job_id: "1", profile: "turbo-v1", state: "pending"};
-  const channels = [{id: "c", title: "Channel"}];
-  const legacy = buildFeed({
-    channels, feed: [{...job, key: "1", scheduling: [["pending", null, 0, 0, 0, 0]]}],
-    queue: [{options: {}}],
-  }, 1);
-  const scalar = buildFeed({
-    channels, feed: [{...job, asr_retry: 0, asr_downloads: 0, asr_attempts: 0}],
-    queue: [{id: "submission", profile: null}],
-  }, 1);
-  assert.deepEqual(scalar, legacy);
-  assert.equal(scalar.jobs[0].scheduled, true);
-  assert.equal(scalar.jobs[0].asr_attempts, undefined);
-  assert.equal(scalar.jobs[0].scheduling, undefined);
-  assert.equal(buildFeed({
-    channels, feed: [{video_id: "new-video", channel_id: "c", job_id: null}], queue: [],
-  }, 1).jobs[0].key, "video:new-video");
 });
