@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 
 from .inference import AgentRunner, LocalTools
 from .storage import atomic_write
+from .subtitles import COARSE_TIMING_NOTE
 
 TOOL = {
     "type": "function",
@@ -270,6 +271,7 @@ def load_source(path, title=None, source_url=None, speaker_labels=()):
         "original_srt": original,
         "srt_path": srt_path,
         "annotations": annotation_texts(original),
+        "timing_note": COARSE_TIMING_NOTE if metadata.get("timing_resolution") == "audio_part" else "",
     }
 
 
@@ -1471,6 +1473,7 @@ def process(
         f"Existing named source labels: {json.dumps(source['provided_speaker_labels'])}.\n"
         f"Budgets: {json.dumps(budgets)}. Zero figures is valid when no useful visual exists.\n"
         f"Annotations to preserve verbatim: {json.dumps(source['annotations'])}.\n"
+        + (source["timing_note"] + " Do not infer finer speech timestamps.\n" if source["timing_note"] else "")
         + transcript_input(srt, args.defer_transcript, compact),
         "tools": ([copy.deepcopy(TOOL), copy.deepcopy(SEARCH_TOOL)] if screenshots else [])
         + ([TRANSCRIPT_TOOL] if args.defer_transcript or screenshots is None else []),
@@ -1557,6 +1560,8 @@ def finish_run(
         annotation_labels,
     )
     checks.update(audit_transcript_fidelity(srt, markdown))
+    if source.get("timing_note"):
+        markdown = "> " + source["timing_note"] + "\n\n" + markdown
     if (
         checkpoint_hash != hashlib.sha256(args.transcript.read_bytes()).hexdigest()
         or srt_hash != hashlib.sha256(source["srt_path"].read_bytes()).hexdigest()
