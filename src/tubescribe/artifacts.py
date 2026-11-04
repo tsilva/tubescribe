@@ -562,6 +562,10 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             error=None,
         )
         text, count, used = validate(result, markdown, resources, definition)
+        from .subtitles import COARSE_TIMING_NOTE
+
+        if markdown.startswith("> " + COARSE_TIMING_NOTE):
+            text = "> " + COARSE_TIMING_NOTE + "\n\n" + text
         references = {
             "title": source["title"],
             "transcript": {"job_id": job_id, "key": source["output_dir"] + "/processed.md"},

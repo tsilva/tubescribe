@@ -1,6 +1,8 @@
+import base64
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import wave
@@ -14,7 +16,7 @@ import httpx
 from tubescribe.cli import main
 from tubescribe.feed_watch import poll_feeds
 from tubescribe.manual_queue import PROFILE, change, status
-from tubescribe.openrouter import MODEL, PLACEHOLDER, cached_response, cues, proxy_request
+from tubescribe.openrouter import MODEL, PLACEHOLDER, cached_response, call, cues, proxy_request
 from tubescribe.postprocessing_worker import initialize
 from tubescribe.rollups import video_work_pending
 from tubescribe.storage import Store
@@ -67,7 +69,10 @@ class ManualProcessing(unittest.TestCase):
     def test_failed_postprocessing_resumes_unlabeled_transcript_without_repeating_asr(self):
         self.run_selected_video(fail_first=True)
 
-    def run_selected_video(self, fail_first=False):
+    def test_text_only_response_is_saved_and_resumed_without_repeating_paid_asr(self):
+        self.run_selected_video(fail_first=True, text_only=True)
+
+    def run_selected_video(self, fail_first=False, text_only=False):
         self.discover()
         legacy = Dispatcher(self.store).submit(JobRequest("work", {"video": [OTHER]}))
         self.assertFalse(video_work_pending(self.store))
@@ -105,6 +110,8 @@ class ManualProcessing(unittest.TestCase):
                 "words": [{"word": "hello", "start": 0.1, "end": 0.6}],
             },
         }
+        if text_only:
+            reply["response"].pop("words")
 
         def finish(store, job, **_options):
             nonlocal fail_first
@@ -162,7 +169,15 @@ class ManualProcessing(unittest.TestCase):
         self.assertIsNone(job["diarization_state"])
         result = json.loads(self.store.read_key(self.store.transcript(job["id"])["json_path"]))
         self.assertIsNone(result["segments"][0]["speaker_id"])
-        self.assertEqual(result["segments"][0]["start"], 0.1)
+        self.assertEqual(result["segments"][0]["start"], 0 if text_only else 0.1)
+        self.assertEqual(result["timing_resolution"], "audio_part" if text_only else "word")
+        if text_only:
+            self.assertEqual(result["segments"][0]["end"], result["duration"])
+            self.assertEqual(result["segments"][0]["words"], [])
+            markdown = self.store.read_key(
+                str(Path(self.store.transcript(job["id"])["json_path"]).with_suffix(".md"))
+            ).decode()
+            self.assertIn("provider omitted word timestamps", markdown)
 
     def test_paid_checkpoint_reuses_response_and_blocks_ambiguous_replay(self):
         with patch(
@@ -226,3 +241,43 @@ class ManualProcessing(unittest.TestCase):
         [second] = cues(response, 10, 10, first_speaker=2)
         self.assertNotEqual(first["speaker_id"], second["speaker_id"])
         self.assertEqual(second["start"], 11)
+
+    def test_missing_word_timing_uses_only_audio_bounds_and_rejects_malformed_words(self):
+        [cue] = cues({"text": "actual provider text"}, 480, 90)
+        self.assertEqual((cue["start"], cue["end"]), (480, 570))
+        self.assertEqual(cue["words"], [])
+        self.assertIsNone(cue["speaker_id"])
+        self.assertEqual(cue["timing_resolution"], "audio_part")
+        for response in ({"text": ""}, {"text": "text", "words": "broken"},
+                         {"text": "text", "words": [{"word": "text", "start": -1, "end": 1}]}):
+            with self.assertRaises(ValueError):
+                cues(response, 0, 90)
+
+    def test_upload_compression_preserves_decoded_pcm(self):
+        from types import SimpleNamespace
+
+        buffer = io.BytesIO()
+        pcm = b"\x01\x00\xff\xff" * 16000
+        with wave.open(buffer, "wb") as wav:
+            wav.setparams((1, 2, 16000, 32000, "NONE", ""))
+            wav.writeframes(pcm)
+        original_run = subprocess.run
+        sent = {}
+
+        def execute(command, **options):
+            if command == ["/fixture"]:
+                sent.update(json.loads(options["input"]))
+                return SimpleNamespace(returncode=0, stdout=b'{"status":200,"response":{}}')
+            return original_run(command, **options)
+
+        with patch("tubescribe.openrouter.subprocess.run", side_effect=execute):
+            self.assertEqual(call(Path("/fixture"), buffer.getvalue())["status"], 200)
+        self.assertEqual(sent["input_audio"]["format"], "flac")
+        self.assertEqual(sent["timestamp_granularities"], ["word"])
+        compressed = base64.b64decode(sent["input_audio"]["data"])
+        self.assertLess(len(compressed), len(buffer.getvalue()))
+        decoded = original_run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-i", "pipe:0", "-f", "s16le", "pipe:1"],
+            input=compressed, capture_output=True, check=True,
+        ).stdout
+        self.assertEqual(decoded, pcm)

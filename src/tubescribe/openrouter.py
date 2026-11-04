@@ -50,15 +50,18 @@ def proxy_request(payload):
         raise ValueError("The reviewed loopback proxy and process-local CA are required")
     request = json.loads(payload)
     audio = base64.b64decode(request["input_audio"]["data"], validate=True)
+    audio_format = request["input_audio"]["format"]
+    if audio_format not in {"wav", "flac"}:
+        raise ValueError("Use WAV or lossless FLAC for transcription uploads")
     with httpx.Client(
         proxy=proxy,
         verify=ssl.create_default_context(cafile=ca),
         trust_env=False,
-        timeout=httpx.Timeout(75, connect=10),
+        timeout=httpx.Timeout(120, connect=10),
     ) as client:
         response = client.post(
             "https://openrouter.ai/api/v1/audio/transcriptions",
-            files={"file": ("speech.wav", audio, "audio/wav")},
+            files={"file": ("speech." + audio_format, audio, "audio/" + audio_format)},
             data={
                 "model": request["model"],
                 "response_format": request["response_format"],
@@ -76,10 +79,19 @@ def proxy_request(payload):
 
 
 def call(path, audio):
+    # Receipt identity remains the original PCM WAV, independent of upload encoding.
+    with TemporaryDirectory(prefix="tubescribe-flac-") as directory:
+        output = Path(directory) / "speech.flac"
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-i", "pipe:0", "-map", "0:a:0",
+             "-c:a", "flac", str(output)],
+            input=audio, capture_output=True, check=True, timeout=60,
+        )
+        compressed = output.read_bytes()
     payload = json.dumps(
         {
             "model": MODEL,
-            "input_audio": {"data": base64.b64encode(audio).decode("ascii"), "format": "wav"},
+            "input_audio": {"data": base64.b64encode(compressed).decode("ascii"), "format": "flac"},
             "response_format": "verbose_json",
             "timestamp_granularities": ["word"],
         }
@@ -132,6 +144,10 @@ def cached_response(store, key, path, audio):
 
 def cues(response, offset, duration, first_speaker=1):
     words = response.get("words")
+    if words is None and isinstance(response.get("text"), str) and response["text"].strip():
+        # Only known audio bounds are available. Never manufacture word timing or voices.
+        return [{"start": offset, "end": offset + duration, "text": response["text"].strip(),
+                 "speaker_id": None, "words": [], "timing_resolution": "audio_part"}]
     if words == [] and response.get("text") == "":
         return []
     if not isinstance(words, list) or not words:
@@ -279,6 +295,9 @@ class OpenRouter:
                 "started_at": started_at,
                 "finished_at": now(),
                 "generation_ids": generations,
+                "timing_resolution": "audio_part" if any(
+                    segment.get("timing_resolution") == "audio_part" for segment in segments
+                ) else "word",
                 "cost": sum(costs) if costs and all(cost is not None for cost in costs) else None,
                 "speaker_name_provenance": "Provider speaker labels are anonymous and scoped to each audio part",
             }

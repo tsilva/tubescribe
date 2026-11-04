@@ -2,6 +2,11 @@
 
 import math
 
+COARSE_TIMING_NOTE = (
+    "Timing note: The provider omitted word timestamps for some audio. "
+    "Time links for that audio mark whole audio parts, not individual speech."
+)
+
 
 def render_markdown(segments: list[dict]) -> bytes:
     """Merge consecutive cues from the same voice without inventing speaker names."""
@@ -26,7 +31,10 @@ def render_markdown(segments: list[dict]) -> bytes:
             label = label.replace(char, "\\" + char)
         return label
 
-    return ("\n\n".join(f"**{escape(t['label'])}:** {t['text']}" for t in turns) + "\n").encode(
+    note = "> " + COARSE_TIMING_NOTE + "\n\n" if any(
+        s.get("timing_resolution") == "audio_part" for s in segments
+    ) else ""
+    return (note + "\n\n".join(f"**{escape(t['label'])}:** {t['text']}" for t in turns) + "\n").encode(
         "utf-8"
     )
 
