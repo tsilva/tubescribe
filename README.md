@@ -12,7 +12,7 @@ TubeScribe is for people who follow YouTube channels and want to revisit their i
 
 ## Try it
 
-1. Open [tubescribe.tsilva.eu](https://tubescribe.tsilva.eu/) and sign in if prompted. Browse all channels, select a channel, or search by channel name or video title.
+1. Open [tubescribe.tsilva.eu](https://tubescribe.tsilva.eu/) and sign in if prompted. Choose a channel in the desktop sidebar, or use the channel dropdown on smaller screens. Search by channel name or video title.
 2. The newest video is selected automatically. Select any video to open its saved summary in the reading pane; switch to **Transcript** for the full text or **SRT timestamps** to follow the source video.
 3. Choose **7-day summary** for a recent overview, or use **Open full page** and **Copy link** to keep a particular document.
 

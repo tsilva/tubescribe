@@ -21,3 +21,4 @@ models/
 *.opus
 /INBOX.md
 /.local/repo-inbox/
+/.internal/

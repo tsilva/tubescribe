@@ -19,23 +19,31 @@
   <a class="skip-link" href="#feed">Skip to videos</a>
   <header class="app-bar">
     <a class="brand" href="/" aria-label="TubeScribe library"><img class="brand-mark" src="/brand/android-chrome-192.png" width="44" height="44" alt=""><span>TubeScribe</span></a>
-    <div id="library-status" class="live" hidden><span id="worker-status">Connecting…</span><span id="updated"></span><button id="refresh" class="icon-button" aria-label="Refresh library" title="Refresh library"><img src="/icons/arrow-path.svg" alt=""></button></div>
+    <div id="library-status" class="live" hidden><span id="worker-status" class="visually-hidden" role="status">Connecting…</span><span id="updated"></span><button id="refresh" class="icon-button" aria-label="Refresh library" title="Refresh library"><img src="/icons/arrow-path.svg" alt=""></button></div>
     <div id="user-button" aria-label="Your account"></div>
   </header>
   <section id="auth-panel" class="auth-panel" aria-label="Sign in"><p id="auth-message" role="status">Connecting securely…</p><div id="sign-in"></div></section>
   <main class="workspace" hidden>
+    <nav id="channel-sidebar" class="channel-sidebar" aria-label="Library channels">
+      <p class="sidebar-heading">Library</p>
+      <div id="library-navigation"></div>
+      <p class="sidebar-heading channel-heading">Channels</p>
+      <div id="channel-navigation"></div>
+    </nav>
     <div class="library-column">
-      <header class="page-heading"><h1>Your library</h1><p id="archive-summary">Connecting to your library…</p></header>
+      <header class="page-heading">
+        <div><h1>Your library</h1><p id="archive-summary">Connecting to your library…</p></div>
+        <button id="discovered-view" class="button" aria-pressed="false" hidden>Discovered</button>
+      </header>
       <div id="error" class="error hidden" role="alert"></div>
-      <button id="discovered-view" class="button" aria-pressed="false" hidden>Discovered</button>
       <div id="processing-controls" hidden>
         <button id="queue-selected" class="button" disabled>Queue selected</button>
         <span id="processing-estimate"></span>
       </div>
       <p id="processing-message" role="status"></p>
-      <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search channels, video titles, or IDs…"></div><select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select><button id="rolling-summary" class="button" aria-pressed="false">7-day summary</button><span id="result-count" class="visually-hidden" role="status"></span></div>
+      <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search your library…"></div><select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select><button id="rolling-summary" class="button" aria-pressed="false">7-day summary</button></div>
+      <div class="feed-heading"><span>Latest videos</span><span id="result-count" role="status"></span></div>
       <div id="feed" class="video-feed" tabindex="-1" aria-label="Video feed"><p class="empty">Loading your videos…</p></div>
-      <footer><a href="/library/">Browse saved content</a> · <a href="/llms.txt">Agent reading guide</a> · Transcripts, context, and the ideas worth keeping.<span id="feed-help">Refresh to check for new videos</span></footer>
     </div>
     <aside id="reader" class="reader" aria-labelledby="reader-title">
       <div class="reader-empty"><p class="eyebrow">YOUR READING SPACE</p><h2 id="reader-title">Find your next idea.</h2><p>Select a video to read its summary or transcript.</p></div>

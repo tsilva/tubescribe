@@ -428,6 +428,7 @@ function setReaderOpen(open) {
   const modal = open && narrowReader.matches;
   document.body.classList.toggle("reading-modal", modal);
   document.querySelector(".library-column").inert = modal;
+  $("channel-sidebar").inert = modal;
   document.querySelector(".app-bar").inert = modal;
   if (modal) {
     pane.setAttribute("role", "dialog");
@@ -477,7 +478,7 @@ async function renderReader(jobs, job) {
   close.append(icon("x-mark"));
   close.addEventListener("click", backToLibrary);
   closeBar.append(node("span", "Your library"), close);
-  const parts = [closeBar];
+  const parts = [];
   const title = node("h2", job.title || job.video_id);
   title.id = "reader-title";
   const statusRow = node("div", undefined, "reader-status-row");
@@ -489,6 +490,7 @@ async function renderReader(jobs, job) {
   youtube.append(play);
   statusRow.append(statusBadge(job));
   parts.push(title, node("p", [job.channel_title, date(job.published_at, true), duration(job.duration)].filter(Boolean).join(" · "), "reader-meta"), statusRow);
+  const readerToolbar = node("div", undefined, "reader-toolbar");
   if (jobs.length > 1) {
     const label = node("label", "Transcript version", "profile-picker");
     const select = node("select");
@@ -509,7 +511,7 @@ async function renderReader(jobs, job) {
   };
   const actions = node("div", undefined, "reader-actions");
   actions.append(youtube);
-  statusRow.append(actions);
+  readerToolbar.append(actions);
   const shareStatus = node("div", undefined, "reader-share-status");
   shareStatus.setAttribute("role", "status");
   if (activeTab) {
@@ -587,9 +589,13 @@ async function renderReader(jobs, job) {
       chooseTab(index);
     }
   });
-  if (tabs.length) parts.push(tabList);
+  if (tabs.length) readerToolbar.prepend(tabList);
+  else statusRow.append(actions);
+  if (tabs.length) parts.push(readerToolbar);
   parts.push(body);
-  pane.replaceChildren(...parts);
+  const documentView = node("div", undefined, "reader-document");
+  documentView.append(...parts);
+  pane.replaceChildren(closeBar, documentView);
   pane.scrollTop = 0;
   if (!sourceUrl) {
     content.append(node("h3", "The transcript is not ready yet."), node("p", job.stage === "failed" ? "The transcript is currently unavailable." : "This video is in your library. Refresh after processing finishes to read its transcript."));
@@ -770,10 +776,32 @@ function syncScopes() {
   picker.replaceChildren(new Option("All channels", ""), ...archive.channels.map((c) => new Option(c.title, c.id)));
   if (!archive.channels.some((c) => c.id === libraryScope)) libraryScope = "";
   picker.value = libraryScope;
+  const makeChannel = (id, title) => {
+    const button = node("button", undefined, "channel-link");
+    button.type = "button";
+    button.dataset.channel = id;
+    button.title = title;
+    const mark = node("span", undefined, "channel-mark");
+    mark.setAttribute("aria-hidden", "true");
+    if (id) mark.textContent = title.trim().slice(0, 1).toUpperCase();
+    else mark.append(icon("document-text"));
+    button.append(mark, node("span", title, "channel-name"));
+    button.addEventListener("click", () => chooseScope(id));
+    return button;
+  };
+  $("library-navigation").replaceChildren(makeChannel("", "All videos"));
+  $("channel-navigation").replaceChildren(...archive.channels.map(c => makeChannel(c.id, c.title)));
+  syncChannelSelection();
+}
+function syncChannelSelection() {
+  for (const button of $("channel-sidebar").querySelectorAll("[data-channel]")) {
+    button.setAttribute("aria-current", button.dataset.channel === libraryScope ? "page" : "false");
+  }
 }
 function chooseScope(channel = "", overview = false) {
   libraryScope = channel;
   $("channel-scope").value = channel;
+  syncChannelSelection();
   feedLimit = 50;
   readerLevel = overview ? "digest" : "video";
   readerSignature = "";
@@ -843,6 +871,7 @@ async function renderDigest() {
   const body = node("div", undefined, "reader-body");
   const pane = $("reader");
   pane.replaceChildren(closeBar, digestBreadcrumbs(libraryScope), node("p", "ROLLING OVERVIEW", "eyebrow"), title, meta, note, body);
+  pane.scrollTop = 0;
   const browse = node("div", undefined, "digest-browse");
   if (!libraryScope) {
     browse.append(node("h3", "Explore channels"));
@@ -965,6 +994,8 @@ function clearPrivateLibrary() {
   feedLimit = 50; feedSearch = "";
   $("video-search").value = "";
   $("channel-scope").replaceChildren(new Option("All channels", ""));
+  $("library-navigation").replaceChildren();
+  $("channel-navigation").replaceChildren();
   delete $("channel-scope").dataset.signature;
   $("archive-summary").textContent = "Your private library";
   $("updated").textContent = "";
@@ -1042,7 +1073,6 @@ async function initializeAuthentication() {
     authEnabled = settings.enabled;
     processingSettings = settings.processing || null;
     realtimeSettings = settings.realtime || {enabled: false};
-    $("feed-help").textContent = realtimeSettings.enabled ? "New videos appear automatically" : "Refresh to check for new videos";
     if (!authEnabled) {
       signedInUser = "local";
       $("auth-panel").hidden = true;
