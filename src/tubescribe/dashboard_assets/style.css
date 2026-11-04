@@ -49,5 +49,6 @@ dialog{border:1px solid var(--border);box-shadow:0 20px 80px #13241c33;border-ra
 #discovered-view,#processing-controls{margin:0 24px 12px}
 #processing-estimate,#processing-message{font-size:13px;color:var(--muted)}
 #processing-estimate{margin-inline-start:8px}
-#processing-message:not(:empty){margin-top:8px}
+#processing-message:empty{display:none}
+#processing-message:not(:empty){margin:8px 24px 12px}
 .video-bottom label{cursor:pointer}

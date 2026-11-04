@@ -125,7 +125,8 @@ function processingRecord(jobs) {
 }
 function canQueue(jobs) {
   const state = processingRecord(jobs)?.state;
-  return Boolean(processingRecords) && (!state || state === "cancelled") && !jobs.some(job => job.transcript_url);
+  return ownsLibrary && Boolean(processingSettings && processingRecords) &&
+    (!state || state === "cancelled") && !jobs.some(job => job.transcript_url || job.scheduled);
 }
 function updateProcessingEstimate() {
   const selected = [...selectedForProcessing];
@@ -139,7 +140,7 @@ function updateProcessingEstimate() {
   $("queue-selected").disabled = processingBusy || !selected.length;
 }
 async function refreshProcessing() {
-  if (!discoveredView || !ownsLibrary) return;
+  if (!ownsLibrary || !processingSettings || !signedInUser) return;
   const revision = ++processingRevision;
   try {
     const response = await libraryFetch("/api/processing");
@@ -158,10 +159,12 @@ async function refreshProcessing() {
   }
 }
 async function changeProcessing(action, ids) {
-  if (processingBusy) return;
+  if (processingBusy || !ownsLibrary || !processingSettings) return;
   const generation = identityGeneration;
   processingBusy = true;
+  $("processing-message").textContent = action === "cancel" ? "Removing from the queue…" : "Queueing videos…";
   updateProcessingEstimate();
+  renderFeed();
   try {
     const response = await libraryFetch("/api/processing", {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -179,6 +182,7 @@ async function changeProcessing(action, ids) {
     if (generation === identityGeneration) {
       processingBusy = false;
       updateProcessingEstimate();
+      renderFeed();
     }
   }
 }
@@ -264,7 +268,21 @@ function videoRow(jobs) {
     }
     description.append(bottom);
   } else if (displayStage(job) !== "complete") {
-    bottom.append(statusBadge(job));
+    const state = processingRecord(jobs)?.state;
+    if (state === "queued" || (state === "active" && ["not_processed", "queued"].includes(displayStage(job)))) {
+      bottom.append(node("span", state === "queued" ? "Queued" : "Processing", `badge ${state}`));
+    } else bottom.append(statusBadge(job));
+    if (canQueue(jobs)) {
+      const button = node("button", "Process", "button");
+      button.dataset.focus = `process-${video.video_id}`;
+      button.setAttribute("aria-label", `Process ${video.title || video.video_id}`);
+      button.disabled = processingBusy;
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        button.title = `Estimated transcription $${(video.duration * processingSettings.price_per_second).toFixed(3)}`;
+      }
+      button.addEventListener("click", () => changeProcessing("queue", [video.video_id]));
+      bottom.append(button);
+    }
     description.append(bottom);
   }
   main.append(description);
@@ -274,7 +292,7 @@ function videoRow(jobs) {
 function renderFeed() {
   if (!archive) return;
   const search = $("video-search").value.trim().toLowerCase();
-  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, discoveredView, processingRecords && [...processingRecords], [...selectedForProcessing]]);
+  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, discoveredView, processingRecords && [...processingRecords], processingBusy, [...selectedForProcessing]]);
   if (signature === rendered) return;
   rendered = signature;
   const focused = document.activeElement?.dataset.focus;
@@ -334,7 +352,7 @@ function renderFeed() {
   const visible = matches.slice(0, Math.max(feedLimit, selectedIndex + 1));
   const rows = visible.map(({jobs}) => {
     const id = jobs[0].video_id;
-    const signature = JSON.stringify([jobs, discoveredView, Boolean(processingRecords), processingRecord(jobs), selectedForProcessing.has(id)]);
+    const signature = JSON.stringify([jobs, discoveredView, ownsLibrary, Boolean(processingSettings && processingRecords), processingRecord(jobs), processingBusy, selectedForProcessing.has(id)]);
     let cached = rowCache.get(id);
     if (!cached || cached.signature !== signature) {
       cached = {signature, row: videoRow(jobs)};
