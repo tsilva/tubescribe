@@ -62,6 +62,12 @@ class ManualProcessing(unittest.TestCase):
         self.assertEqual(self.store.submission_records(), [])
 
     def test_only_selected_video_runs_through_cli_without_provider_speakers(self):
+        self.run_selected_video()
+
+    def test_failed_postprocessing_resumes_unlabeled_transcript_without_repeating_asr(self):
+        self.run_selected_video(fail_first=True)
+
+    def run_selected_video(self, fail_first=False):
         self.discover()
         legacy = Dispatcher(self.store).submit(JobRequest("work", {"video": [OTHER]}))
         self.assertFalse(video_work_pending(self.store))
@@ -101,7 +107,13 @@ class ManualProcessing(unittest.TestCase):
         }
 
         def finish(store, job, **_options):
+            nonlocal fail_first
             initialize(store, job, "text")
+            if fail_first:
+                fail_first = False
+                _options["on_stage"]("postprocessing")
+                store.stage_update("postprocessing", job["id"], state="failed", attempts=1)
+                raise ValueError("Synthetic postprocessing failure after saved ASR")
             store.stage_update("postprocessing", job["id"], state="complete")
             store.ensure_stage("artifact", job["id"], workflow="summary")
             store.stage_update("artifact", job["id"], workflow="summary", state="complete")
@@ -137,6 +149,11 @@ class ManualProcessing(unittest.TestCase):
             patch("tubescribe.pipeline.finish", side_effect=finish),
             redirect_stdout(io.StringIO()) as output,
         ):
+            if fail_first:
+                self.assertEqual(main(), 1, output.getvalue())
+                self.assertEqual(change(root, "retry", [VIDEO])["changed"], 1)
+                [retried] = self.store.queued_submissions(manual=True)
+                argv[4] = retried["id"]
             self.assertEqual(main(), 0, output.getvalue())
         hosted.assert_called_once()
         [record] = status(root)
