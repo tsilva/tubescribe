@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import {createDecipheriv, randomBytes} from "node:crypto";
+import {readFile} from "node:fs/promises";
 import test from "node:test";
+import {runInNewContext} from "node:vm";
 import {makeHandler, realtimeURL} from "../api/realtime.js";
 import {connect} from "../src/reader/realtime.js";
 import {buildFeed, stage} from "../src/reader/feed.js";
@@ -127,6 +129,54 @@ test("closing during authorization ignores late private data; terminal errors ne
   assert.equal(fixture.stream.status, "error");
   assert.equal(fixture.count(), 1);
   assert.equal(fixture.closed(), 1);
+});
+
+test("the reader loads its channel snapshot before a failed live connection and refreshes it on request", async () => {
+  const source = await readFile(new URL("../src/tubescribe/dashboard_assets/app.js", import.meta.url), "utf8");
+  const controls = new Map();
+  const requests = [];
+  const snapshot = {channels: [{id: "owner-channel"}], jobs: []};
+  const context = {
+    signedInUser: "user_owner", ownsLibrary: true, refreshing: false,
+    identityGeneration: 1, archive: null, feedRevision: "", liveFeed: null,
+    realtimeSettings: {enabled: true},
+    $: id => {
+      if (!controls.has(id)) controls.set(id, {classList: {add() {}, remove() {}}});
+      return controls.get(id);
+    },
+    libraryFetch: async path => {
+      requests.push(path);
+      return {ok: true, json: async () => snapshot};
+    },
+    applyFeed: data => {context.archive = data;},
+    showArchive() {}, refreshDigests() {},
+    TubeScribeRealtime: {connect: ({onState}) => ({
+      status: "error", close() {},
+      start: async () => {
+        assert.equal(context.archive, snapshot);
+        onState("error");
+      },
+    })},
+  };
+  runInNewContext(source.slice(source.indexOf("async function refresh(event)"),
+    source.indexOf('document.addEventListener("keydown"')), context);
+  await context.refresh();
+  assert.deepEqual(requests, ["/api/feed"]);
+  assert.equal(context.archive.channels[0].id, "owner-channel");
+  assert.match(controls.get("error").textContent, /last snapshot is preserved/);
+  await context.refresh({type: "click"});
+  assert.deepEqual(requests, ["/api/feed", "/api/feed"]);
+
+  context.archive = null;
+  context.liveFeed = null;
+  context.libraryFetch = async () => {
+    context.identityGeneration++;
+    context.signedInUser = null;
+    return {ok: true, json: async () => snapshot};
+  };
+  await context.refresh();
+  assert.equal(context.archive, null);
+  assert.equal(context.liveFeed, null);
 });
 
 test("feed keeps source URLs, status and queued budget rules without prompt fields", () => {

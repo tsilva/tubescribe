@@ -637,14 +637,18 @@ function showArchive(cached = false) {
 async function refresh(event) {
   if (refreshing || !signedInUser) return;
   if (realtimeSettings.enabled && ownsLibrary) {
+    const generation = identityGeneration;
+    if (!archive || (event?.type === "click" && (!liveFeed || liveFeed.status === "error"))) {
+      await refreshSnapshot();
+    }
+    if (generation !== identityGeneration) return;
     if (liveFeed && liveFeed.status !== "error") {
       await liveFeed.wake();
       if (event?.type === "click") refreshDigests();
       return;
     }
     liveFeed?.close();
-    const generation = identityGeneration;
-    let initial = true;
+    let initial = !archive;
     liveFeed = TubeScribeRealtime.connect({
       getCapabilities: async () => {
         const response = await libraryFetch(realtimeSettings.endpoint);
@@ -672,6 +676,9 @@ async function refresh(event) {
     await liveFeed.start();
     return;
   }
+  await refreshSnapshot();
+}
+async function refreshSnapshot() {
   const generation = identityGeneration;
   refreshing = true;
   $("refresh").disabled = true;
