@@ -23,9 +23,30 @@ function due(job, options, now) {
     (options.wait || (retry ?? 0) <= now);
 }
 
+function normalizeJob(source) {
+  const {
+    asr_retry, asr_downloads, asr_attempts,
+    diarization_retry, diarization_downloads, diarization_attempts, diarization_saves,
+    postprocessing_retry, postprocessing_downloads, postprocessing_attempts, postprocessing_saves,
+    summary_retry, summary_attempts, summary_saves, ...job
+  } = source;
+  job.key = job.key ?? String(job.job_id ?? "video:" + job.video_id);
+  job.scheduling = job.scheduling ?? [
+    [job.state, null, asr_retry, asr_downloads, asr_attempts, 0],
+    [job.diarization_state, job.diarization_stage, diarization_retry,
+      diarization_downloads, diarization_attempts, diarization_saves],
+    [job.postprocessing_state, job.postprocessing_stage, postprocessing_retry,
+      postprocessing_downloads, postprocessing_attempts, postprocessing_saves],
+    [job.summary_state, job.summary_stage, summary_retry, 0, summary_attempts, summary_saves],
+  ];
+  return job;
+}
+
 export function buildFeed({feed, channels, queue}, now = Date.now() / 1000) {
+  feed = feed.map(normalizeJob);
   const scheduled = new Set();
-  for (const {options} of queue) {
+  for (const queued of queue) {
+    const options = "options" in queued ? queued.options : queued;
     if (!options || typeof options !== "object") continue;
     let candidates = feed.filter(job => job.job_id != null &&
       job.profile === (options.profile ?? "turbo-v1") &&
