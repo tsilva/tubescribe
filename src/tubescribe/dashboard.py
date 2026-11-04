@@ -616,9 +616,13 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     settings = {**access.configuration(), "realtime": configuration()}
                     if access.enabled and config.manual_queue:
                         from .manual_queue import PROFILE
-                        from .openrouter import PRICE_PER_SECOND
+                        from .openrouter import CHUNK_SECONDS, PRICE_PER_SECOND
+                        from .speaker_continuity import REFERENCE_BUDGET
 
-                        settings["processing"] = {"profile": PROFILE, "price_per_second": PRICE_PER_SECOND}
+                        settings["processing"] = {
+                            "profile": PROFILE, "price_per_second": PRICE_PER_SECOND,
+                            "chunk_seconds": CHUNK_SECONDS, "reference_seconds": REFERENCE_BUDGET,
+                        }
                     self.send_json(settings)
                     return
                 if url.path == "/api/realtime-authorization":

@@ -92,7 +92,8 @@ function resourceLink(label, url, iconName, className = "") {
   return link;
 }
 function bestJob(jobs) {
-  return [...jobs].sort((a, b) => quality(b) - quality(a))[0];
+  return [...jobs].sort((a, b) => quality(b) - quality(a)
+    || Number(b.job_id || 0) - Number(a.job_id || 0))[0];
 }
 function quality(job) {
   return job.summary_url ? 4 : job.processed_url ? 3 : job.transcript_url ? 2 : job.job_id != null ? 1 : 0;
@@ -144,14 +145,20 @@ function canQueue(jobs) {
   return ownsLibrary && Boolean(processingSettings && processingRecords) &&
     (!state || state === "cancelled") && !jobs.some(job => job.transcript_url || job.scheduled);
 }
+function transcriptionEstimate(durations) {
+  const price = processingSettings?.price_per_second || 0;
+  const chunk = processingSettings?.chunk_seconds || Infinity;
+  const references = processingSettings?.reference_seconds || 0;
+  const base = durations.reduce((sum, seconds) => sum + seconds * price, 0);
+  const extra = durations.reduce((sum, seconds) => sum + Math.max(0, Math.ceil(seconds / chunk) - 1) * references * price, 0);
+  return `Estimated transcription $${base.toFixed(3)}${extra ? `–$${(base + extra).toFixed(3)} (includes speaker matching)` : ""}`;
+}
 function updateProcessingEstimate() {
   const selected = [...selectedForProcessing];
   const durations = selected.map(id => archive?.jobs.find(job => job.video_id === id)?.duration);
   const known = durations.filter(seconds => Number.isFinite(seconds) && seconds > 0);
-  const total = known.reduce((sum, seconds) => sum + seconds, 0);
-  const estimate = processingSettings ? total * processingSettings.price_per_second : 0;
   const missing = known.length < selected.length ? " · Some durations unknown" : "";
-  const cost = known.length ? `Estimated transcription $${estimate.toFixed(3)}${missing}` : "Duration unavailable";
+  const cost = known.length ? `${transcriptionEstimate(known)}${missing}` : "Duration unavailable";
   $("processing-estimate").textContent = selected.length ? `${selected.length} selected · ${cost}` : "Select videos to process";
   $("queue-selected").disabled = processingBusy || !selected.length;
 }
@@ -291,7 +298,7 @@ function videoRow(jobs) {
       button.setAttribute("aria-label", `Process ${video.title || video.video_id}`);
       button.disabled = processingBusy;
       if (Number.isFinite(video.duration) && video.duration > 0) {
-        button.title = `Estimated transcription $${(video.duration * processingSettings.price_per_second).toFixed(3)}`;
+        button.title = transcriptionEstimate([video.duration]);
       }
       button.addEventListener("click", () => changeProcessing("queue", [video.video_id]));
       bottom.append(button);

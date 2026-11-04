@@ -230,12 +230,7 @@ class ManualProcessing(unittest.TestCase):
             self.assertFalse(client.call_args.kwargs["trust_env"])
             transport.post.assert_called_once_with(
                 "https://openrouter.ai/api/v1/audio/transcriptions",
-                files={"file": ("speech.wav", b"audio", "audio/wav")},
-                data={
-                    "model": MODEL,
-                    "response_format": "verbose_json",
-                    "timestamp_granularities[]": ["word"],
-                },
+                json=json.loads(payload),
                 headers={"Authorization": "Bearer " + PLACEHOLDER},
             )
 
@@ -277,7 +272,8 @@ class ManualProcessing(unittest.TestCase):
         with patch("tubescribe.openrouter.subprocess.run", side_effect=execute):
             self.assertEqual(call(Path("/fixture"), buffer.getvalue())["status"], 200)
         self.assertEqual(sent["input_audio"]["format"], "flac")
-        self.assertEqual(sent["timestamp_granularities"], ["word"])
+        self.assertEqual(sent["timestamp_granularities"], ["word", "segment"])
+        self.assertEqual(sent["provider"]["options"]["azure"]["diarization"], {"enabled": True})
         compressed = base64.b64decode(sent["input_audio"]["data"])
         self.assertLess(len(compressed), len(buffer.getvalue()))
         decoded = original_run(

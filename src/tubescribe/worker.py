@@ -75,15 +75,16 @@ def work(
     _recover=True,
     _parallel=True,
 ):
-    from .manual_queue import PROFILE, authorize_execution, request_for
+    from .config import OPENROUTER_PROFILES
+    from .manual_queue import authorize_execution, request_for
 
-    hosted = profile == PROFILE
+    hosted = profile in OPENROUTER_PROFILES
     if hosted or store.config.manual_queue:
         from .execution import CURRENT_SUBMISSION
 
         if not hosted or not ids or len(ids) != 1 or channel:
             raise ValueError("OpenRouter work requires one manually selected video per job")
-        authorize_execution(store, request_for(ids[0]), CURRENT_SUBMISSION.get())
+        authorize_execution(store, request_for(ids[0], profile), CURRENT_SUBMISSION.get())
     if postprocessing not in {"video", "text", "off"}:
         raise ValueError("Postprocessing must be video, text, or off")
     summary = summary and postprocessing != "off"
@@ -124,7 +125,7 @@ def work(
         if hosted:
             from .openrouter import OpenRouter
 
-            client = OpenRouter()
+            client = OpenRouter(profile)
         else:
             client = asr_client or Client(endpoint, **client_options())
 

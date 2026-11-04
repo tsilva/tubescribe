@@ -5,6 +5,7 @@ import uuid
 from contextlib import closing
 
 from .config import OPENROUTER_PROFILE as PROFILE
+from .config import OPENROUTER_PROFILES
 from .database import clock, connect, serialize
 from .repository import now
 from .submission import JobRequest
@@ -20,14 +21,14 @@ def lane_filter(manual):
     return "NOT (" + selected + ")"
 
 
-def request_for(video_id):
-    return JobRequest("work", {"video": [video_id], "profile": PROFILE, "max_attempts": 1})
+def request_for(video_id, profile=PROFILE):
+    return JobRequest("work", {"video": [video_id], "profile": profile, "max_attempts": 1})
 
 
 def authorize_execution(store, request, identifier):
     if request.command == "rollups":
         return
-    if not store.config.manual_queue and request.options.get("profile") != PROFILE:
+    if not store.config.manual_queue and request.options.get("profile") not in OPENROUTER_PROFILES:
         return
     ids = request.options.get("video") or []
     row = store.submission(identifier) if identifier else None
@@ -37,7 +38,7 @@ def authorize_execution(store, request, identifier):
         or len(ids) != 1
         or not row
         or row["dedupe"] != PREFIX + ids[0]
-        or request.encode() != request_for(ids[0]).encode()
+        or request.encode() != request_for(ids[0], request.options.get("profile")).encode()
     ):
         raise ValueError("Select videos in the processing queue before starting OpenRouter work")
 
@@ -72,30 +73,37 @@ def change(root, action, ids):
                 )
                 continue
             latest = db.execute(
-                "SELECT state FROM submissions WHERE dedupe=? ORDER BY created DESC,id DESC LIMIT 1",
+                "SELECT state,request FROM submissions WHERE dedupe=? ORDER BY created DESC,id DESC LIMIT 1",
                 (dedupe,),
             ).fetchone()
             state = latest[0] if latest else None
+            previous_profile = json.loads(latest[1])["options"].get("profile") if latest else None
+            profile = previous_profile if action == "retry" else PROFILE
             if action == "retry":
                 if state not in {"failed", "interrupted"}:
                     continue
-            elif state not in {None, "cancelled"}:
+            elif state not in {None, "cancelled"} and not (
+                state == "complete" and previous_profile != PROFILE
+            ):
                 continue
+            if profile not in OPENROUTER_PROFILES:
+                raise ValueError("Unsupported saved processing profile")
             if (
                 action == "queue"
                 and db.execute(
-                    "SELECT 1 FROM jobs JOIN transcripts ON transcripts.job_id=jobs.id WHERE video_id=?",
-                    (video_id,),
+                    "SELECT 1 FROM jobs JOIN transcripts ON transcripts.job_id=jobs.id "
+                    "WHERE video_id=? AND profile=?",
+                    (video_id, profile),
                 ).fetchone()
             ):
                 continue
             db.execute(
                 "INSERT INTO jobs(video_id,profile,updated_at) VALUES(?,?,?) ON CONFLICT DO NOTHING",
-                (video_id, PROFILE, now()),
+                (video_id, profile, now()),
             )
             if action == "retry":
                 job_id = db.execute(
-                    "SELECT id FROM jobs WHERE video_id=? AND profile=?", (video_id, PROFILE)
+                    "SELECT id FROM jobs WHERE video_id=? AND profile=?", (video_id, profile)
                 ).fetchone()[0]
                 db.execute(
                     "UPDATE jobs SET state=CASE WHEN state='failed' THEN 'pending' ELSE state END,"
@@ -114,7 +122,7 @@ def change(root, action, ids):
                     )
             db.execute(
                 "INSERT INTO submissions(id,dedupe,request,state,created,updated) VALUES(?,?,?,?,?,?)",
-                (uuid.uuid4().hex, dedupe, request_for(video_id).encode(), "queued", stamp, stamp),
+                (uuid.uuid4().hex, dedupe, request_for(video_id, profile).encode(), "queued", stamp, stamp),
             )
             changed += 1
     return {"changed": changed}
@@ -132,10 +140,11 @@ def status(root):
             for row in db.execute(
                 "SELECT s.dedupe,s.state,(SELECT a.metrics FROM attempts a WHERE a.job_id=j.id "
                 "AND a.stage='asr' AND a.state='complete' ORDER BY a.started DESC LIMIT 1),c.expires "
-                "FROM (SELECT id,dedupe,state,ROW_NUMBER() OVER (PARTITION BY dedupe ORDER BY created DESC,id DESC) AS ordinal "
+                "FROM (SELECT id,dedupe,state,request,ROW_NUMBER() OVER (PARTITION BY dedupe ORDER BY created DESC,id DESC) AS ordinal "
                 "FROM submissions WHERE dedupe LIKE ?) s "
-                "LEFT JOIN jobs j ON j.video_id=SUBSTR(s.dedupe,?) AND j.profile=? "
+                "LEFT JOIN jobs j ON j.video_id=SUBSTR(s.dedupe,?) "
+                "AND s.request LIKE '%\"profile\": \"' || j.profile || '\"%' "
                 "LEFT JOIN claims c ON c.resource='submission-retry:' || s.id WHERE s.ordinal=1",
-                (PREFIX + "%", len(PREFIX) + 1, PROFILE),
+                (PREFIX + "%", len(PREFIX) + 1),
             )
         ]

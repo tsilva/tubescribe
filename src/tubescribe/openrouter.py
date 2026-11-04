@@ -18,13 +18,15 @@ import httpx
 
 from .asr import validate
 from .blobs import file_digest
+from .config import LEGACY_OPENROUTER_PROFILE, OPENROUTER_PROFILE
 from .execution import assert_owned
 from .repository import now
 
-MODEL = "nvidia/nemotron-3.5-transcribe"
+MODEL = "microsoft/mai-transcribe-2"
+LEGACY_MODEL = "nvidia/nemotron-3.5-transcribe"
 PLACEHOLDER = "tubescribe_openrouter_proxy_placeholder"
-PRICE_PER_SECOND = 0.0000333
-CHUNK_SECONDS = 480
+PRICE_PER_SECOND = 0.10 / 3600
+CHUNK_SECONDS = 60
 MAX_REQUEST_BYTES = 23 * 1024 * 1024
 REJECTIONS = {400, 401, 402, 403, 404, 413, 415, 422, 429}
 
@@ -59,16 +61,24 @@ def proxy_request(payload):
         trust_env=False,
         timeout=httpx.Timeout(120, connect=10),
     ) as client:
-        response = client.post(
-            "https://openrouter.ai/api/v1/audio/transcriptions",
-            files={"file": ("speech." + audio_format, audio, "audio/" + audio_format)},
-            data={
-                "model": request["model"],
-                "response_format": request["response_format"],
-                "timestamp_granularities[]": request["timestamp_granularities"],
-            },
-            headers={"Authorization": "Bearer " + PLACEHOLDER},
-        )
+        if request["model"] == MODEL:
+            # Azure diarization is a provider option, not a normalized top-level flag.
+            response = client.post(
+                "https://openrouter.ai/api/v1/audio/transcriptions",
+                json=request,
+                headers={"Authorization": "Bearer " + PLACEHOLDER},
+            )
+        else:
+            response = client.post(
+                "https://openrouter.ai/api/v1/audio/transcriptions",
+                files={"file": ("speech." + audio_format, audio, "audio/" + audio_format)},
+                data={
+                    "model": request["model"],
+                    "response_format": request["response_format"],
+                    "timestamp_granularities[]": request["timestamp_granularities"],
+                },
+                headers={"Authorization": "Bearer " + PLACEHOLDER},
+            )
         if response.status_code != 200:
             return {"status": response.status_code}
         return {
@@ -78,24 +88,26 @@ def proxy_request(payload):
         }
 
 
-def call(path, audio):
+def call(path, audio, model=MODEL):
     # Receipt identity remains the original PCM WAV, independent of upload encoding.
     with TemporaryDirectory(prefix="tubescribe-flac-") as directory:
         output = Path(directory) / "speech.flac"
         subprocess.run(
             ["ffmpeg", "-nostdin", "-v", "error", "-i", "pipe:0", "-map", "0:a:0",
-             "-c:a", "flac", str(output)],
+             "-sample_fmt", "s16", "-c:a", "flac", str(output)],
             input=audio, capture_output=True, check=True, timeout=60,
         )
         compressed = output.read_bytes()
-    payload = json.dumps(
-        {
-            "model": MODEL,
-            "input_audio": {"data": base64.b64encode(compressed).decode("ascii"), "format": "flac"},
-            "response_format": "verbose_json",
-            "timestamp_granularities": ["word"],
-        }
-    ).encode()
+    request = {
+        "model": model,
+        "input_audio": {"data": base64.b64encode(compressed).decode("ascii"), "format": "flac"},
+        "response_format": "verbose_json",
+        "timestamp_granularities": ["word"],
+    }
+    if model == MODEL:
+        request["timestamp_granularities"] = ["word", "segment"]
+        request["provider"] = {"options": {"azure": {"diarization": {"enabled": True}}}}
+    payload = json.dumps(request).encode()
     if len(payload) > MAX_REQUEST_BYTES:
         raise ValueError("Audio request exceeds the configured upload bound")
     environment = {
@@ -111,7 +123,7 @@ def call(path, audio):
     return json.loads(result.stdout)
 
 
-def cached_response(store, key, path, audio):
+def cached_response(store, key, path, audio, model=MODEL):
     response_key = key + ".json"
     pending_key = key + ".pending"
     digest = sha256(audio).hexdigest()
@@ -128,7 +140,7 @@ def cached_response(store, key, path, audio):
         # Record intent before sending. A lost response must not cause a second charge.
         store.blobs.put(pending_key, b"request outcome pending\n")
     try:
-        result = call(path, audio)
+        result = call(path, audio) if model == MODEL else call(path, audio, model=model)
     except (ValueError, OSError, subprocess.SubprocessError):
         raise ValueError(unknown) from None
     if result.get("status") in REJECTIONS:
@@ -142,7 +154,7 @@ def cached_response(store, key, path, audio):
     return result
 
 
-def cues(response, offset, duration, first_speaker=1):
+def cues(response, offset, duration, first_speaker=1, speaker_labels=None):
     words = response.get("words")
     if words is None and isinstance(response.get("text"), str) and response["text"].strip():
         # Only known audio bounds are available. Never manufacture word timing or voices.
@@ -174,7 +186,8 @@ def cues(response, offset, duration, first_speaker=1):
         start, end = start + offset, min(duration, max(end, start + 0.001)) + offset
         label = None
         if isinstance(speaker, (int, str)) and str(speaker).strip():
-            label = labels.setdefault(str(speaker), f"Speaker {first_speaker + len(labels)}")
+            label = (speaker_labels.get(str(speaker)) if speaker_labels is not None
+                     else labels.setdefault(str(speaker), f"Speaker {first_speaker + len(labels)}"))
         text = text.strip()
         timed_word = {"word": text, "start": start, "end": end}
         confidence = word.get("confidence")
@@ -205,16 +218,31 @@ def cues(response, offset, duration, first_speaker=1):
 
 
 class OpenRouter:
+    def __init__(self, profile=OPENROUTER_PROFILE):
+        self.legacy = profile == LEGACY_OPENROUTER_PROFILE
+
     def health(self):
-        return {
-            "model": MODEL,
+        health = {
+            "model": LEGACY_MODEL if self.legacy else MODEL,
             "revision": "provider-managed",
             "backend": "openrouter",
             "backend_version": "audio-transcriptions-v1",
-            "decoding": {"chunk_seconds": CHUNK_SECONDS, "timestamp_granularities": ["word"]},
+            "decoding": {"chunk_seconds": 480 if self.legacy else CHUNK_SECONDS,
+                         "timestamp_granularities": ["word"]},
         }
+        if not self.legacy:
+            from .speaker_continuity import MAX_REFERENCES, REFERENCE_BUDGET, REFERENCE_SECONDS
+
+            health["decoding"].update(
+                diarization=True, speaker_continuity="audio-references-v1",
+                reference_seconds=REFERENCE_SECONDS, reference_budget=REFERENCE_BUDGET,
+                max_references=MAX_REFERENCES,
+            )
+        return health
 
     def transcribe(self, store, job, path):
+        if not self.legacy:
+            return self.transcribe_mai(store, job, path)
         command = launcher()
         started_at, start = now(), time.monotonic()
         prefix = f"transcripts/{job['channel_id']}/{job['video_id']}/{job['profile']}/openrouter"
@@ -248,7 +276,7 @@ class OpenRouter:
                     "-f",
                     "segment",
                     "-segment_time",
-                    str(CHUNK_SECONDS),
+                    "480",
                     "-segment_format",
                     "wav",
                     str(Path(scratch) / "%06d.wav"),
@@ -261,7 +289,7 @@ class OpenRouter:
             for chunk in sorted(Path(scratch).glob("*.wav")):
                 with wave.open(str(chunk)) as audio:
                     duration = audio.getnframes() / audio.getframerate()
-                if not 0 < duration <= CHUNK_SECONDS + 1:
+                if not 0 < duration <= 481:
                     raise ValueError("Decoded audio part is outside the request limits")
                 chunks.append((chunk, duration))
             total = sum(duration for _, duration in chunks)
@@ -269,7 +297,8 @@ class OpenRouter:
             if not total or (expected and abs(total - expected) > max(5, expected * 0.01)):
                 raise ValueError("Decoded audio duration differs from the selected video")
             for part, (chunk, duration) in enumerate(chunks):
-                item = cached_response(store, f"{prefix}/{part:06d}", command, chunk.read_bytes())
+                item = cached_response(store, f"{prefix}/{part:06d}", command, chunk.read_bytes(),
+                                       model=LEGACY_MODEL)
                 response = item["response"]
                 usage = response.get("usage") or {}
                 cost = usage.get("cost")
@@ -303,6 +332,68 @@ class OpenRouter:
             }
         )
 
+    def transcribe_mai(self, store, job, path):
+        from .speaker_continuity import RATE, SpeakerContinuity
+
+        command = launcher()
+        started_at, start = now(), time.monotonic()
+        prefix = f"transcripts/{job['channel_id']}/{job['video_id']}/{job['profile']}/openrouter"
+        source_key = prefix + "/source.sha256"
+        source = file_digest(path).encode()
+        if store.exists(source_key) and store.read_key(source_key) != source:
+            raise ValueError("Audio differs from the saved OpenRouter request source")
+        store.blobs.put(source_key, source)
+        bank = SpeakerContinuity()
+        segments, generations, languages, costs = [], [], [], []
+        with TemporaryDirectory(prefix="openrouter-", dir=store.root) as scratch:
+            decoded = Path(scratch) / "source.wav"
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0",
+                 "-ac", "1", "-ar", str(RATE), "-c:a", "pcm_s16le", str(decoded)],
+                check=True, capture_output=True, timeout=600,
+            )
+            with wave.open(str(decoded)) as audio:
+                total = audio.getnframes() / RATE
+                expected = job.get("duration")
+                if not total or (expected and abs(total - expected) > max(5, expected * .01)):
+                    raise ValueError("Decoded audio duration differs from the selected video")
+                part = 0
+                while audio.tell() < audio.getnframes():
+                    offset = audio.tell() / RATE
+                    pcm = audio.readframes(CHUNK_SECONDS * RATE)
+                    duration = len(pcm) / (RATE * 2)
+                    request, reference_seconds, references = bank.request(pcm)
+                    item = cached_response(store, f"{prefix}/{part:06d}", command, request)
+                    response = item["response"]
+                    # Validate provider timestamps before matching references or doing arithmetic.
+                    cues(response, 0, duration + reference_seconds)
+                    cleaned, labels = bank.apply(response, pcm, reference_seconds, references)
+                    segments.extend(cues(cleaned, offset, duration, speaker_labels=labels))
+                    usage = response.get("usage") or {}
+                    cost = usage.get("cost")
+                    costs.append(cost if type(cost) in (int, float)
+                                 and math.isfinite(cost) and cost >= 0 else None)
+                    generations.append(item.get("generation_id"))
+                    if response.get("language"):
+                        languages.append(response["language"])
+                    part += 1
+        return validate({
+            **self.health(), "segments": segments, "duration": total,
+            "language": languages[0] if languages else "und",
+            "processing_seconds": time.monotonic() - start,
+            "started_at": started_at, "finished_at": now(), "generation_ids": generations,
+            "timing_resolution": "audio_part" if any(
+                s.get("timing_resolution") == "audio_part" for s in segments
+            ) else "word",
+            "cost": sum(costs) if costs and all(c is not None for c in costs) else None,
+            "speaker_continuity": {"method": "audio-references-v1",
+                                   "reference_seconds": bank.reference_seconds,
+                                   "matched_references": bank.matched,
+                                   "unresolved_references": bank.unresolved},
+            "speaker_name_provenance": "Anonymous voices matched using audio reference clips; "
+                                       "ambiguous matches remain unidentified",
+        })
+
 
 def main():
     try:
@@ -311,7 +402,7 @@ def main():
             raise ValueError("Invalid request size")
         # Only the worker's fixed speech request may pass through this client.
         request = json.loads(payload)
-        if request.get("model") != MODEL or "input_audio" not in request:
+        if request.get("model") not in {MODEL, LEGACY_MODEL} or "input_audio" not in request:
             raise ValueError("Invalid speech request")
         print(json.dumps(proxy_request(payload)))
     except Exception:

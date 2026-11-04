@@ -25,7 +25,8 @@ function fixture() {
   let records = [], failure = false, finish;
   const context = {
     ownsLibrary: true, signedInUser: "owner", identityGeneration: 1,
-    processingSettings: {profile: "nemotron-openrouter-v1", price_per_second: 0.000033},
+    processingSettings: {profile: "mai-openrouter-v1", price_per_second: 0.1 / 3600,
+      chunk_seconds: 60, reference_seconds: 50},
     processingRecords: null, processingRevision: 0, processingBusy: false,
     selectedForProcessing: new Set(), discoveredView: false,
     archive: {channels: [], jobs: [video]}, selectedVideo: null, readerLevel: "video",
@@ -72,6 +73,13 @@ test("Process queues exactly the clicked library video and shows its queued stat
   f.context.processingRecords = new Map([[video.video_id, {state: "queued", retry_at: 100}]]);
   assert.equal(f.button(), undefined);
   assert.ok(descendants(f.context.videoRow([video])).some(node => node.text === "Retry scheduled"));
+});
+
+test("long-video estimate includes bounded voice reference usage", () => {
+  const f = fixture();
+  assert.equal(f.context.transcriptionEstimate([120]),
+    "Estimated transcription $0.003–$0.005 (includes speaker matching)");
+  assert.equal(f.context.transcriptionEstimate([30, 30]), "Estimated transcription $0.002");
 });
 
 test("queue-only updates keep the selected reader and row badges in sync", async () => {

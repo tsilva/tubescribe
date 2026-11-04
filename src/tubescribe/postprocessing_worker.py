@@ -12,7 +12,7 @@ import httpx
 
 from . import postprocessing as engine
 from .agent_gateway import DurableRunFailed, DurableRunPending
-from .config import OPENROUTER_PROFILE
+from .config import OPENROUTER_PROFILES
 from .database import database_errors, transient_errors
 from .execution import capacity, job_stage, pipeline_lock
 from .inference import PostprocessingUnavailable
@@ -162,7 +162,7 @@ def initialize(store, job, mode):
     source = store.transcript(job["id"])
     if not source:
         raise ValueError("Postprocessing requires a completed transcript")
-    if job.get("profile") != OPENROUTER_PROFILE:
+    if job.get("profile") not in OPENROUTER_PROFILES:
         diarization = store.stage_row("diarization", job["id"])
         if not diarization or diarization["state"] != "complete":
             raise ValueError("Postprocessing requires a completed diarized transcript")

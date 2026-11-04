@@ -5,7 +5,7 @@ import math
 import sqlite3
 from contextlib import closing
 
-from .config import OPENROUTER_PROFILE
+from .config import OPENROUTER_PROFILES
 from .database import connect
 
 
@@ -77,7 +77,7 @@ def details(root, video_id, profile=None):
         ]
         db.rollback()
 
-    hosted = job.get("profile") == OPENROUTER_PROFILE
+    hosted = job.get("profile") in OPENROUTER_PROFILES
     definitions = (
         ("download", "Audio download", job.get("download_state"), "download"),
         ("transcription", "Transcription", job.get("asr_state"), "asr"),

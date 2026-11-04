@@ -9,7 +9,9 @@ from urllib.parse import urlsplit
 
 _DATABASES = {}
 _WORKER_ID = uuid.uuid4().hex
-OPENROUTER_PROFILE = "nemotron-openrouter-v1"
+OPENROUTER_PROFILE = "mai-openrouter-v1"
+LEGACY_OPENROUTER_PROFILE = "nemotron-openrouter-v1"
+OPENROUTER_PROFILES = (OPENROUTER_PROFILE, LEGACY_OPENROUTER_PROFILE)
 
 
 def default_data():
