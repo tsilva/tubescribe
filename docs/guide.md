@@ -1069,7 +1069,9 @@ reauthorizes the session and renews the existing subscriptions without polling
 table contents or replacing unchanged rows. Any renewal failure stops the stream
 until manual retry. Sign-out/account changes cancel subscriptions, renewal timers
 and pending private-data callbacks. Capabilities remain in memory, never URLs,
-browser storage or logs.
+browser storage or logs. Failure diagnostics log only the connection phase, a
+validated error code and an optional SQLSTATE. Provider messages and query
+capabilities are excluded.
 
 Activation requires enabling Realtime on TubeScribe's existing `main` branch
 (`twilight-dream-42009655` / `br-orange-shape-b90ef63q`), allowing the production

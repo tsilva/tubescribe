@@ -652,9 +652,13 @@ async function refresh(event) {
     liveFeed = TubeScribeRealtime.connect({
       getCapabilities: async () => {
         const response = await libraryFetch(realtimeSettings.endpoint);
-        if (!response.ok) throw new Error("Live updates are unavailable. Refresh to retry.");
+        if (!response.ok) {
+          throw Object.assign(new Error("Live updates are unavailable. Refresh to retry."),
+            {code: "authorization_http_" + response.status});
+        }
         return response.json();
       },
+      onError: failure => console.warn("TubeScribe live update failure", failure),
       onFeed: data => {
         if (generation !== identityGeneration) return;
         applyFeed(data);

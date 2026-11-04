@@ -24,6 +24,7 @@ export function makeHandler({env = process.env, request = fetch, issuer = create
     if (typeof authorization !== "string" || !/^Bearer [A-Za-z0-9_.-]{1,16000}$/.test(authorization)) {
       return send(401, {error: "Sign in required"});
     }
+    let phase = "configuration";
     try {
       if (!env.NEON_REALTIME_SECRET) return send(503, {error: "Realtime is not configured"});
       const url = realtimeURL(env.NEON_REALTIME_URL);
@@ -32,6 +33,7 @@ export function makeHandler({env = process.env, request = fetch, issuer = create
           origin.hash || origin.pathname !== "/") throw new Error("Invalid application origin");
       // Reuse Python's Clerk verifier. This endpoint verifies the session without
       // querying Postgres. Ownership stays live inside every SQL query instead.
+      phase = "authentication";
       const response = await request(new URL("/api/realtime-authorization", origin), {
         headers: {Authorization: authorization}, redirect: "error", signal: AbortSignal.timeout(5000),
       });
@@ -40,12 +42,14 @@ export function makeHandler({env = process.env, request = fetch, issuer = create
       const identity = await response.json();
       if (!/^user_[A-Za-z0-9]+$/.test(identity.user_id) ||
           !/^https:\/\/[a-zA-Z0-9.-]+$/.test(identity.issuer)) throw new Error("Invalid session response");
+      phase = "sealing";
       const realtime = issuer({secret: env.NEON_REALTIME_SECRET, db: "neondb"});
       const sealed = Object.fromEntries(await Promise.all(Object.entries(queries).map(async ([kind, sql]) =>
         [kind, await realtime.seal({query: rawSql(sql, [identity.user_id, identity.issuer])})])));
       return send(200, {url, queries: sealed});
     } catch {
       // SDK/provider errors may include credentials or schema; never return/log them.
+      console.warn("TubeScribe live authorization failure", {phase});
       return send(503, {error: "Realtime is temporarily unavailable"});
     }
   };
