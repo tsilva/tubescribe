@@ -673,6 +673,22 @@ class NetworkRuntime(unittest.TestCase):
         self.assertEqual(cold.status_data()["completed_jobs"], 1)
         self.assertEqual(self.fixture.requests, 2)
 
+    def test_selected_retry_backoff_blocks_other_consumers_until_due(self):
+        from tubescribe.changes import queue_deadline
+        from tubescribe.manual_queue import change
+
+        change(self.store.root, "queue", [VID])
+        first = self.store.claim_submission("first", manual=True)
+        self.store.defer_submission(first["id"])
+        replacement = self.replacement("retry-consumer")
+        self.assertIsNone(replacement.claim_submission("second", manual=True))
+        self.assertGreater(queue_deadline(replacement), time.time())
+        with self.store.db:
+            self.store.db.execute("UPDATE claims SET expires=0 WHERE resource=?",
+                                  ("submission-retry:" + first["id"],))
+        self.assertEqual(replacement.claim_submission("second", manual=True)["id"], first["id"])
+        self.assertIsNone(self.store.claim_submission("third", manual=True))
+
     def test_recovery_skips_a_live_job_in_another_process(self):
         self.fixture.full()
         job_id = self.fixture.job["id"]

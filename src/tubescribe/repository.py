@@ -489,6 +489,10 @@ class SQLJobRepository:
             from .execution import assert_owned
 
             assert_owned(self.db, self.root)
+            if values.get("state") in {"complete", "failed", "interrupted", "cancelled"}:
+                self.db.execute(
+                    "DELETE FROM claims WHERE resource=?", ("submission-retry:" + identifier,)
+                )
             if "result" in values:
                 self.db.execute(
                     "INSERT INTO submission_results VALUES(?,?) ON CONFLICT(id) DO UPDATE SET result=excluded.result",
@@ -501,6 +505,39 @@ class SQLJobRepository:
             )
 
         self.record_event(identifier, "submission_" + values.get("state", "dispatched"), {})
+
+    def defer_submission(self, identifier):
+        """Persist a selected job's transport backoff without resetting any model checkpoint."""
+        from .execution import assert_owned
+        from .manual_queue import PREFIX
+
+        with self.db:
+            assert_owned(self.db, self.root)
+            row = self.submission(identifier)
+            if not row or not row["dedupe"].startswith(PREFIX) or row["state"] != "active":
+                raise ValueError("Only active manually selected jobs can recover automatically")
+            previous = json.loads(row["result"] or "{}").get("retry_attempts", 0)
+            attempt = min(7, previous + 1) if type(previous) is int and previous >= 0 else 1
+            stamp = database_clock(self.db)
+            retry_at = stamp + min(300, 5 * 2 ** (attempt - 1))
+            metadata = json.dumps({"retry_attempts": attempt, "retry_at": retry_at})
+            self.db.execute(
+                "INSERT INTO claims VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET "
+                "owner=excluded.owner,expires=excluded.expires",
+                ("submission-retry:" + identifier, "recovery", retry_at),
+            )
+            self.db.execute(
+                "INSERT INTO submission_results VALUES(?,?) ON CONFLICT(id) DO UPDATE SET result=excluded.result",
+                (identifier, metadata),
+            )
+            self.db.execute(
+                "UPDATE submissions SET state='queued',pid=NULL,worker_id=NULL,error=?,updated=? WHERE id=?",
+                ("Temporary service failure; retry scheduled and checkpoints retained", stamp, identifier),
+            )
+            self.db.execute(
+                "INSERT INTO runtime_events(run_id,event,created,data) VALUES(?,?,?,?)",
+                (identifier, "submission_retry", stamp, metadata),
+            )
 
     @operation("queue.read")
     def submission_records(self):
@@ -518,7 +555,9 @@ class SQLJobRepository:
             dict(r)
             for r in self.db.execute(
                 "SELECT * FROM submissions WHERE state='queued' AND pid IS NULL AND "
-                + lane_filter(manual) + " ORDER BY created"
+                "NOT EXISTS (SELECT 1 FROM claims WHERE resource='submission-retry:' || submissions.id "
+                "AND expires>?) AND " + lane_filter(manual) + " ORDER BY created",
+                (database_clock(self.db),),
             )
         ]
 
@@ -651,7 +690,9 @@ class PostgreSQLJobRepository(SQLJobRepository):
         with self.db:
             row = self.db.execute(
                 "SELECT id FROM submissions WHERE state='queued' AND worker_id IS NULL AND "
-                + lane_filter(manual) + " ORDER BY created FOR UPDATE SKIP LOCKED LIMIT 1"
+                "NOT EXISTS (SELECT 1 FROM claims WHERE resource='submission-retry:' || submissions.id "
+                "AND expires>?) AND " + lane_filter(manual) + " ORDER BY created FOR UPDATE SKIP LOCKED LIMIT 1",
+                (database_clock(self.db),),
             ).fetchone()
             if not row:
                 return None

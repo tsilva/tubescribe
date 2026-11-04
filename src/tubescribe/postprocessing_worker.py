@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 
 from . import postprocessing as engine
-from .agent_gateway import DurableRunFailed
+from .agent_gateway import DurableRunFailed, DurableRunPending
 from .config import OPENROUTER_PROFILE
 from .database import database_errors, transient_errors
 from .execution import capacity, job_stage, pipeline_lock
@@ -331,7 +331,7 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             agent_seconds=report["agent_elapsed_seconds"],
             total_tokens=report["usage"]["total"]["totalTokens"],
         )
-    except transient_errors():
+    except (DurableRunPending, *transient_errors()):
         from contextlib import suppress
 
         with suppress(*database_errors()):

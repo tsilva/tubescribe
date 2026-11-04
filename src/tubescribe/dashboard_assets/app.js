@@ -236,9 +236,10 @@ function videoRow(jobs) {
     const state = record?.state;
     const current = jobs.find(job => job.profile === processingSettings.profile);
     if (state === "active" && current) bottom.append(statusBadge(current));
-    else if (state && state !== "cancelled") bottom.append(node("span", human(state)));
+    else if (state && state !== "cancelled") bottom.append(node("span", record.retry_at ? "Retry scheduled" : human(state)));
     else bottom.append(node("span", "Discovered"));
     if (record?.cost != null) bottom.append(node("span", `Transcription $${record.cost.toFixed(3)}`));
+    if (record?.retry_at) bottom.append(node("span", `Retries ${date(record.retry_at)}`, "muted"));
     if (current?.transcript_url && current.diarization_state !== "complete") {
       bottom.append(node("span", "Speaker labels unavailable", "muted"));
     }
@@ -270,7 +271,8 @@ function videoRow(jobs) {
   } else if (displayStage(job) !== "complete") {
     const state = processingRecord(jobs)?.state;
     if (state === "queued" || (state === "active" && ["not_processed", "queued"].includes(displayStage(job)))) {
-      bottom.append(node("span", state === "queued" ? "Queued" : "Processing", `badge ${state}`));
+      const label = state === "queued" ? (processingRecord(jobs).retry_at ? "Retry scheduled" : "Queued") : "Processing";
+      bottom.append(node("span", label, `badge ${state}`));
     } else bottom.append(statusBadge(job));
     if (canQueue(jobs)) {
       const button = node("button", "Process", "button");

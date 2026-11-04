@@ -51,7 +51,7 @@ def queue_deadline(store):
         "SELECT MIN(deadline) FROM ("
         "SELECT expires AS deadline FROM claims WHERE expires>? AND "
         "(resource='archive' OR resource LIKE 'video:%' OR resource LIKE 'job:%' "
-        "OR resource LIKE 'submission:%') UNION ALL "
+        "OR resource LIKE 'submission:%' OR resource LIKE 'submission-retry:%') UNION ALL "
         "SELECT updated+90 AS deadline FROM submissions WHERE "
         "(state='active' OR (state='queued' AND pid IS NOT NULL)) AND updated+90>=?"
         ") AS deadlines",

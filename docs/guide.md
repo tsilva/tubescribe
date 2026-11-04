@@ -671,6 +671,17 @@ and DELETE cancellation. The ID derives from a persisted run key; reusing it wit
 changed input is rejected. Gateway results are saved under `agent-results/ID.json`
 before completion is committed. Worker retries reconnect to that run instead of
 spending another model attempt, and polling backs off to three seconds.
+The client allows 60 seconds for a response to a 25-second status long poll.
+After three failed transport attempts, it reports a pending saved run rather than
+a terminal model failure. Manually selected submissions retain their queue and run
+IDs and retry after a durable delay of 5 seconds, doubling up to 5 minutes. This
+backoff uses the existing claim and submission-result ledgers, survives worker
+restarts, and wakes the PostgreSQL consumer at its deadline without catalogue
+polling. Cleanup and summary checkpoints keep their model-attempt budgets during
+these retries. The reader shows **Retry scheduled**; **Remove** cancels a waiting
+retry in **Discovered**. Discovery still never admits a video for processing.
+Authentication errors, rejected model output, cancelled or uncertain agent runs,
+and ambiguous OpenRouter paid requests remain explicit failures requiring review.
 `agent status --run-id ID` and `agent cancel --run-id ID` operate on the shared ledger.
 The default gateway executor capacity is one run; it is independently configurable up to eight.
 In network mode, `TUBESCRIBE_AGENT_SLOTS` also bounds agent calls across all gateways
