@@ -5,12 +5,16 @@ import {runInNewContext} from "node:vm";
 
 const source = await readFile(new URL("../src/tubescribe/dashboard_assets/app.js", import.meta.url), "utf8");
 const functions = source.slice(source.indexOf("function processingRecord("), source.indexOf("function renderFeed("));
+const statusFunctions = source.slice(source.indexOf("function human("), source.indexOf("function duration("))
+  + source.slice(source.indexOf("function displayStage("), source.indexOf("function syncSelectedRows("));
 const video = {video_id: "testvideo01", title: "A discovered upload", channel_id: "channel", duration: 60, stage: "not_processed"};
 function element(tag, text, className) {
   return {tag, text, className, dataset: {}, attributes: {}, children: [], listeners: {},
     classList: {toggle() {}},
     setAttribute(name, value) {this.attributes[name] = value;},
     append(...children) {this.children.push(...children);},
+    prepend(...children) {this.children.unshift(...children);},
+    replaceChildren(...children) {this.children = children;},
     addEventListener(name, listener) {this.listeners[name] = listener;},
   };
 }
@@ -26,14 +30,14 @@ function fixture() {
     selectedForProcessing: new Set(), discoveredView: false,
     archive: {channels: [], jobs: [video]}, selectedVideo: null, readerLevel: "video",
     node: element, bestJob: jobs => jobs[0], duration: () => "1m", date: () => "today",
-    displayStage: job => job.stage, statusBadge: job => element("span", job.stage),
-    human: value => value, selectVideo: () => {throw new Error("Process must not open the reader");},
+    selectVideo: () => {throw new Error("Process must not open the reader");},
     renderFeed() {},
     $: id => {
-      if (!controls.has(id)) controls.set(id, {});
+      if (!controls.has(id)) controls.set(id, element("div"));
       return controls.get(id);
     },
     libraryFetch: async (path, options) => {
+      if (path.includes("/pipeline")) return {ok: true, json: async () => ({steps: []})};
       requests.push({path, options});
       if (!options) return {ok: true, json: async () => ({videos: records})};
       await new Promise(resolve => {finish = resolve;});
@@ -42,8 +46,9 @@ function fixture() {
       return {ok: true, json: async () => ({changed: 1})};
     },
   };
-  runInNewContext(functions, context);
+  runInNewContext(statusFunctions + functions, context);
   return {context, controls, requests, finish: () => finish(), fail: () => {failure = true;},
+    setRecords: value => {records = value;},
     button: () => descendants(context.videoRow([video])).find(node => node.attributes["aria-label"] === `Process ${video.title}`),
   };
 }
@@ -67,6 +72,51 @@ test("Process queues exactly the clicked library video and shows its queued stat
   f.context.processingRecords = new Map([[video.video_id, {state: "queued", retry_at: 100}]]);
   assert.equal(f.button(), undefined);
   assert.ok(descendants(f.context.videoRow([video])).some(node => node.text === "Retry scheduled"));
+});
+
+test("queue-only updates keep the selected reader and row badges in sync", async () => {
+  const f = fixture();
+  Object.assign(f.context, {
+    readerTab: "summary", readerIdentity: "", readerSignature: "", readerController: null, feedRevision: "",
+    AbortController, backToLibrary() {}, icon: () => element("img"),
+    externalLink: () => element("a"),
+  });
+  runInNewContext(source.slice(source.indexOf("async function renderReader("), source.indexOf("function applyFeed(")), f.context);
+  f.context.renderFeed = () => f.context.renderReader([video], video);
+  await f.context.renderReader([video], video);
+  const badge = () => descendants(f.controls.get("reader")).find(node => node.className?.startsWith("badge "));
+  const assertMatches = label => {
+    assert.equal(badge().text, label);
+    const rowBadge = descendants(f.context.videoRow([video])).find(node => node.className?.startsWith("badge "));
+    assert.equal(rowBadge.text, label);
+    assert.equal(rowBadge.className, badge().className);
+  };
+  assertMatches("Not Processed");
+  for (const [record, expected] of [
+    [{state: "queued"}, "Queued"],
+    [{state: "active"}, "Processing"],
+    [{state: "queued", retry_at: 100}, "Retry scheduled"],
+    [{state: "failed"}, "Failed"],
+    [{state: "interrupted"}, "Interrupted"],
+    [{state: "cancelled"}, "Not Processed"],
+  ]) {
+    f.setRecords([{video_id: video.video_id, ...record}]);
+    await f.context.refreshProcessing();
+    assertMatches(expected);
+  }
+});
+
+test("processing status preserves real pipeline progress and confirmed completion", () => {
+  const {context} = fixture();
+  context.processingRecords = new Map([[video.video_id, {state: "active"}]]);
+  assert.equal(context.processingStatus([{...video, stage: "transcribing"}]).label, "Transcribing");
+  assert.equal(context.processingStatus([{...video, stage: "failed"}]).label, "Processing");
+  for (const state of ["queued", "active", "failed", "interrupted"]) {
+    context.processingRecords = new Map([[video.video_id, {state}]]);
+    assert.equal(context.processingStatus([{...video, stage: "complete"}]).label, "Complete");
+  }
+  context.processingRecords = new Map([[video.video_id, {state: "complete"}]]);
+  assert.equal(context.processingStatus([video]).label, "Not Processed", "completion requires the catalogue to confirm published content");
 });
 
 test("Process is hidden for unavailable queues, other owners and videos already admitted or transcribed", async () => {

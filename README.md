@@ -13,21 +13,21 @@ TubeScribe is for people who follow YouTube channels and want to revisit their i
 ## Try it
 
 1. Open [tubescribe.tsilva.eu](https://tubescribe.tsilva.eu/) and sign in if prompted. Choose a channel in the desktop sidebar, or use the channel dropdown on smaller screens. Search by channel name or video title.
-2. The newest video is selected automatically. Select any video to open its saved summary in the reading pane; switch to **Transcript** for the full text or **SRT timestamps** to follow the source video.
+2. The newest video is selected automatically. Select any video to open its saved summary in the reading pane; switch to **Transcript** for the full text, **SRT timestamps** to follow the source video, or **Pipeline** for step statuses, recorded costs, timings, and usage.
 3. Choose **7-day summary** for a recent overview, or use **Open full page** and **Copy link** to keep a particular document.
 
 Libraries are private to each account. The existing archive belongs to its owner; new accounts see **No videos yet**. Local processors continue publishing to the owner’s library.
 
 With [owner-selected processing](docs/guide.md#owner-selected-processing-on-the-mac) enabled, followed channels are checked automatically. The owner can choose **Process** on an unprocessed video directly in the library, or open **Discovered**, select uploads and review the estimated transcription cost before choosing **Queue selected**. A Mac worker sends their audio to OpenRouter and publishes the transcript and summary to the same library. Selected videos recover automatically from temporary service outages using saved progress. Saved text-only responses can finish too, with a clear notice that time links mark whole audio parts when word timestamps are unavailable.
 
-A useful first result is a readable summary with links to the original video and any saved figures. Videos still awaiting processing show their current state; raw transcripts can be read before the summary is ready. Browsing only reads saved content and never starts processing.
+A useful first result is a readable summary with links to the original video and any saved figures. Every discovered video has a YouTube thumbnail before processing, including videos already in the library. Videos still awaiting processing show their current state; raw transcripts can be read before the summary is ready. Browsing only reads saved content and never starts processing.
 
 The reader refreshes after sign-in, when you return to its tab, or when you choose **Refresh**. Library status and **Refresh** appear only while signed in. It does not poll in the background. Local PostgreSQL processors wake on database notifications, with timers only for retries and expiring work or summary windows.
 
 ## Keep the parts worth revisiting
 
-- **Read at your own pace.** Move between concise summaries, speaker-labelled transcripts, and subtitles without leaving the reader.
-- **Return to the source.** Timestamp links open the original YouTube moment. Inspected screenshots preserve relevant charts, slides, and demonstrations when available.
+- **Read at your own pace.** Move between concise summaries, speaker-labelled transcripts, and subtitles with consistent content margins, without leaving the reader. Summaries omit the transcript footer link and generated-content disclaimer; use the **Transcript** tab to read the source.
+- **Return to the source.** Timestamp links open the original YouTube moment. Inspected screenshots preserve relevant charts, slides, and demonstrations when available. Inline images stay within the reading pane and preserve their aspect ratio.
 - **Catch up across channels.** Rolling seven-day overviews cover a single channel or the whole library. The project-local [newsletter skill](.agents/skills/tubescribe_newsletter/SKILL.md) turns saved summaries into a digest grouped by channel.
 - **Keep portable copies.** Download transcript formats, Markdown with figures, or verified archive backups. Failed processing resumes from saved stages rather than repeating completed work.
 
@@ -56,6 +56,8 @@ The [operations guide](docs/guide.md) contains the complete reference:
 - [Production delivery](docs/production-delivery.md) — complete CI, public-origin sync and exact-commit deployment. Existing backend credential isolation is documented in the [hosting guide](docs/guide.md#vercel-hosting-with-local-processing).
 
 For development, run `scripts/verify` for lint and local tests. The [container rehearsal](docs/guide.md#local-postgresql-and-s3-rehearsal) checks CLI readiness and metrics alongside HTTP delivery, outages, recovery, and restore.
+
+The isolated [transcription and speaker-attribution benchmark](experiments/transcription_benchmark/README.md) compares the deployed pipeline with alternative models using human-annotated audio, without replacing running services or archive transcripts.
 
 For Neon, [transfer monitoring](docs/guide.md#neon-transfer-monitoring) records result bytes by operation and checks provider usage against 3 GB and 4 GB warning thresholds.
 

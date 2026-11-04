@@ -200,7 +200,7 @@ test("the reader loads its channel snapshot before a failed live connection and 
   const context = {
     signedInUser: "user_owner", ownsLibrary: true, refreshing: false,
     identityGeneration: 1, archive: null, feedRevision: "", liveFeed: null,
-    realtimeSettings: {enabled: true},
+    realtimeSettings: {enabled: true}, readerTab: "summary",
     $: id => {
       if (!controls.has(id)) controls.set(id, {classList: {add() {}, remove() {}}});
       return controls.get(id);

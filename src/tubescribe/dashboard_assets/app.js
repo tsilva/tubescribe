@@ -100,9 +100,9 @@ function quality(job) {
 function displayStage(job) {
   return ["queued", "indexed"].includes(job.stage) && !job.scheduled ? "not_processed" : job.stage;
 }
-function statusBadge(job) {
-  const stage = displayStage(job);
-  return node("span", human(stage), `badge ${stage}`);
+function statusBadge(job, jobs = [job]) {
+  const {stage, label} = processingStatus(jobs, job);
+  return node("span", label, `badge ${stage}`);
 }
 function syncSelectedRows() {
   for (const row of document.querySelectorAll(".video-row")) {
@@ -122,6 +122,22 @@ function selectVideo(jobs, job = bestJob(jobs), open = true) {
 }
 function processingRecord(jobs) {
   return processingRecords?.get(jobs[0].video_id);
+}
+function processingStatus(jobs, job = bestJob(jobs)) {
+  const stage = displayStage(job);
+  const record = processingRecord(jobs);
+  if (stage !== "complete") {
+    if (record?.state === "queued") {
+      return {stage: "queued", label: record.retry_at ? "Retry scheduled" : "Queued"};
+    }
+    if (record?.state === "active" && ["not_processed", "queued", "failed", "interrupted"].includes(stage)) {
+      return {stage: "active", label: "Processing"};
+    }
+    if (["failed", "interrupted"].includes(record?.state)) {
+      return {stage: record.state, label: human(record.state)};
+    }
+  }
+  return {stage, label: human(stage)};
 }
 function canQueue(jobs) {
   const state = processingRecord(jobs)?.state;
@@ -235,8 +251,7 @@ function videoRow(jobs) {
     const record = processingRecord(jobs);
     const state = record?.state;
     const current = jobs.find(job => job.profile === processingSettings.profile);
-    if (state === "active" && current) bottom.append(statusBadge(current));
-    else if (state && state !== "cancelled") bottom.append(node("span", record.retry_at ? "Retry scheduled" : human(state)));
+    if (state && state !== "cancelled") bottom.append(statusBadge(current || job, jobs));
     else bottom.append(node("span", "Discovered"));
     if (record?.cost != null) bottom.append(node("span", `Transcription $${record.cost.toFixed(3)}`));
     if (record?.retry_at) bottom.append(node("span", `Retries ${date(record.retry_at)}`, "muted"));
@@ -269,11 +284,7 @@ function videoRow(jobs) {
     }
     description.append(bottom);
   } else if (displayStage(job) !== "complete") {
-    const state = processingRecord(jobs)?.state;
-    if (state === "queued" || (state === "active" && ["not_processed", "queued"].includes(displayStage(job)))) {
-      const label = state === "queued" ? (processingRecord(jobs).retry_at ? "Retry scheduled" : "Queued") : "Processing";
-      bottom.append(node("span", label, `badge ${state}`));
-    } else bottom.append(statusBadge(job));
+    bottom.append(statusBadge(job, jobs));
     if (canQueue(jobs)) {
       const button = node("button", "Process", "button");
       button.dataset.focus = `process-${video.video_id}`;
@@ -294,7 +305,7 @@ function videoRow(jobs) {
 function renderFeed() {
   if (!archive) return;
   const search = $("video-search").value.trim().toLowerCase();
-  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, discoveredView, processingRecords && [...processingRecords], processingBusy, [...selectedForProcessing]]);
+  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, feedRevision, discoveredView, processingRecords && [...processingRecords], processingBusy, [...selectedForProcessing]]);
   if (signature === rendered) return;
   rendered = signature;
   const focused = document.activeElement?.dataset.focus;
@@ -460,12 +471,14 @@ async function renderReader(jobs, job) {
     {key: "transcript", label: "Transcript", url: job.processed_url || job.transcript_url},
     {key: "srt", label: "SRT timestamps", url: job.srt_url},
   ].filter((tab) => tab.url);
+  tabs.push({key: "pipeline", label: "Pipeline"});
   const identity = `${job.video_id}|${job.profile}`;
   if (identity !== readerIdentity || !tabs.some((tab) => tab.key === readerTab)) readerTab = tabs[0]?.key || "";
   readerIdentity = identity;
   const activeTab = tabs.find((tab) => tab.key === readerTab);
   const sourceUrl = activeTab?.url;
-  const signature = JSON.stringify([identity, readerTab, tabs, job.title, job.channel_title, job.published_at, job.duration, job.url, job.stage, job.scheduled, job.updated_at, job.summary_updated_at, job.summary_dir, job.postprocessing_dir]);
+  const status = processingStatus(jobs, job);
+  const signature = JSON.stringify([identity, readerTab, tabs, job.title, job.channel_title, job.published_at, job.duration, job.url, job.stage, job.scheduled, job.updated_at, job.summary_updated_at, job.summary_dir, job.postprocessing_dir, status, readerTab === "pipeline" ? feedRevision : null, processingRecord(jobs)]);
   if (signature === readerSignature) return;
   readerSignature = signature;
   readerController?.abort();
@@ -488,7 +501,7 @@ async function renderReader(jobs, job) {
   const play = node("span", "▶", "youtube-icon");
   play.setAttribute("aria-hidden", "true");
   youtube.append(play);
-  statusRow.append(statusBadge(job));
+  statusRow.append(statusBadge(job, jobs));
   parts.push(title, node("p", [job.channel_title, date(job.published_at, true), duration(job.duration)].filter(Boolean).join(" · "), "reader-meta"), statusRow);
   const readerToolbar = node("div", undefined, "reader-toolbar");
   if (jobs.length > 1) {
@@ -514,7 +527,7 @@ async function renderReader(jobs, job) {
   readerToolbar.append(actions);
   const shareStatus = node("div", undefined, "reader-share-status");
   shareStatus.setAttribute("role", "status");
-  if (activeTab) {
+  if (sourceUrl) {
     const tools = node("div", undefined, "reader-document-actions");
     const fullPage = resourceLink("", sourceUrl, "arrow-top-right-on-square", "document-button");
     fullPage.title = `Open ${activeTab.label} full page`;
@@ -583,7 +596,7 @@ async function renderReader(jobs, job) {
     const link = event.target.closest("a[href]");
     if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
     const url = new URL(link.href);
-    const index = tabs.findIndex((tab) => new URL(tab.url, location.href).href === url.href);
+    const index = tabs.findIndex((tab) => tab.url && new URL(tab.url, location.href).href === url.href);
     if (index !== -1) {
       event.preventDefault();
       chooseTab(index);
@@ -597,8 +610,26 @@ async function renderReader(jobs, job) {
   documentView.append(...parts);
   pane.replaceChildren(closeBar, documentView);
   pane.scrollTop = 0;
+  if (readerTab === "pipeline") {
+    content.append(node("p", "Loading pipeline…", "muted"));
+    try {
+      const query = job.profile ? `?profile=${encodeURIComponent(job.profile)}` : "";
+      const response = await libraryFetch(`/api/videos/${encodeURIComponent(job.video_id)}/pipeline${query}`, {signal: controller.signal});
+      if (!response.ok) throw new Error("Pipeline details are temporarily unavailable.");
+      const data = await response.json();
+      if (controller.signal.aborted || readerSignature !== signature) return;
+      renderPipeline(content, data, status);
+    } catch (error) {
+      if (controller.signal.aborted || readerSignature !== signature) return;
+      content.replaceChildren(node("p", error.message, "muted"));
+      const retry = node("button", "Try again");
+      retry.addEventListener("click", () => {readerSignature = ""; renderReader(jobs, job);});
+      content.append(retry);
+    }
+    return;
+  }
   if (!sourceUrl) {
-    content.append(node("h3", "The transcript is not ready yet."), node("p", job.stage === "failed" ? "The transcript is currently unavailable." : "This video is in your library. Refresh after processing finishes to read its transcript."));
+    content.append(node("h3", "The transcript is not ready yet."), node("p", ["failed", "interrupted"].includes(status.stage) ? "The transcript is currently unavailable." : "This video is in your library. Refresh after processing finishes to read its transcript."));
     return;
   }
   content.append(node("p", `Loading ${activeTab.label.toLowerCase()}…`, "muted"));
@@ -615,6 +646,14 @@ async function renderReader(jobs, job) {
       const documentSource = new DOMParser().parseFromString(documentData.text, "text/html");
       const source = documentSource.querySelector(readerTab === "srt" ? ".srt-cues" : "article");
       if (!source) throw new Error("This document could not be displayed. Use the full-page button to open it.");
+      if (readerTab === "summary") {
+        for (const link of source.querySelectorAll("a")) {
+          if (!/^Full transcript$/i.test(link.textContent.trim())) continue;
+          const paragraph = link.closest("p");
+          link.remove();
+          if (paragraph && !paragraph.textContent.trim() && !paragraph.querySelector("img")) paragraph.remove();
+        }
+      }
       const baseUrl = new URL(sourceUrl, location.href).href;
       if (readerTab === "srt") content.replaceChildren(copyReadingContent(source, baseUrl));
       else content.replaceChildren(...Array.from(source.children).filter((element) =>
@@ -629,7 +668,6 @@ async function renderReader(jobs, job) {
       if (readingCache.size > 8) readingCache.delete(readingCache.keys().next().value);
     }
     if (!content.textContent.trim()) content.append(node("p", "This document has no content."));
-    if (readerTab === "summary") body.append(node("p", "Generated from this video’s transcript. The summary reflects the speaker’s views; figures link to saved source screenshots.", "reader-note"));
   } catch (error) {
     if (controller.signal.aborted || readerSignature !== signature) return;
     content.replaceChildren(node("p", error.message, "muted"));
@@ -637,6 +675,49 @@ async function renderReader(jobs, job) {
     retry.addEventListener("click", () => {readerSignature = ""; renderReader(jobs, job);});
     content.append(retry);
   }
+}
+
+function renderPipeline(content, data, status) {
+  const money = value => value == null ? "Not recorded" : `$${value.toFixed(4)}`;
+  const elapsed = value => value == null ? "Not recorded" : value < 60 ? `${value.toFixed(1)}s` : duration(value);
+  const count = value => value == null ? "Not recorded" : value.toLocaleString();
+  const progress = data.steps.filter(step => ["complete", "included"].includes(step.state)).length;
+  const heading = node("div", undefined, "pipeline-heading");
+  heading.append(node("h3", data.complete ? "Pipeline complete" : status.label), node("span", `${progress} of ${data.steps.length} steps complete`, "muted"));
+  const stats = node("dl", undefined, "pipeline-stats");
+  for (const [label, value] of [
+    [data.cost_complete ? "Final recorded cost" : data.complete ? "Recorded cost · partial" : "Recorded cost so far", money(data.cost_usd)],
+    ["Processing time", elapsed(data.processing_seconds)],
+    ["Video duration", data.duration_seconds == null ? "Unknown" : duration(data.duration_seconds)],
+    ["Recorded tokens", count(data.total_tokens)],
+    ["Speakers", count(data.speakers)], ["Figures", count(data.figures)],
+  ]) {
+    const stat = node("div");
+    stat.append(node("dt", label), node("dd", value));
+    stats.append(stat);
+  }
+  const steps = node("ol", undefined, "pipeline-steps");
+  for (const step of data.steps) {
+    const item = node("li", undefined, "pipeline-step");
+    const title = node("div", undefined, "pipeline-step-heading");
+    const label = ({pending: "Waiting", active: "In progress", included: "Included"})[step.state] || human(step.state);
+    title.append(node("strong", step.label), node("span", label, `badge ${step.state}`));
+    const facts = [];
+    if (step.elapsed_seconds != null) facts.push(elapsed(step.elapsed_seconds));
+    if (step.attempts != null) facts.push(`${step.attempts} attempt${step.attempts === 1 ? "" : "s"}`);
+    if (step.total_tokens != null) facts.push(`${count(step.total_tokens)} tokens`);
+    if (step.state !== "included") facts.push(step.cost_usd == null ? "Cost not recorded" : `${money(step.cost_usd)}${step.cost_complete ? "" : " recorded (partial)"}`);
+    item.append(title);
+    if (step.note) item.append(node("p", step.note, "muted"));
+    if (facts.length) item.append(node("p", facts.join(" · "), "pipeline-step-meta"));
+    if (step.retry_at) item.append(node("p", `Retry scheduled: ${date(step.retry_at)}`, "pipeline-step-meta"));
+    steps.append(item);
+  }
+  const provenance = node("dl", undefined, "pipeline-provenance");
+  for (const [label, value] of [["Profile", data.profile], ["Transcription model", data.model], ["Language", data.language], ["First recorded attempt", date(data.started_at)], ["Finished", date(data.completed_at)]]) {
+    if (value) provenance.append(node("dt", label), node("dd", value));
+  }
+  content.replaceChildren(heading, stats, node("p", data.cost_note, "pipeline-cost-note"), steps, provenance);
 }
 
 function applyFeed(data) {
@@ -662,6 +743,10 @@ function showArchive(cached = false) {
 }
 async function refresh(event) {
   if (refreshing || !signedInUser) return;
+  if (readerTab === "pipeline") {
+    readerSignature = "";
+    rendered = "";
+  }
   if (realtimeSettings.enabled && ownsLibrary) {
     const generation = identityGeneration;
     if (!archive || (event?.type === "click" && (!liveFeed || liveFeed.status === "error"))) {

@@ -169,6 +169,9 @@ class Artifacts(unittest.TestCase):
     def test_summary_uses_native_saved_images_and_skips_when_complete(self):
         self.read_image = True
         self.assertEqual(self.build()["completed"], 1)
+        self.assertEqual(self.store.db.execute(
+            "SELECT workflow FROM attempts WHERE stage='build_one' ORDER BY started DESC LIMIT 1"
+        ).fetchone()[0], "summary")
         output = self.store.root / self.row()["output_dir"]
         self.assertEqual(self.payload["model"], "codex/gpt-6.1-sol")
         self.assertEqual(self.payload["reasoning_effort"], "high")

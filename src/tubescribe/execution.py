@@ -124,7 +124,8 @@ def job_stage(function):
             lease(store.root, f"job:{job_id}", wait=store.config.network),
             durable_writes(store),
         ):
-            attempt = store.begin_attempt(job_id, function.__name__, kwargs.get("name"))
+            workflow = kwargs.get("name", args[0] if args else None) if function.__name__ == "build_one" else None
+            attempt = store.begin_attempt(job_id, function.__name__, workflow)
             try:
                 result = function(store, job, *args, **kwargs)
                 stage = (

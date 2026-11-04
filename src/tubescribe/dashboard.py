@@ -86,6 +86,11 @@ CONTENT_TYPES = {
 }
 
 
+def thumbnail_url(video_id: str) -> str:
+    """Derive previews for both existing and newly discovered videos without processing."""
+    return "https://i.ytimg.com/vi/" + quote(video_id, safe="") + "/hqdefault.jpg"
+
+
 def lock_status(root: Path, name: str) -> dict:
     if name == "worker.lock" and (
         RuntimeConfig.load(root).network or database_path(root).is_file()
@@ -244,11 +249,6 @@ def snapshot(root: Path) -> dict:
     channels, discovery, profiles, jobs = ArchiveViews(root).snapshot()
     files = output_files(root)
     by_path = {f["path"]: f for f in files}
-    covers = {}
-    for file in files:
-        path = Path(file["path"])
-        if re.fullmatch(r"frame_\d+\.png", path.name) and path.parent.name == "figures":
-            covers.setdefault(path.parent.parent.as_posix(), path.name)
     counts = dict.fromkeys(
         (
             "queued",
@@ -269,6 +269,7 @@ def snapshot(root: Path) -> dict:
     names = {c["id"]: c["title"] for c in channels}
     for job in jobs:
         job["stage"] = stage(job)
+        job["cover_url"] = thumbnail_url(job["video_id"])
         if job.get("diarization_state") in ("active", "failed"):
             job["updated_at"] = job["diarization_updated_at"]
             job["error"] = job["diarization_error"] or job["error"]
@@ -306,21 +307,10 @@ def snapshot(root: Path) -> dict:
                 job["processed_path"] = processed
                 job["processed_url"] = transcript_url(job["video_id"], job["profile"])
                 paths.extend([processed, (directory / "processed-with-figures.zip").as_posix()])
-                if cover := covers.get(directory.as_posix()):
-                    job["cover_url"] = job["processed_url"] + "figures/" + cover
         if job.get("summary_state") == "complete" and job.get("summary_dir"):
             # Published state owns availability; a fresh web instance has no local
             # bundle. Resource delivery still validates the manifest and contents.
             job["summary_url"] = artifact_url(job["video_id"], job["profile"], "summary")
-            directory = (root / job["summary_dir"]).resolve()
-            if (
-                directory.is_relative_to(root / "artifacts")
-                and (directory / "artifact.md").is_file()
-            ):
-                for figure in sorted((directory / "figures").glob("frame_*.png")):
-                    if re.fullmatch(r"frame_\d+\.png", figure.name) and figure.is_file():
-                        job["cover_url"] = job["summary_url"] + "figures/" + figure.name
-                        break
         for key in ("asr_path", "prediction_path", "diarization_audio_path"):
             if job.get(key):
                 paths.append(job[key])
@@ -361,6 +351,7 @@ def reader_snapshot(root: Path) -> dict:
     names = {c["id"]: c["title"] for c in channels}
     for job in jobs:
         job["stage"] = stage(job)
+        job["cover_url"] = thumbnail_url(job["video_id"])
         job["channel_title"] = names.get(job["channel_id"], job["channel_id"])
         base = transcript_url(job["video_id"], job["profile"]) if job["profile"] else None
         if job["json_path"]:
@@ -368,9 +359,6 @@ def reader_snapshot(root: Path) -> dict:
             job["srt_url"] = base + "subtitles/"
         if job.get("postprocessing_state") == "complete" and job.get("postprocessing_dir"):
             job["processed_url"] = base
-            if job.get("figures"):
-                version = quote(job.get("postprocessing_manifest_sha256") or "", safe="")
-                job["cover_url"] = base + "cover.png?v=" + version
         if job.get("summary_state") == "complete" and job.get("summary_dir"):
             job["summary_url"] = artifact_url(job["video_id"], job["profile"], "summary")
     for channel in channels:
@@ -404,7 +392,7 @@ class FeedChanges:
     def get(self, revision=None):
         with self.lock:
             views = ArchiveViews(self.root)
-            current = "feed-v2-" + views.revision()
+            current = "feed-v3-" + views.revision()
             if revision == current:
                 return {
                     **(self.cached["metadata"] if self.cached and self.revision == current
@@ -515,7 +503,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             clerk_csp = (
                 f"default-src 'self'; script-src 'self' {access.issuer} https://challenges.cloudflare.com https://*.protect.clerk.com; "
                 f"connect-src 'self' {access.issuer} {live_origin} https://*.protect.clerk.com https://clerk-telemetry.com https://*.clerk-telemetry.com; style-src 'self' 'unsafe-inline'; "
-                f"img-src 'self' data: https://img.clerk.com {access.issuer}; "
+                f"img-src 'self' data: https://i.ytimg.com https://img.clerk.com {access.issuer}; "
                 "frame-src https://challenges.cloudflare.com https://*.protect.clerk.com; worker-src 'self' blob:; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
                 if access.enabled
@@ -526,7 +514,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
                 if generated_html
                 else clerk_csp
-                or "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                or "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://i.ytimg.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
             )
             if getattr(self, "resource", None):
                 self.send_header("Link", f'<{self.origin() + self.resource.url}>; rel="canonical"')
@@ -675,6 +663,12 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     from .manual_queue import status
 
                     self.send_json({"videos": status(root)})
+                    return
+                if match := re.fullmatch(r"/api/videos/([^/]+)/pipeline/?", url.path):
+                    from .pipeline_details import details
+                    from .resources import segment
+
+                    self.send_json(details(root, segment(match[1]), query.get("profile", [None])[0]))
                     return
                 from .resources import render_video, resolve, segment, video_metadata
                 from .rollups import index as digest_index

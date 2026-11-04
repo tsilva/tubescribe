@@ -163,6 +163,10 @@ class ManualProcessing(unittest.TestCase):
                 argv[4] = retried["id"]
             self.assertEqual(main(), 0, output.getvalue())
         hosted.assert_called_once()
+        asr_metrics = json.loads(self.store.db.execute(
+            "SELECT metrics FROM attempts WHERE stage='asr' ORDER BY started DESC LIMIT 1"
+        ).fetchone()[0])
+        self.assertEqual(asr_metrics["generation_ids"], ["fixture"])
         [record] = status(root)
         self.assertEqual(record, {"video_id": VIDEO, "state": "complete", "cost": 0.0000333})
         [job] = self.store.pipeline_jobs(profile=PROFILE)

@@ -277,7 +277,7 @@ def work(
                             metrics={
                                 "processing_seconds": result["processing_seconds"],
                                 "duration": result["duration"],
-                                **({"cost": result.get("cost")} if hosted else {}),
+                                **({"cost": result.get("cost"), "generation_ids": result.get("generation_ids")} if hosted else {}),
                             },
                         )
                         # Recheck each result: a remote deployment may change mid-import.

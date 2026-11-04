@@ -65,8 +65,11 @@ class ResourceRoutes(unittest.TestCase):
 
     def test_summary_and_figures_keep_urls_after_regeneration(self):
         job = next(j for j in snapshot(self.store.root)["jobs"] if j["job_id"] == self.job["id"])
-        self.assertEqual(job["cover_url"], self.base + "figures/frame_0001000.png")
-        self.assertEqual(self.client.get(job["cover_url"]).content, artifact_fixture.PNG)
+        thumbnail = "https://i.ytimg.com/vi/" + self.job["video_id"] + "/hqdefault.jpg"
+        self.assertEqual(job["cover_url"], thumbnail)
+        self.assertEqual(
+            self.client.get(self.base + "figures/frame_0001000.png").content, artifact_fixture.PNG
+        )
         self.fixture.build()
         before = self.fixture.row()["output_dir"]
         page = self.client.get(self.summary)
@@ -91,8 +94,7 @@ class ResourceRoutes(unittest.TestCase):
         self.assertNotEqual(before, self.fixture.row()["output_dir"])
         self.assertEqual(self.client.get(self.summary).status_code, 200)
         job = next(j for j in snapshot(self.store.root)["jobs"] if j["job_id"] == self.job["id"])
-        self.assertEqual(job["cover_url"], self.summary + "figures/frame_0001000.png")
-        self.assertEqual(self.client.get(job["cover_url"]).content, artifact_fixture.PNG)
+        self.assertEqual(job["cover_url"], thumbnail)
         data = self.client.get(self.summary, headers={"Accept": "application/json"}).json()
         self.assertEqual(data["state"], "complete")
         self.assertTrue(data["links"]["markdown"].endswith(self.summary + "artifact.md"))
@@ -140,7 +142,7 @@ class ResourceRoutes(unittest.TestCase):
         self.assertEqual(head.status_code, 200)
         self.assertEqual(head.content, b"")
 
-    def test_feed_cover_reads_only_the_issued_image_with_hash_validation(self):
+    def test_saved_figure_cover_remains_available_with_hash_validation(self):
         from unittest.mock import patch
 
         with self.store.db:
@@ -149,8 +151,11 @@ class ResourceRoutes(unittest.TestCase):
         with patch("tubescribe.dashboard.output_files", side_effect=AssertionError("R2 scan")):
             feed = self.client.get("/api/feed").json()
         job = next(j for j in feed["jobs"] if j["video_id"] == self.job["video_id"])
-        self.assertIn("/cover.png?v=", job["cover_url"])
-        response = self.client.get(job["cover_url"])
+        self.assertEqual(
+            job["cover_url"], "https://i.ytimg.com/vi/" + self.job["video_id"] + "/hqdefault.jpg"
+        )
+        cover = self.base + "cover.png"
+        response = self.client.get(cover)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, artifact_fixture.PNG)
         self.assertIn("s-maxage", response.headers["cache-control"])
@@ -159,7 +164,7 @@ class ResourceRoutes(unittest.TestCase):
         original = path.read_bytes()
         path.write_bytes(b"tampered")
         try:
-            self.assertEqual(self.client.get(job["cover_url"]).status_code, 400)
+            self.assertEqual(self.client.get(cover).status_code, 400)
         finally:
             path.write_bytes(original)
 

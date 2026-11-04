@@ -92,6 +92,63 @@ class Dashboard(unittest.TestCase):
             self.assertEqual({f["format"] for f in saved["files"]}, {"md", "srt", "txt", "json"})
         self.assertFalse(snapshot(self.root)["worker"]["running"])
 
+    def test_pipeline_endpoint_is_read_only_and_scoped_to_video_and_profile(self):
+        response = self.client.get("/api/videos/saved/pipeline?profile=turbo-v1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        data = response.json()
+        self.assertEqual(data["video_id"], "saved")
+        self.assertEqual(data["profile"], "turbo-v1")
+        self.assertEqual(data["steps"][1]["state"], "complete")
+        self.assertIsNone(data["cost_usd"])
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 0)
+        self.assertEqual(self.client.get("/api/videos/missing/pipeline").status_code, 404)
+        self.assertEqual(self.client.get("/api/videos/saved/pipeline?profile=missing").status_code, 404)
+
+    def test_existing_and_new_videos_have_youtube_previews_without_processing(self):
+        from unittest.mock import patch
+
+        # These catalogue rows predate the thumbnail feature and have no thumbnail metadata.
+        before = self.store.db.total_changes
+        expected = {
+            video: f"https://i.ytimg.com/vi/{video}/hqdefault.jpg"
+            for video in ("saved", "pending", "active", "failed")
+        }
+        self.assertEqual(
+            {job["video_id"]: job["cover_url"] for job in snapshot(self.root)["jobs"]}, expected
+        )
+        with patch("tubescribe.dashboard.output_files", side_effect=AssertionError("Object scan")):
+            feed = self.client.get("/api/feed").json()
+        self.assertEqual({job["video_id"]: job["cover_url"] for job in feed["jobs"]}, expected)
+        # An already-open reader must get thumbnails even if its catalogue is unchanged.
+        previous_revision = feed["revision"].replace("feed-v3-", "feed-v2-", 1)
+        refreshed = self.client.get("/api/feed", params={"revision": previous_revision}).json()
+        self.assertTrue(refreshed["full"])
+        self.assertEqual(
+            {job["video_id"]: job["cover_url"] for job in refreshed["jobs"]}, expected
+        )
+        self.assertEqual(self.store.db.total_changes, before)
+
+        # Discovery without a processing profile also receives a preview immediately.
+        self.store.index("channel", "upload", [{
+            "id": "YE7VzlLtp-4", "title": "Discovered", "url": "https://youtube.com/watch?v=YE7VzlLtp-4",
+        }], None)
+        update = self.client.get("/api/feed", params={"revision": feed["revision"]}).json()
+        job = next(job for job in update["jobs"] if job["video_id"] == "YE7VzlLtp-4")
+        self.assertEqual(job["cover_url"], "https://i.ytimg.com/vi/YE7VzlLtp-4/hqdefault.jpg")
+        self.assertIsNone(job.get("profile"))
+        self.assertIsNone(self.store.db.execute(
+            "SELECT id FROM jobs WHERE video_id='YE7VzlLtp-4'"
+        ).fetchone())
+
+    def test_reader_allows_youtube_thumbnail_host_only_for_images(self):
+        page = self.client.get("/")
+        directives = dict(part.strip().split(" ", 1) for part in
+                          page.headers["content-security-policy"].split(";") if part.strip())
+        self.assertIn("https://i.ytimg.com", directives["img-src"].split())
+        self.assertNotIn("https://i.ytimg.com", directives["script-src"].split())
+        self.assertNotIn("*", directives["img-src"].split())
+
     def test_published_summary_link_survives_empty_web_scratch(self):
         job_id = self.store.db.execute("SELECT id FROM jobs WHERE video_id='saved'").fetchone()[0]
         self.store.ensure_stage("artifact", job_id, workflow="summary")

@@ -172,6 +172,11 @@ class ClerkReader(unittest.TestCase):
         owner = self.client.get("/api/feed", headers=self.headers())
         self.assertEqual(owner.status_code, 200)
         self.assertEqual(owner.json()["jobs"][0]["title"], "Private title")
+        self.assertEqual(owner.json()["jobs"][0]["cover_url"],
+                         "https://i.ytimg.com/vi/private-video/hqdefault.jpg")
+        page = self.client.get("/")
+        self.assertIn("img-src 'self' data: https://i.ytimg.com ",
+                      page.headers["content-security-policy"])
         self.assertEqual(owner.headers["cache-control"], "no-store")
         self.assertEqual(owner.headers["vercel-cdn-cache-control"], "no-store")
         self.assertEqual(
@@ -210,6 +215,7 @@ class ClerkReader(unittest.TestCase):
         self.client.get("/api/session", headers=self.headers())
         paths = [
             "/api/videos/private-video",
+            "/api/videos/private-video/pipeline?profile=turbo-v1",
             "/videos/private-video",
             "/videos/private-video/transcripts/turbo-v1/",
             "/videos/private-video/transcripts/turbo-v1/transcript.json",
@@ -235,7 +241,7 @@ class ClerkReader(unittest.TestCase):
                     other = method(path, headers=self.headers("user_other"))
                     self.assertEqual(other.status_code, 404)
                     self.assertEqual(other.headers["cache-control"], "no-store")
-        navigation = self.client.get(paths[1], headers={"Accept": "text/html"})
+        navigation = self.client.get("/videos/private-video", headers={"Accept": "text/html"})
         self.assertEqual(navigation.status_code, 302)
         self.assertTrue(navigation.headers["location"].startswith("/?return_to="))
 
