@@ -1,7 +1,7 @@
 import {createRealtimeClient} from "@neon/realtime/client";
 import {buildFeed} from "./feed.js";
 
-export function connect({getCapabilities, onFeed, onState, createClient = createRealtimeClient,
+export function connect({getCapabilities, onFeed, onState, onError = () => {}, createClient = createRealtimeClient,
   setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now}) {
   let closed = false, client, timer, config, renewal;
   let rowUpdate = false;
@@ -23,7 +23,14 @@ export function connect({getCapabilities, onFeed, onState, createClient = create
     subscriptions.clear();
     client?.close();
   }
-  function fail() {if (!closed) {close(); notify("error");}}
+  function fail(error, phase) {
+    if (closed) return;
+    const code = /^[a-z][a-z0-9_]{0,63}$/.test(error?.code ?? "") ? error.code : "unknown";
+    const sqlState = /^[A-Z0-9]{5}$/.test(error?.sqlState ?? "") ? error.sqlState : undefined;
+    onError({phase, code, sqlState});
+    close();
+    notify("error");
+  }
   const expires = () => Math.min(...Object.values(config.queries).map(query => query.expiresAt));
   function schedule() {
     clearTimer(timer);
@@ -37,13 +44,13 @@ export function connect({getCapabilities, onFeed, onState, createClient = create
       if (next.url !== config.url) throw new Error("Realtime endpoint changed");
       await Promise.all([...subscriptions].map(([kind, subscription]) => subscription.renew(next.queries[kind])));
       if (!closed) {config = next; schedule();}
-    })().catch(fail).finally(() => {renewal = undefined;});
+    })().catch(error => fail(error, "renewal")).finally(() => {renewal = undefined;});
     return renewal;
   }
   function receive(kind, snapshot) {
     if (closed) return;
     states[kind] = snapshot.status;
-    if (snapshot.status === "error") return fail();
+    if (snapshot.status === "error") return fail(snapshot.error, kind);
     if (snapshot.data !== undefined && snapshot.data !== data[kind]) {
       data[kind] = snapshot.data;
       if (!rowUpdate) {
@@ -52,7 +59,7 @@ export function connect({getCapabilities, onFeed, onState, createClient = create
           rowUpdate = false;
           try {
             if (!closed && Object.keys(config.queries).every(key => Array.isArray(data[key]))) onFeed(buildFeed(data));
-          } catch {fail();}
+          } catch (error) {fail(error, "render");}
         });
       }
     }
@@ -73,7 +80,7 @@ export function connect({getCapabilities, onFeed, onState, createClient = create
         subscription.onChange(snapshot => receive(kind, snapshot));
       }
       schedule();
-    } catch {fail();}
+    } catch (error) {fail(error, "startup");}
   }
   return {start, close, get status() {return phase;}, wake() {
     if (!closed && config && now() >= expires() - 10_000) return renew();

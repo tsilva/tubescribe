@@ -131,6 +131,21 @@ test("closing during authorization ignores late private data; terminal errors ne
   assert.equal(fixture.closed(), 1);
 });
 
+test("live failure diagnostics exclude provider messages and credentials", async () => {
+  const failures = [];
+  const stream = connect({
+    getCapabilities: async () => {
+      throw Object.assign(new Error(env.NEON_REALTIME_SECRET),
+        {code: "authorization_http_503", sqlState: env.NEON_REALTIME_SECRET});
+    },
+    onFeed() {}, onState() {}, onError: failure => failures.push(failure),
+  });
+  await stream.start();
+  assert.equal(stream.status, "error");
+  assert.deepEqual(failures, [{phase: "startup", code: "authorization_http_503", sqlState: undefined}]);
+  assert.ok(!JSON.stringify(failures).includes(env.NEON_REALTIME_SECRET));
+});
+
 test("the reader loads its channel snapshot before a failed live connection and refreshes it on request", async () => {
   const source = await readFile(new URL("../src/tubescribe/dashboard_assets/app.js", import.meta.url), "utf8");
   const controls = new Map();
