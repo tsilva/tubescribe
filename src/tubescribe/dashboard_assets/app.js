@@ -659,6 +659,12 @@ async function refresh(event) {
         return response.json();
       },
       onError: failure => console.warn("TubeScribe live update failure " + JSON.stringify(failure)),
+      getFeed: async () => {
+        const response = await libraryFetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error("The library update is unavailable");
+        return data;
+      },
       onFeed: data => {
         if (generation !== identityGeneration) return;
         applyFeed(data);
