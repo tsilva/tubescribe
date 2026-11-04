@@ -210,3 +210,23 @@ test("feed keeps source URLs, status and queued budget rules without prompt fiel
   const exhausted = structuredClone(job); exhausted.scheduling[3][5] = 3;
   assert.equal(buildFeed({feed: [exhausted], channels: [], queue: [{options: {}}]}, 1).jobs[0].scheduled, false);
 });
+
+test("scalar live rows retain legacy scheduling and exclude internal counters", () => {
+  const job = {video_id: "video", channel_id: "c", job_id: "1", profile: "turbo-v1", state: "pending"};
+  const channels = [{id: "c", title: "Channel"}];
+  const legacy = buildFeed({
+    channels, feed: [{...job, key: "1", scheduling: [["pending", null, 0, 0, 0, 0]]}],
+    queue: [{options: {}}],
+  }, 1);
+  const scalar = buildFeed({
+    channels, feed: [{...job, asr_retry: 0, asr_downloads: 0, asr_attempts: 0}],
+    queue: [{id: "submission", profile: null}],
+  }, 1);
+  assert.deepEqual(scalar, legacy);
+  assert.equal(scalar.jobs[0].scheduled, true);
+  assert.equal(scalar.jobs[0].asr_attempts, undefined);
+  assert.equal(scalar.jobs[0].scheduling, undefined);
+  assert.equal(buildFeed({
+    channels, feed: [{video_id: "new-video", channel_id: "c", job_id: null}], queue: [],
+  }, 1).jobs[0].key, "video:new-video");
+});

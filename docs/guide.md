@@ -1063,9 +1063,12 @@ and is separate from this browser feature.
 The Node `/api/live` endpoint uses the official server SDK to seal only source-owned,
 parameterized queries. It reuses Python's Clerk session verifier through
 `/api/realtime-authorization`, which performs no database lookup. Every live query
-also checks `reader_library.clerk_user_id` and issuer in SQL, so another account
-sees no rows and changing ownership removes rows from the live result. The normal
-sign-in flow still claims the preassigned library through the existing verified
+joins the owning `reader_library` row and checks its Clerk user ID and issuer in
+SQL, so another account sees no rows and changing ownership removes rows from
+the live result. The live queries project primitive fields; the reader constructs
+row keys, scheduling arrays and safe queue options. SQL JSON-formatting functions
+are excluded because the Realtime planner can reject their scalar dependencies.
+The normal sign-in flow still claims the preassigned library through the existing verified
 email check. Shared capability renewal runs before the 60-second expiry; it
 reauthorizes the session and renews the existing subscriptions without polling
 table contents or replacing unchanged rows. Any renewal failure stops the stream
