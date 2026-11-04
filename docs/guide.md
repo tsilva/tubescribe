@@ -649,6 +649,13 @@ store with workers. The gateway owns loopback tool callbacks and has its own scr
 a disappearing worker does not remove screenshot tools or interrupt the agent run.
 AgentBridge itself does not need changes.
 
+The gateway verifies the transcript JSON and adjacent SRT checksums, then uses the
+same speaker normalization as the worker before serving transcript tools. Speech
+without speaker attribution remains `UNKNOWN`; metadata-backed names retain their
+provenance. Raw transcript objects are preserved. Retries of saved OpenRouter
+transcripts resume downstream stages even when speaker attribution was unavailable;
+they do not require a separate diarization record or repeat transcription.
+
 ```bash
 export TUBESCRIBE_ACCESS_TOKEN=REPLACE_WITH_A_RANDOM_SECRET_OF_AT_LEAST_32_CHARACTERS
 scripts/tubescribe --data /absolute/scratch/gateway agent serve \

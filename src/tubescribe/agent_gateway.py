@@ -159,10 +159,16 @@ def execute(root, identifier, upstream, *, runner_factory=AgentRunner, changed=N
             with durable_writes(store):
                 kind = context["kind"]
                 if kind == "postprocessing":
-                    from .postprocessing import Screenshots, Transcript, make_handler
+                    from .postprocessing import Screenshots, Transcript, load_source, make_handler
 
-                    store.materialize(context["transcript_key"], context["transcript_sha256"])
-                    srt = store.read_key(context["srt_key"], context["srt_sha256"]).decode()
+                    source = store.materialize(
+                        context["transcript_key"], context["transcript_sha256"]
+                    )
+                    srt_path = store.materialize(context["srt_key"], context["srt_sha256"])
+                    if source.with_suffix(".srt") != srt_path:
+                        raise ValueError("Gateway transcript metadata and SRT must be adjacent")
+                    # Match the worker's input, including UNKNOWN speech and named-label provenance.
+                    srt = load_source(source)["srt"]
                     output = store.materialize_prefix(context["output_key"])
                     video = (
                         store.materialize(context["video_key"], context["video_sha256"])

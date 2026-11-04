@@ -187,7 +187,10 @@ def work(
                         )
 
                     try:
-                        if postprocessing != "off" and job.get("diarization_state") == "complete":
+                        if postprocessing != "off" and (
+                            job.get("diarization_state") == "complete"
+                            or (hosted and job["asr_state"] == "complete")
+                        ):
                             done += int(finish())
                             continue
                         if not hosted:
