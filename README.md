@@ -22,7 +22,7 @@ With [owner-selected processing](docs/guide.md#owner-selected-processing-on-the-
 
 A useful first result is a readable summary with links to the original video and any saved figures. Videos still awaiting processing show their current state; raw transcripts can be read before the summary is ready. Browsing only reads saved content and never starts processing.
 
-The reader refreshes on entry, when you return to its tab, or when you choose **Refresh**. It does not poll in the background. Local PostgreSQL processors wake on database notifications, with timers only for retries and expiring work or summary windows.
+The reader refreshes after sign-in, when you return to its tab, or when you choose **Refresh**. Library status and **Refresh** appear only while signed in. It does not poll in the background. Local PostgreSQL processors wake on database notifications, with timers only for retries and expiring work or summary windows.
 
 ## Keep the parts worth revisiting
 

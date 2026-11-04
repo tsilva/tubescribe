@@ -737,7 +737,9 @@ Configure these Vercel environment variables before deploying:
 Clerk is provisioned through Vercel Marketplace on the existing Hobby plan. Configure its
 production domain and the five DNS-only CNAME records shown by Clerk (frontend API,
 account portal, and email/DKIM). The vanilla JavaScript reader uses Clerk's hosted sign-in
-and user components; its pinned ClerkJS/UI versions obey the seven-day package cutoff.
+and user components, styled to match the reader. The signed-out page shows one sign-in
+card; library status and Refresh appear after authentication. Its pinned ClerkJS/UI
+versions obey the seven-day package cutoff.
 The Python backend verifies session signatures, expiry, issuer, authorized party, and
 session token type with the official Clerk SDK. Agents use the same authenticated cookie
 or a current Clerk session JWT in the Authorization header; no tokens in URLs.
