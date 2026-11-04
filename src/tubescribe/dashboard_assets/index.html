@@ -19,10 +19,10 @@
   <a class="skip-link" href="#feed">Skip to videos</a>
   <header class="app-bar">
     <a class="brand" href="/" aria-label="TubeScribe library"><img class="brand-mark" src="/brand/android-chrome-192.png" width="44" height="44" alt=""><span>TubeScribe</span></a>
-    <div class="live"><span id="worker-status">Connecting…</span><span id="updated"></span><button id="refresh" class="icon-button" aria-label="Refresh library" title="Refresh library"><img src="/icons/arrow-path.svg" alt=""></button></div>
+    <div id="library-status" class="live" hidden><span id="worker-status">Connecting…</span><span id="updated"></span><button id="refresh" class="icon-button" aria-label="Refresh library" title="Refresh library"><img src="/icons/arrow-path.svg" alt=""></button></div>
     <div id="user-button" aria-label="Your account"></div>
   </header>
-  <section id="auth-panel" class="auth-panel" aria-label="Sign in"><h1>Your private video library</h1><p id="auth-message">Connecting securely…</p><div id="sign-in"></div></section>
+  <section id="auth-panel" class="auth-panel" aria-label="Sign in"><p id="auth-message" role="status">Connecting securely…</p><div id="sign-in"></div></section>
   <main class="workspace" hidden>
     <div class="library-column">
       <header class="page-heading"><h1>Your library</h1><p id="archive-summary">Connecting to your library…</p></header>

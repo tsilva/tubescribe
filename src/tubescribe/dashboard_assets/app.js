@@ -961,10 +961,7 @@ async function libraryFetch(url, options = {}) {
   const response = await fetch(url, {...options, headers, cache: "no-store", credentials: "same-origin"});
   if (generation !== identityGeneration) throw new DOMException("Account changed", "AbortError");
   if (response.status === 401) {
-    signedInUser = null;
-    clearPrivateLibrary();
-    document.querySelector(".workspace").hidden = true;
-    $("auth-panel").hidden = false;
+    await syncIdentity({user: null, session: null});
     $("auth-message").textContent = "Your session has ended. Please sign in again.";
     throw new Error("Sign in required");
   }
@@ -978,10 +975,11 @@ async function syncIdentity({user, session}) {
   const generation = identityGeneration;
   document.querySelector(".workspace").hidden = !next;
   $("auth-panel").hidden = Boolean(next);
+  $("library-status").hidden = !next;
   if (!next) {
     window.Clerk.unmountUserButton($("user-button"));
-    $("worker-status").textContent = "Sign in to continue";
-    $("auth-message").textContent = "Sign in or create an account to read your videos.";
+    $("worker-status").textContent = "";
+    $("auth-message").textContent = "";
     window.Clerk.mountSignIn($("sign-in"), {routing: "hash", forceRedirectUrl: "/" + window.location.search});
     return;
   }
@@ -1022,6 +1020,7 @@ async function initializeAuthentication() {
     if (!authEnabled) {
       signedInUser = "local";
       $("auth-panel").hidden = true;
+      $("library-status").hidden = false;
       document.querySelector(".workspace").hidden = false;
       await refresh();
       return;
@@ -1043,7 +1042,19 @@ async function initializeAuthentication() {
         document.head.append(script);
       });
     }
-    await window.Clerk.load({ui: {ClerkUI: window.__internal_ClerkUICtor}});
+    await window.Clerk.load({
+      ui: {ClerkUI: window.__internal_ClerkUICtor},
+      localization: {signIn: {start: {title: "Sign in to TubeScribe", subtitle: "Your videos, ready to read."}}},
+      appearance: {
+        variables: {colorPrimary: "#21644e", colorForeground: "#141b29", colorMutedForeground: "#657084", fontFamily: "inherit", borderRadius: "8px"},
+        elements: {
+          rootBox: "auth-root", cardBox: "auth-card-box", card: "auth-card",
+          headerTitle: "auth-title", headerSubtitle: "auth-subtitle",
+          socialButtonsBlockButton: "auth-social", formFieldInput: "auth-input",
+          formButtonPrimary: "auth-submit", footer: "auth-footer",
+        },
+      },
+    });
     // Force initial signed-out rendering, then clear every cache on account changes.
     signedInUser = undefined;
     window.Clerk.addListener((state) => { void syncIdentity(state); });
