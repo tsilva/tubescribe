@@ -1047,10 +1047,13 @@ reconnections still transfer data.
 
 With Realtime configured, the hosted reader uses the official Neon SDK and one
 WebSocket with fixed live queries for feed metadata, channels, and safe queued-work
-options. It receives an initial result and then committed row changes. It does
+options. On entry, it loads one authenticated HTTP snapshot before starting the
+subscription, so saved channels and videos remain visible if the stream fails
+before its first result. The stream then delivers committed row changes. It does
 not periodically request `/api/feed`, resubscribe on visibility changes, or fall
 back to HTTP polling on errors. A failed stream preserves its last snapshot and
-offers manual reconnection. Summaries and documents remain on-demand reads;
+offers manual reconnection. Explicit **Refresh** also reloads the HTTP snapshot
+when the stream is unavailable. Summaries and documents remain on-demand reads;
 ordinary feed updates do not reread them. Local SQLite readers retain their
 existing on-demand HTTP path. Worker scheduling already uses PostgreSQL LISTEN
 and is separate from this browser feature.
