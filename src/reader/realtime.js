@@ -11,7 +11,7 @@ export function connect({getCapabilities, onFeed, onState, onError = () => {}, c
     if (!value || typeof value.url !== "string" || !value.queries ||
         Object.keys(value.queries).sort().join() !== "channels,feed,queue" ||
         !Object.values(value.queries).every(query => Number.isFinite(query.expiresAt) && query.expiresAt > now())) {
-      throw new Error("Invalid live query response");
+      throw Object.assign(new Error("Invalid live query response"), {code: "invalid_live_query_response"});
     }
     return value;
   }
@@ -67,20 +67,23 @@ export function connect({getCapabilities, onFeed, onState, onError = () => {}, c
       Object.keys(config.queries).every(key => states[key] === "live") ? "live" : "connecting");
   }
   async function start() {
+    let phase = "authorization";
     try {
       notify("connecting");
       const received = await getCapabilities();
       if (closed) return;
       config = validate(received);
       // One WebSocket multiplexes all queries. SDK diagnostics stay out of logs.
+      phase = "client";
       client = createClient({url: config.url, logLevel: "silent"});
       for (const [kind, query] of Object.entries(config.queries)) {
+        phase = "subscribe_" + kind;
         const subscription = client.subscribe(query);
         subscriptions.set(kind, subscription);
         subscription.onChange(snapshot => receive(kind, snapshot));
       }
       schedule();
-    } catch (error) {fail(error, "startup");}
+    } catch (error) {fail(error, phase);}
   }
   return {start, close, get status() {return phase;}, wake() {
     if (!closed && config && now() >= expires() - 10_000) return renew();

@@ -142,7 +142,7 @@ test("live failure diagnostics exclude provider messages and credentials", async
   });
   await stream.start();
   assert.equal(stream.status, "error");
-  assert.deepEqual(failures, [{phase: "startup", code: "authorization_http_503", sqlState: undefined}]);
+  assert.deepEqual(failures, [{phase: "authorization", code: "authorization_http_503", sqlState: undefined}]);
   assert.ok(!JSON.stringify(failures).includes(env.NEON_REALTIME_SECRET));
 });
 
