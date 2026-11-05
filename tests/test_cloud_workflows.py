@@ -368,7 +368,7 @@ class CloudCredentials(unittest.TestCase):
         self.assertEqual(launch(b"{}", env=environment, client=client, run=run), {"status": 200})
         client.post.assert_not_called()
         environment.pop("INFISICAL_AGENT_VAULT_SESSION_TOKEN")
-        with self.assertRaisesRegex(ValueError, "dedicated TubeScribe session"):
+        with self.assertRaisesRegex(ValueError, "session-binding"):
             launch(b"{}", env=environment, client=client, run=run)
         client.post.assert_not_called()
 

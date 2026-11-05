@@ -58,3 +58,14 @@ class CloudHTTP(unittest.TestCase):
     def test_disabled_backend_has_a_successful_noop_cron(self):
         with patch("tubescribe.workflow_dispatch.call", return_value={"configured": False}):
             self.assertEqual(self.client.get("/api/maintenance", headers=self.headers).status_code, 204)
+
+    def test_proxy_failure_returns_only_a_fixed_diagnostic_code(self):
+        from tubescribe.cloud_auth import CloudProxyError, native_failure
+
+        self.assertEqual(native_failure(b"Unknown flag with a synthetic secret value"), "flags")
+        self.assertEqual(str(CloudProxyError("synthetic-secret-not-a-diagnostic")), "unavailable")
+        with patch("tubescribe.cloud_auth.workflow_send", side_effect=CloudProxyError("client-flags")):
+            response = self.client.get("/api/maintenance?check=proxy", headers=self.headers)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.headers["X-TubeScribe-Proxy-Check"], "client-flags")
+            self.assertEqual(response.content, b"")

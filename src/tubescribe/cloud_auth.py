@@ -15,6 +15,7 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.error import HTTPError, URLError
 
 import httpx
 
@@ -22,6 +23,35 @@ INSTANCE = "https://app.infisical.com"
 BUNDLE = "local-tubescribe-openrouter"
 PROXY = "127.0.0.1:17323"
 _PROXY_LOCK = threading.Lock()
+
+
+class CloudProxyError(ValueError):
+    """A fixed diagnostic code, safe to return from authenticated transport checks."""
+
+    def __init__(self, code):
+        allowed = {
+            "proxy-binding", "proxy-executable", "cli-bootstrap", "cli-network",
+            "cli-checksum", "cli-archive", "cli-filesystem", "ca-binding",
+            "session-binding", "client-envelope",
+            *("cli-http-" + str(status) for status in (400, 401, 403, 404, 429, 500, 502, 503)),
+            *(prefix + code for prefix in ("client-", "proxy-") for code in (
+                "flags", "module", "authentication", "certificate", "connection", "unavailable")),
+        }
+        super().__init__(code if code in allowed else "unavailable")
+
+
+def native_failure(output):
+    text = output.decode(errors="replace").lower() if isinstance(output, bytes) else ""
+    for code, needles in (
+        ("flags", ("unknown flag", "flag provided but not defined")),
+        ("module", ("no module named", "modulenotfounderror")),
+        ("authentication", ("unauthorized", "invalid token", "401", "403")),
+        ("certificate", ("fingerprint", "certificate", "x509")),
+        ("connection", ("connection refused", "connection reset", "timed out")),
+    ):
+        if any(needle in text for needle in needles):
+            return code
+    return "unavailable"
 
 
 def machine_token(client, env):
@@ -59,7 +89,7 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
     if not re.fullmatch(
         r"(?i)(?:sha256:)?(?:[0-9a-f]{64}|(?:[0-9a-f]{2}:){31}[0-9a-f]{2})", fingerprint
     ):
-        raise ValueError("Configure the reviewed cloud proxy CA fingerprint")
+        raise CloudProxyError("ca-binding")
     # The service client receives only a short-lived proxy capability, a fake
     # API key and public CA. Database and proxy-administration keys stay out.
     child_env = {k: env[k] for k in (
@@ -82,7 +112,7 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
         if shared_session:
             capability = env.get("INFISICAL_AGENT_VAULT_SESSION_TOKEN")
             if not capability:
-                raise ValueError("Configure the dedicated TubeScribe session capability")
+                raise CloudProxyError("session-binding")
             child_env["INFISICAL_AGENT_VAULT_SESSION_TOKEN"] = capability
         else:
             token = machine_token(client, env)
@@ -96,6 +126,9 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
             session_id = session["id"]
             child_env["INFISICAL_AGENT_VAULT_SESSION_TOKEN"] = session["token"]
         with TemporaryDirectory(prefix="tubescribe-vault-") as temporary:
+            # Native CLI startup may create public configuration under HOME.
+            # Vercel's real home is read-only; never persist a local login there.
+            child_env["HOME"] = temporary
             command = [
                 env.get("TUBESCRIBE_INFISICAL_CLI", "infisical"), "agent-vault", "run", "--domain=" + INSTANCE,
                 "--proxy=" + PROXY, "--ca-fingerprint=" + fingerprint,
@@ -110,16 +143,19 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
             if probe:
                 command.append("--probe-client")
             result = (run or subprocess.run)(
-                command, input=payload, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                command, input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=child_env, timeout=650, check=False,
             )
             if result.returncode:
-                raise ValueError("Cloud Agent Vault transport failed")
+                raise CloudProxyError("client-" + native_failure(result.stderr))
             # Native CLI information stays on stderr; only a valid response
             # envelope can leave this launcher.
-            parsed = json.loads(result.stdout)
+            try:
+                parsed = json.loads(result.stdout)
+            except (ValueError, TypeError):
+                raise CloudProxyError("client-envelope") from None
             if not isinstance(parsed, dict) or "status" not in parsed:
-                raise ValueError("Invalid cloud proxy response")
+                raise CloudProxyError("client-envelope")
             return parsed
     finally:
         if session_id and token:
@@ -159,18 +195,35 @@ def cli_path():
 @contextmanager
 def workflow_proxy(env):
     if not env.get("INFISICAL_AGENT_VAULT_PROXY_TOKEN"):
-        raise ValueError("Configure the dedicated cloud Agent Vault proxy")
-    executable = cli_path()
+        raise CloudProxyError("proxy-binding")
+    try:
+        executable = cli_path()
+    except HTTPError as error:
+        raise CloudProxyError("cli-http-" + str(error.code)) from None
+    except URLError:
+        raise CloudProxyError("cli-network") from None
+    except ValueError:
+        raise CloudProxyError("cli-checksum") from None
+    except tarfile.TarError:
+        raise CloudProxyError("cli-archive") from None
+    except OSError:
+        raise CloudProxyError("cli-filesystem") from None
+    except Exception:
+        raise CloudProxyError("cli-bootstrap") from None
     env["TUBESCRIBE_INFISICAL_CLI"] = executable
     with TemporaryDirectory(prefix="tubescribe-cloud-proxy-") as directory:
         proxy_env = {k: env[k] for k in (
             "PATH", "HOME", "LANG", "INFISICAL_AGENT_VAULT_PROXY_TOKEN"
         ) if k in env}
-        proxy = subprocess.Popen([
-            executable, "agent-vault", "proxy", "--domain=" + INSTANCE,
-            "--port=17323", "--data-dir=" + directory,
-            "--silent", "--telemetry=false", "--log-level=error",
-        ], env=proxy_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proxy_env["HOME"] = directory
+        try:
+            proxy = subprocess.Popen([
+                executable, "agent-vault", "proxy", "--domain=" + INSTANCE,
+                "--port=17323", "--data-dir=" + directory,
+                "--silent", "--telemetry=false", "--log-level=error",
+            ], env=proxy_env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except OSError:
+            raise CloudProxyError("proxy-executable") from None
         try:
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline and proxy.poll() is None:
@@ -180,7 +233,8 @@ def workflow_proxy(env):
                 except OSError:
                     time.sleep(.1)
             else:
-                raise ValueError("Dedicated cloud proxy is unavailable")
+                output = proxy.stderr.read(65536) if proxy.poll() is not None else b""
+                raise CloudProxyError("proxy-" + native_failure(output))
             yield
         finally:
             proxy.terminate()
@@ -189,6 +243,7 @@ def workflow_proxy(env):
             except subprocess.TimeoutExpired:
                 proxy.kill()
                 proxy.wait()
+            proxy.stderr.close()
 
 
 def workflow_send(request, *, probe=False):

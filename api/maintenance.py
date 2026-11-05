@@ -20,14 +20,20 @@ class handler(BaseHTTPRequestHandler):
             return
         if parse_qs(urlsplit(self.path).query).get("check") == ["proxy"]:
             # Authenticated, no-model transport check before admitting paid work.
-            from tubescribe.cloud_auth import workflow_send
+            from tubescribe.cloud_auth import CloudProxyError, workflow_send
+            diagnostic = "ready"
             try:
                 result = workflow_send({}, probe=True)
                 healthy = result.get("status") == 200 and result.get("proxy_ready") is True
+            except CloudProxyError as error:
+                healthy = False
+                diagnostic = str(error)
             except Exception:
                 healthy = False
+                diagnostic = "configuration-or-client"
             self.send_response(204 if healthy else 503)
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-TubeScribe-Proxy-Check", diagnostic)
             self.end_headers()
             return
         from tubescribe.workflow_dispatch import call

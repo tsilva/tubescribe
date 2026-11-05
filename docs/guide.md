@@ -802,6 +802,14 @@ python -m tubescribe.workflow_admin
 
 The last command reports missing or invalid binding **names only**. It never
 fetches secrets, provisions resources, starts inference or changes billing.
+After deployment, a maintainer can check `/api/maintenance?check=proxy` using
+`CRON_SECRET` in the Authorization bearer header. This runs only the placeholder
+client through Agent Vault, without calling a model or admitting work. Status
+204 confirms transport; status 503 includes a fixed diagnostic code in
+`X-TubeScribe-Proxy-Check`, never raw CLI output or credentials. Native CLI homes
+and proxy state are temporary because the Function filesystem is read-only
+outside `/tmp`. The normal maintenance cron is a successful no-op while the
+optional backend is disabled. Never put the maintenance capability in a URL.
 Publish the reviewed Linux amd64 image through an already available registry and
 configure its digest before activation. If registry transport is unavailable,
 prepare a clean Sandbox with only the reviewed source, locked dependencies and
