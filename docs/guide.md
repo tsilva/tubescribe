@@ -847,7 +847,9 @@ It has no account-wide Read/Write grant for existing storage. Agent Vault inject
 Function client receives a placeholder, and the media Sandbox receives no API
 key. Never copy browser cookies or bypass a challenge as recovery.
 
-Each acquisition requests one MP4 at up to 720p, no Apify transcription, 4 GB RAM,
+Each new acquisition requests one MP4 with a 360p quality preference to reduce
+download size while retaining frames for visual enrichment. Existing runs and
+saved media retain their original quality. Each run uses no Apify transcription, 4 GB RAM,
 a 180-second initial run and at most two 360-second same-run resumptions. The
 $0.50 per-run guard is preserved on resume. Larger videos can exceed that guard;
 they stop with their existing run and receipts retained. Apify's existing free

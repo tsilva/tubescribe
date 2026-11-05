@@ -64,7 +64,7 @@ def perform(request, client):
             "forcePermissionLevel": "LIMITED_PERMISSIONS",
         }, json={
             "videos": [{"url": "https://www.youtube.com/watch?v=" + video}],
-            "storeInKVStore": True, "preferredFormat": "mp4", "preferredQuality": "720p",
+            "storeInKVStore": True, "preferredFormat": "mp4", "preferredQuality": "360p",
             "filenameTemplateParts": ["title"], "transcriptionAndSubtitle": "NONE",
             "tubescribeRequestId": nonce,
         })["data"])}

@@ -165,6 +165,7 @@ class MediaClient(unittest.TestCase):
             self.assertEqual(request.url.params["build"], "0.0.119")
             self.assertEqual(request.url.params["forcePermissionLevel"], "LIMITED_PERMISSIONS")
             body = json.loads(request.content)
+            self.assertEqual(body["preferredQuality"], "360p")
             self.assertEqual(body["transcriptionAndSubtitle"], "NONE")
             self.assertEqual(body["tubescribeRequestId"], "a" * 32)
             return httpx.Response(201, json={"data": run()})
