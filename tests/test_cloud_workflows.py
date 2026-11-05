@@ -359,7 +359,7 @@ class CloudCredentials(unittest.TestCase):
                        "TUBESCRIBE_VAULT_CA_FINGERPRINT": "a" * 64}
 
         def run(command, **kwargs):
-            self.assertIn("--keep-session", command)
+            self.assertNotIn("--keep-session", command)
             self.assertEqual(kwargs["env"]["INFISICAL_AGENT_VAULT_SESSION_TOKEN"],
                              "synthetic-dedicated-session")
             self.assertNotIn("INFISICAL_AGENT_VAULT_PROXY_TOKEN", kwargs["env"])
@@ -419,6 +419,7 @@ class CloudCredentials(unittest.TestCase):
                 self.assertNotIn(forbidden, child)
             self.assertNotIn("synthetic-session-token", " ".join(command))
             self.assertIn("--domain=" + INSTANCE, command)
+            self.assertNotIn("--keep-session", command)
             return Mock(returncode=0, stdout=b'{"status":200}')
 
         self.assertEqual(launch(b"{}", env=environment, client=client, run=run), {"status": 200})

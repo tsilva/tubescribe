@@ -777,8 +777,9 @@ required for model Functions. Never retrieve the real OpenRouter key into the
 application or use a human login as a cloud fallback.
 
 In explicitly configured session mode, the launcher reuses only the provisioned
-TubeScribe session and passes `--keep-session`, so one completed or failed Function
-cannot revoke access for concurrent jobs. It never signs in as a user or creates
+TubeScribe session. Native Agent Vault preserves supplied session tokens, so one
+completed or failed Function cannot revoke access for concurrent jobs. The
+launcher never signs in as a user or creates
 sessions. Provision this session through trusted administration with only the
 TubeScribe bundle. A session with no expiry supports unattended operation until
 explicit revocation; a leaked token remains usable through the proxy until revoked.

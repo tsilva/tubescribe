@@ -90,7 +90,7 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
         r"(?i)(?:sha256:)?(?:[0-9a-f]{64}|(?:[0-9a-f]{2}:){31}[0-9a-f]{2})", fingerprint
     ):
         raise CloudProxyError("ca-binding")
-    # The service client receives only a short-lived proxy capability, a fake
+    # The service client receives only its scoped proxy capability, a fake
     # API key and public CA. Database and proxy-administration keys stay out.
     child_env = {k: env[k] for k in (
         "PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "PYTHONUNBUFFERED", "TMPDIR"
@@ -136,10 +136,9 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
                 "--no-skills", "--silent", "--telemetry=false", "--log-level=error", "--",
                 sys.executable, "-m", "tubescribe.cloud_auth" if probe else "tubescribe.openrouter",
             ]
-            if shared_session:
-                # One provisioned capability serves concurrent Functions. Only
-                # trusted administration may revoke it, never a single caller.
-                command.insert(command.index("--"), "--keep-session")
+            # Both modes supply an existing session token. Native Agent Vault
+            # never revokes supplied tokens and rejects --keep-session here;
+            # OIDC sessions are explicitly revoked by our finally block.
             if probe:
                 command.append("--probe-client")
             result = (run or subprocess.run)(
