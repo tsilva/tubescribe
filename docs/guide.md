@@ -723,7 +723,9 @@ speaker anchors and publications remain in the private archive.
 1. A discovery Workflow reads followed channels' public Atom feeds every 15
    minutes and adds catalogue entries without jobs or submissions. An owner visit
    bootstraps it; a daily authenticated cron repairs a missing clock. The clock
-   rotates after 32 cycles to bound its event log. Atom feeds contain recent
+   rotates after 32 cycles to bound its event log. A new deployment replaces the
+   discovery clock so feed fixes take effect immediately; already selected
+   processing runs keep their existing ownership and saved results. Atom feeds contain recent
    uploads, so this incremental discovery does not replace historical backfill
    or guarantee recovery of a long discovery gap.
    A whole poll is one Workflow step, with at most four simultaneous feed
@@ -838,7 +840,8 @@ establish a live cutover.
 Cloud media acquisition uses `streamers/youtube-video-downloader`, actor
 `UUhJDfKJT2SsXdclR`, pinned build `0.0.119`. The dedicated Apify token grants
 Run, List runs and Manage runs only for that actor, restricted actor execution
-and default run storage access. Agent Vault injects it into API requests; the
+default run storage access, and Create storage for its temporary queues/files.
+It has no account-wide Read/Write grant for existing storage. Agent Vault injects it into API requests; the
 Function client receives a placeholder, and the media Sandbox receives no API
 key. Never copy browser cookies or bypass a challenge as recovery.
 

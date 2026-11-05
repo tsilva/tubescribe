@@ -4,12 +4,14 @@ Resolve these paths relative to the TubeScribe repository root. Read the relevan
 
 | Concern | Maintained source |
 | --- | --- |
-| Supported setup, credentials and manual admission | `docs/guide.md`, section “Owner-selected processing on the Mac” |
+| Supported setup, credentials and manual admission | `docs/guide.md`, section “Owner-selected cloud processing” |
 | Current and legacy hosted profiles | `src/tubescribe/config.py` |
 | Model, upload transport, chunk size, pricing and paid-request checkpoints | `src/tubescribe/openrouter.py` |
 | Acoustic references, matching thresholds and unresolved voices | `src/tubescribe/speaker_continuity.py` |
 | Manual admission, legacy retries and per-profile queue status | `src/tubescribe/manual_queue.py` |
-| Worker execution and stage dependencies | `src/tubescribe/worker.py`, `src/tubescribe/pipeline.py` |
+| Cloud execution, canonical ownership and discovery | `src/tubescribe/cloud_pipeline.py`, `src/tubescribe/workflows.py`, `src/tubescribe/workflow_dispatch.py`, `src/tubescribe/workflow_runtime.py` |
+| Media acquisition, preparation and recovery | `src/tubescribe/cloud_download.py`, `src/tubescribe/apify_client.py`, `src/tubescribe/cloud_sandbox.py`, `src/tubescribe/cloud_media.py` |
+| Scoped cloud proxy launchers and binding checks | `src/tubescribe/cloud_auth.py`, `src/tubescribe/workflow_admin.py` |
 | ASR validation and rendered subtitles | `src/tubescribe/asr.py`, `src/tubescribe/subtitles.py` |
 | Saved enrichment, summaries and recovery | `src/tubescribe/postprocessing_worker.py`, `src/tubescribe/artifacts.py`, `src/tubescribe/submission.py` |
 | Reader details and current processing settings | `src/tubescribe/pipeline_details.py`, `src/tubescribe/dashboard.py`, `src/tubescribe/dashboard_assets/app.js` |

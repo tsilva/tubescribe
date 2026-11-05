@@ -229,6 +229,21 @@ class CloudPipeline(unittest.TestCase):
         self.assertTrue(canonical(self.store, identifier, "run-first"))
         self.assertFalse(canonical(self.store, identifier, "run-duplicate"))
 
+    def test_new_deployment_replaces_discovery_clock_without_restarting_selected_work(self):
+        from tubescribe.workflow_dispatch import registration, running
+
+        key = "cloud/control/discovery.json"
+        self.store.blobs.put(key, b'{"run_id":"old-clock","deployment_id":"old-deployment"}')
+        with patch.dict(os.environ, {"VERCEL_DEPLOYMENT_ID": "new-deployment"}), patch(
+            "tubescribe.workflow_dispatch.workflow.Run",
+            return_value=Mock(status=AsyncMock(return_value="running")),
+        ) as lookup:
+            self.assertFalse(asyncio.run(running(self.store, key, current_deployment=True)))
+            lookup.assert_not_called()
+            self.assertTrue(asyncio.run(running(self.store, key)))
+            self.assertEqual(registration(Mock(run_id="new-clock")),
+                             {"run_id": "new-clock", "deployment_id": "new-deployment"})
+
     def test_failed_media_retries_have_separate_bounded_result_keys(self):
         start, stop = AsyncMock(), AsyncMock()
         with patch("tubescribe.cloud_sandbox.signed", return_value="synthetic-capability"), patch(

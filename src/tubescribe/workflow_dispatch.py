@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import threading
 import time
 from contextlib import contextmanager
@@ -43,13 +44,19 @@ def archive():
             store.db.close()
 
 
-async def running(store, key):
+async def running(store, key, *, current_deployment=False):
     if not store.exists(key):
         return False
     saved = json.loads(store.read_key(key))
+    if current_deployment and saved.get("deployment_id") != os.environ.get("VERCEL_DEPLOYMENT_ID"):
+        return False
     # Unknown availability is an error, never proof that a run can be duplicated.
     state = await workflow.Run(saved["run_id"]).status()
     return state in {"pending", "running"}
+
+
+def registration(run):
+    return {"run_id": run.run_id, "deployment_id": os.environ.get("VERCEL_DEPLOYMENT_ID")}
 
 
 async def rotate_clock(expected_run_id):
@@ -62,7 +69,7 @@ async def rotate_clock(expected_run_id):
             if previous["run_id"] != expected_run_id:
                 return previous
         run = await workflow.start(discovery_clock)
-        store.blobs.put(key, json.dumps({"run_id": run.run_id}).encode())
+        store.blobs.put(key, json.dumps(registration(run)).encode())
         return {"run_id": run.run_id}
 
 
@@ -76,9 +83,9 @@ async def maintain(*, clock=True):
         if clock:
             with lease(store.root, "cloud-discovery-dispatch"):
                 key = "cloud/control/discovery.json"
-                if not await running(store, key):
+                if not await running(store, key, current_deployment=True):
                     run = await workflow.start(discovery_clock)
-                    store.blobs.put(key, json.dumps({"run_id": run.run_id}).encode())
+                    store.blobs.put(key, json.dumps(registration(run)).encode())
         rows = store.db.execute(
             "SELECT id FROM submissions WHERE state IN ('queued','active') AND "
             + lane_filter(True) + " ORDER BY created LIMIT 10",
@@ -91,7 +98,7 @@ async def maintain(*, clock=True):
                     if await running(store, key):
                         continue
                     run = await workflow.start(process_selection, identifier)
-                    store.blobs.put(key, json.dumps({"run_id": run.run_id}).encode())
+                    store.blobs.put(key, json.dumps(registration(run)).encode())
                     started += 1
             except ClaimBusy:
                 continue
@@ -108,9 +115,9 @@ async def signal():
             ("cloud/control/dispatcher.json", "cloud-queue-dispatch", dispatch_queue),
         ):
             with lease(store.root, resource):
-                if not await running(store, key):
+                if not await running(store, key, current_deployment=operation is discovery_clock):
                     run = await workflow.start(operation)
-                    store.blobs.put(key, json.dumps({"run_id": run.run_id}).encode())
+                    store.blobs.put(key, json.dumps(registration(run)).encode())
     return {"configured": True, "notified": True}
 
 
