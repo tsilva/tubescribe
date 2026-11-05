@@ -334,6 +334,22 @@ class BoundedAgent(unittest.TestCase):
 
 
 class CloudCredentials(unittest.TestCase):
+    def test_clean_snapshot_source_has_an_explicit_python_and_no_credentials(self):
+        from tubescribe.cloud_sandbox import start_box
+        missing = RuntimeError("Synthetic absence")
+        missing.status_code = 404
+        box = Mock(create_process=AsyncMock(return_value=Mock(
+            stdin=Mock(send=AsyncMock(), aclose=AsyncMock()))), stop=AsyncMock())
+        with patch.dict(os.environ, {"TUBESCRIBE_MEDIA_SNAPSHOT": "snap_synthetic",
+                                    "TUBESCRIBE_MEDIA_IMAGE": ""}), patch(
+            "vercel.sandbox.get_sandbox", AsyncMock(side_effect=missing)
+        ), patch("vercel.sandbox.create_sandbox", AsyncMock(return_value=box)) as create:
+            asyncio.run(start_box("synthetic-media", {"operation": "prepare"}))
+        self.assertEqual(create.call_args.kwargs["source"].snapshot_id, "snap_synthetic")
+        self.assertNotIn("env", create.call_args.kwargs)
+        self.assertFalse(create.call_args.kwargs["persistent"])
+        self.assertEqual(box.create_process.call_args.args[0], "/app/.venv/bin/python")
+
     def test_explicit_session_mode_preserves_the_shared_capability_and_never_logs_in(self):
         from tubescribe.cloud_auth import launch
         client = Mock()

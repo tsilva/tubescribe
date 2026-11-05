@@ -6,7 +6,7 @@ import re
 
 REQUIRED = (
     "TUBESCRIBE_DATABASE_URL", "TUBESCRIBE_S3_BUCKET", "TUBESCRIBE_S3_ENDPOINT",
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "TUBESCRIBE_MEDIA_IMAGE",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
     "INFISICAL_AGENT_VAULT_PROXY_TOKEN",
     "TUBESCRIBE_VAULT_CA_FINGERPRINT", "CRON_SECRET",
 )
@@ -22,6 +22,11 @@ def check(env=None):
         missing.append(credential)
     if mode not in {"oidc", "session"}:
         invalid.append("TUBESCRIBE_VAULT_AUTH")
+    image, snapshot = env.get("TUBESCRIBE_MEDIA_IMAGE"), env.get("TUBESCRIBE_MEDIA_SNAPSHOT")
+    if bool(image) == bool(snapshot):
+        invalid.append("TUBESCRIBE_MEDIA_IMAGE/TUBESCRIBE_MEDIA_SNAPSHOT")
+    if snapshot and not re.fullmatch(r"snap_[a-zA-Z0-9]+", snapshot):
+        invalid.append("TUBESCRIBE_MEDIA_SNAPSHOT")
     for key, expected in (("TUBESCRIBE_MANUAL_QUEUE", "1"), ("TUBESCRIBE_DISPATCH", "queue"),
                           ("TUBESCRIBE_MIGRATIONS", "check")):
         if env.get(key) != expected:

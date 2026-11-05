@@ -758,7 +758,7 @@ credential flow, preserving separate values for other environments:
 | --- | --- |
 | Existing direct PostgreSQL, private S3/R2 and Clerk bindings | Same owned library and archive, without new storage subscriptions. |
 | `TUBESCRIBE_MANUAL_QUEUE=1`, `TUBESCRIBE_DISPATCH=queue`, `TUBESCRIBE_MIGRATIONS=check` | Manual admission and existing schema checks. |
-| `TUBESCRIBE_MEDIA_IMAGE` | Immutable `registry/image@sha256:...` built from the reviewed `cloud-media` Docker target. |
+| `TUBESCRIBE_MEDIA_IMAGE` or `TUBESCRIBE_MEDIA_SNAPSHOT` | Exactly one immutable media runtime: a reviewed `registry/image@sha256:...` from the `cloud-media` Docker target, or a clean Sandbox snapshot with the same locked application, Python and FFmpeg tools. |
 | `TUBESCRIBE_INFISICAL_IDENTITY_ID` | Dedicated machine identity with Vercel Production OIDC trust and access only to the TubeScribe OpenRouter bundle. |
 | `TUBESCRIBE_VAULT_AUTH=session`, `INFISICAL_AGENT_VAULT_SESSION_TOKEN` | Explicit alternative when a machine identity is unavailable: a separately provisioned session restricted to the TubeScribe bundle, saved as a Production write-only secret. No automatic OIDC-to-session fallback. |
 | `INFISICAL_AGENT_VAULT_PROXY_TOKEN` | Dedicated cloud proxy bootstrap capability, provisioned as a write-only secret. Preserve the Mac proxy configuration. |
@@ -803,7 +803,12 @@ python -m tubescribe.workflow_admin
 The last command reports missing or invalid binding **names only**. It never
 fetches secrets, provisions resources, starts inference or changes billing.
 Publish the reviewed Linux amd64 image through an already available registry and
-configure its digest before activation. If a required product is unavailable on
+configure its digest before activation. If registry transport is unavailable,
+prepare a clean Sandbox with only the reviewed source, locked dependencies and
+media tools, verify it, then snapshot it with no expiration and configure the
+immutable snapshot ID instead. Never snapshot a processing session, signed object
+capabilities, credentials or downloaded user media. Jobs cloned from the clean
+snapshot remain nonpersistent and stop after media preparation. If a required product is unavailable on
 the existing plan, leave that part blocked; subscription and payment actions
 remain entirely with the account owner.
 

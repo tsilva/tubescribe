@@ -186,7 +186,7 @@ def workflow_proxy(env):
                 proxy.wait()
 
 
-def workflow_send(request):
+def workflow_send(request, *, probe=False):
     """Native Agent Vault inside a bounded Function; never inside a media VM."""
     from vercel.headers import get_headers
 
@@ -200,7 +200,7 @@ def workflow_send(request):
     payload = json.dumps(request).encode()
     # Concurrent requests in the same Function instance cannot share a proxy port.
     with _PROXY_LOCK, workflow_proxy(env):
-        return launch(payload, env=env)
+        return launch(payload, env=env, probe=probe)
 
 
 def main():

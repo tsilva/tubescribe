@@ -29,8 +29,13 @@ async def start_box(name, request):
     from vercel import sandbox
 
     image = os.environ.get("TUBESCRIBE_MEDIA_IMAGE", "")
-    if not re.fullmatch(r"[a-zA-Z0-9./_-]+@sha256:[a-f0-9]{64}", image):
+    snapshot = os.environ.get("TUBESCRIBE_MEDIA_SNAPSHOT", "")
+    if bool(image) == bool(snapshot):
+        raise ValueError("Configure exactly one reviewed media image or clean snapshot")
+    if image and not re.fullmatch(r"[a-zA-Z0-9./_-]+@sha256:[a-f0-9]{64}", image):
         raise ValueError("Configure an immutable reviewed TubeScribe media image")
+    if snapshot and not re.fullmatch(r"snap_[a-zA-Z0-9]+", snapshot):
+        raise ValueError("Configure an immutable clean media snapshot")
     # Named creation permits recovery after losing the create acknowledgement.
     try:
         box = await sandbox.get_sandbox(name=name)
@@ -38,12 +43,13 @@ async def start_box(name, request):
         if getattr(error, "status_code", getattr(error, "status", None)) != 404:
             raise
         box = await sandbox.create_sandbox(
-            name=name, image=image, persistent=False, execution_time_limit=1800,
+            name=name, **({"source": sandbox.SnapshotSource(snapshot_id=snapshot)} if snapshot else {"image": image}),
+            persistent=False, execution_time_limit=1800,
             region="fra1", resources=sandbox.SandboxResources(vcpus=1),
         )
     try:
         process = await box.create_process(
-            "python", ["-m", "tubescribe.cloud_media"], cwd="/app",
+            "/app/.venv/bin/python" if snapshot else "python", ["-m", "tubescribe.cloud_media"], cwd="/app",
             stdin=subprocess.PIPE,
             kill_after=1740, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )

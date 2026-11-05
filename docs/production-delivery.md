@@ -33,7 +33,7 @@ Vercel Production domain assignment and required integration checks, including C
 
 The optional [Workflow backend](guide.md#owner-selected-cloud-processing) preserves
 this delivery contract. Its dedicated cloud Agent Vault bindings, maintenance
-capability and immutable media image are separately provisioned Production
+capability and immutable media image or clean snapshot are separately provisioned Production
 configuration; the shared allowlist does not currently synchronize them. Keep
 `TUBESCRIBE_PROCESSING_BACKEND` unset until those bindings and the cloud smoke test
 pass. Deployment code never activates subscriptions or changes billing. A cloud
