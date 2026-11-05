@@ -23,7 +23,7 @@ from tubescribe.config import OPENROUTER_PROFILE
 from tubescribe.manual_queue import change
 from tubescribe.openrouter_agent import OpenRouterAgentRunner
 from tubescribe.storage import Store
-from tubescribe.workflow_runtime import canonical, discover
+from tubescribe.workflow_runtime import canonical, discover, feed_channel
 
 CHANNEL = "UCabcdefghijklmnopqrstuv"
 VIDEO = "abcdefghijk"
@@ -89,6 +89,24 @@ class CloudPipeline(unittest.TestCase):
         advance(self.store, identifier, send=send, media_prepare=prepare)
         prepare.assert_not_called()
         send.assert_not_called()
+
+    def test_feed_channel_accepts_current_unprefixed_ids_without_weakening_identity(self):
+        self.assertEqual(feed_channel(CHANNEL), CHANNEL)
+        self.assertEqual(feed_channel(CHANNEL[2:]), CHANNEL)
+        self.assertIsNone(feed_channel("not-a-channel"))
+        self.assertIsNone(feed_channel(None))
+        xml = f'''<feed xmlns="http://www.w3.org/2005/Atom"
+          xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+          <yt:channelId>{CHANNEL[2:]}</yt:channelId><entry>
+          <yt:channelId>{CHANNEL[2:]}</yt:channelId><yt:videoId>lmnopqrstuv</yt:videoId>
+          <title>Current feed</title></entry></feed>'''
+        response = httpx.Response(200, content=xml, request=httpx.Request("GET", "https://example.test"))
+        self.assertEqual(discover(self.store, CHANNEL, request=lambda *a, **k: response), {"discovered": 1})
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+        xml = xml.replace(CHANNEL[2:], "z" * 22)
+        response = httpx.Response(200, content=xml, request=httpx.Request("GET", "https://example.test"))
+        with self.assertRaises(ValueError):
+            discover(self.store, CHANNEL, request=lambda *a, **k: response)
 
     def test_each_step_transcribes_one_chunk_and_retains_speaker_references(self):
         identifier, job = self.select()

@@ -55,7 +55,7 @@ test("unprocessed videos have an accessible Pipeline tab and no document links",
   assert.equal(f.nodes().find(n => n.attributes.role === "tabpanel").attributes["aria-labelledby"], "reader-tab-pipeline");
   assert.equal(f.nodes().some(n => n.className === "reader-document-actions"), false);
   assert.ok(f.nodes().some(n => n.textContent === "$0.0020"));
-  assert.ok(f.nodes().some(n => n.textContent === "Model cost · partial"));
+  assert.ok(f.nodes().some(n => n.textContent === "Processing cost · partial"));
   assert.ok(f.nodes().some(n => n.textContent === "Identifies speakers as part of transcription."));
   assert.ok(f.nodes().some(n => n.textContent === "Waiting"));
   assert.equal(f.nodes().some(n => n.className === "pipeline-cost-note"), false);

@@ -821,7 +821,7 @@ function renderPipeline(content, data, status) {
   view.progress.value = completed;
   view.progress.setAttribute("aria-valuetext", (data.complete ? "Pipeline complete. " : status.label + ". ") + progressText);
   const stats = [
-    [data.cost_complete ? "Model cost" : data.complete ? "Model cost · partial" : "Model cost so far", money(data.cost_usd)],
+    [data.cost_complete ? "Processing cost" : data.complete ? "Processing cost · partial" : "Processing cost so far", money(data.cost_usd)],
     ["Processing time", elapsed(data.processing_seconds)],
     ["Video duration", data.duration_seconds == null ? "Unknown" : duration(data.duration_seconds)],
     ["Recorded tokens", count(data.total_tokens)],

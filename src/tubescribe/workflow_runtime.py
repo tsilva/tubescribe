@@ -17,6 +17,14 @@ ATOM = "{http://www.w3.org/2005/Atom}"
 YT = "{http://www.youtube.com/xml/schemas/2015}"
 
 
+def feed_channel(value):
+    # Current YouTube Atom feeds omit the UC prefix in yt:channelId, while
+    # catalogue/channel URLs use the canonical UC-prefixed identifier.
+    value = value or ""
+    canonical = value if CHANNEL.fullmatch(value) else "UC" + value
+    return canonical if CHANNEL.fullmatch(canonical) else None
+
+
 def enabled(env=None):
     env = os.environ if env is None else env
     return env.get("TUBESCRIBE_PROCESSING_BACKEND") == "workflow"
@@ -49,12 +57,12 @@ def discover(store, channel_id, *, request=None):
             if len(response.content) > 1024 * 1024:
                 raise ValueError("Channel feed exceeds the bounded size")
             feed = ET.fromstring(response.content)
-            if feed.findtext(YT + "channelId") != channel_id:
+            if feed_channel(feed.findtext(YT + "channelId")) != channel_id:
                 raise ValueError("Channel feed identity mismatch")
             videos = []
             for entry in feed.findall(ATOM + "entry"):
                 video_id = entry.findtext(YT + "videoId") or ""
-                if not ID.fullmatch(video_id) or entry.findtext(YT + "channelId") != channel_id:
+                if not ID.fullmatch(video_id) or feed_channel(entry.findtext(YT + "channelId")) != channel_id:
                     raise ValueError("Feed entry identity mismatch")
                 if store.db.execute("SELECT 1 FROM videos WHERE id=?", (video_id,)).fetchone():
                     continue
