@@ -29,14 +29,17 @@ class CloudMedia(unittest.TestCase):
         ], capture_output=True, check=True, timeout=30)
 
     def test_preparation_uploads_pcm_parts_and_video_without_model_transport(self):
-        metadata = {"channel_id": "synthetic-channel", "title": "Synthetic video"}
+        def fetch(url, path):
+            shutil.copyfile(self.source, path)
+
         captured = {}
-        with patch("tubescribe.youtube.download", return_value=(self.source, metadata)), patch(
-            "tubescribe.youtube.download_video", return_value=(self.source, metadata)
-        ), patch("tubescribe.cloud_media.upload", side_effect=lambda url, data: captured.update({url: data})), patch(
+        with patch("tubescribe.cloud_media.fetch_file", side_effect=fetch), patch(
+            "tubescribe.cloud_media.upload", side_effect=lambda url, data: captured.update({url: data})
+        ), patch(
             "tubescribe.cloud_media.upload_file", side_effect=lambda url, path: captured.update({url: path.read_bytes()})
         ):
             result = prepare({"video_id": "synthetic-video", "channel_id": "synthetic-channel",
+                              "source": "https://api.apify.com/v2/key-value-stores/abcdefghijklmnopq/records/video.mp4",
                               "parts": ["part-output"], "video": "video-output"}, self.root)
         self.assertAlmostEqual(result["duration"], 2, delta=.1)
         self.assertEqual(result["parts"][0]["sha256"], hashlib.sha256(captured["part-output"]).hexdigest())

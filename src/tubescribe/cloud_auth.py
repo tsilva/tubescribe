@@ -82,8 +82,14 @@ def machine_token(client, env):
     return token
 
 
-def launch(payload, *, probe=False, env=None, client=None, run=None):
+def launch(payload, *, probe=False, service="openrouter", env=None, client=None, run=None):
     env = dict(os.environ if env is None else env)
+    if service not in {"openrouter", "apify"}:
+        raise CloudProxyError("client-envelope")
+    if service == "apify":
+        # Separate capability: the media client cannot use the model bundle.
+        env["INFISICAL_AGENT_VAULT_SESSION_TOKEN"] = env.get("TUBESCRIBE_APIFY_VAULT_SESSION_TOKEN", "")
+        env["TUBESCRIBE_VAULT_AUTH"] = "session"
     shared_session = env.get("TUBESCRIBE_VAULT_AUTH", "oidc") == "session"
     fingerprint = env.get("TUBESCRIBE_VAULT_CA_FINGERPRINT", "")
     if not re.fullmatch(
@@ -103,6 +109,11 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
     from .openrouter import PLACEHOLDER
 
     child_env["OPENROUTER_API_KEY"] = PLACEHOLDER
+    if service == "apify":
+        from .apify_client import PLACEHOLDER as APIFY_PLACEHOLDER
+
+        child_env.pop("OPENROUTER_API_KEY")
+        child_env["APIFY_TOKEN"] = APIFY_PLACEHOLDER
     if env.get("TUBESCRIBE_OPENROUTER_TIMEOUT"):
         child_env["TUBESCRIBE_OPENROUTER_TIMEOUT"] = "210"
     owned = client is None
@@ -134,7 +145,8 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
                 "--proxy=" + PROXY, "--ca-fingerprint=" + fingerprint,
                 "--ca-file=" + str(Path(temporary) / "ca.pem"),
                 "--no-skills", "--silent", "--telemetry=false", "--log-level=error", "--",
-                sys.executable, "-m", "tubescribe.cloud_auth" if probe else "tubescribe.openrouter",
+                sys.executable, "-m", "tubescribe.cloud_auth" if probe else
+                "tubescribe.apify_client" if service == "apify" else "tubescribe.openrouter",
             ]
             # Both modes supply an existing session token. Native Agent Vault
             # never revokes supplied tokens and rejects --keep-session here;
@@ -245,13 +257,13 @@ def workflow_proxy(env):
             proxy.stderr.close()
 
 
-def workflow_send(request, *, probe=False):
+def workflow_send(request, *, probe=False, service="openrouter"):
     """Native Agent Vault inside a bounded Function; never inside a media VM."""
     from vercel.headers import get_headers
 
     env = dict(os.environ)
     token = (get_headers() or {}).get("x-vercel-oidc-token") or env.get("VERCEL_OIDC_TOKEN")
-    if env.get("TUBESCRIBE_VAULT_AUTH", "oidc") != "session" and not token and not env.get("VERCEL_OIDC_TOKEN_FILE"):
+    if service != "apify" and env.get("TUBESCRIBE_VAULT_AUTH", "oidc") != "session" and not token and not env.get("VERCEL_OIDC_TOKEN_FILE"):
         raise ValueError("Fresh workload identity is required; local credential fallback is disabled")
     if token:
         env["VERCEL_OIDC_TOKEN"] = token
@@ -259,7 +271,7 @@ def workflow_send(request, *, probe=False):
     payload = json.dumps(request).encode()
     # Concurrent requests in the same Function instance cannot share a proxy port.
     with _PROXY_LOCK, workflow_proxy(env):
-        return launch(payload, env=env, probe=probe)
+        return launch(payload, env=env, probe=probe, service=service)
 
 
 def main():

@@ -731,9 +731,14 @@ speaker anchors and publications remain in the private archive.
    Each poll checks at most 32 channels, oldest checks first. Larger libraries
    rotate across polls. Dispatch keeps at most ten selected runs in flight and
    fills a freed slot when a run completes.
-2. A media-only Sandbox downloads the selected audio and modest video stream,
-   creates mono 16 kHz PCM chunks, and uploads them through expiring,
-   object-specific S3 capabilities. The starting Function returns immediately.
+2. A separate Agent Vault capability starts the pinned Apify media downloader
+   for the selected video. Its asynchronous run ID and reported usage are saved
+   before advancing. Workflow sleeps between polls, resumes the same timed-out
+   run at most twice, and reuses a completed stored file. A lost submission
+   acknowledgement is reconciled against the saved input nonce; it never causes
+   a blind second download. The media-only Sandbox fetches that Apify-hosted
+   combined MP4, fully decodes both streams, creates mono 16 kHz PCM chunks and
+   saves the video and chunks through expiring, object-specific S3 capabilities. The starting Function returns immediately.
    Workflow sleeps between completion checks and stops the Sandbox before model
    processing. Media failures have three safe attempts, each bounded by a
    30-minute Sandbox session. Videos are limited to four hours.
@@ -764,6 +769,7 @@ credential flow, preserving separate values for other environments:
 | `INFISICAL_AGENT_VAULT_PROXY_TOKEN` | Dedicated cloud proxy bootstrap capability, provisioned as a write-only secret. Preserve the Mac proxy configuration. |
 | `TUBESCRIBE_VAULT_CA_FINGERPRINT` | Reviewed public CA pin for that cloud proxy. |
 | `CRON_SECRET` | Dedicated maintenance-trigger capability of at least 32 characters. |
+| `TUBESCRIBE_APIFY_VAULT_SESSION_TOKEN` | Separate TubeScribe media-only Agent Vault session; it cannot access the OpenRouter bundle. |
 | `TUBESCRIBE_PROCESSING_BACKEND=workflow` | Activation switch for the verified cutover. |
 
 The cloud identity uses `https://app.infisical.com` and the reviewed
@@ -829,10 +835,25 @@ Production delivery gates. Stop the Mac discovery service only after cloud
 discovery is verified. Synthetic tests and a READY reader build alone do not
 establish a live cutover.
 
-YouTube can require an authentication or bot check from cloud networks. This is
-a media-ingress blocker even when the same downloader works on local hardware.
-Do not activate the cloud backend until its media access is verified. Never copy
-browser cookies or bypass a challenge as an automatic recovery action.
+Cloud media acquisition uses `streamers/youtube-video-downloader`, actor
+`UUhJDfKJT2SsXdclR`, pinned build `0.0.119`. The dedicated Apify token grants
+Run, List runs and Manage runs only for that actor, restricted actor execution
+and default run storage access. Agent Vault injects it into API requests; the
+Function client receives a placeholder, and the media Sandbox receives no API
+key. Never copy browser cookies or bypass a challenge as recovery.
+
+Each acquisition requests one MP4 at up to 720p, no Apify transcription, 4 GB RAM,
+a 180-second initial run and at most two 360-second same-run resumptions. The
+$0.50 per-run guard is preserved on resume. Larger videos can exceed that guard;
+they stop with their existing run and receipts retained. Apify's existing free
+credit, storage retention, concurrency and transfer allowances apply. Exhaustion
+never triggers a plan change or paid fallback. No continuous worker is needed:
+Workflows sleep while Apify or a temporary media Sandbox runs. A stored file is
+copied into the private archive during preparation rather than relying on its
+short provider retention. Only `downloadedFileUrl` on Apify's stored-file host is
+accepted; raw IP-bound YouTube stream URLs are rejected. Pipeline totals include
+Apify's cumulative reported run usage once, including resumed runs, separately
+from OpenRouter model receipts.
 
 ### Owner-selected processing on the Mac
 

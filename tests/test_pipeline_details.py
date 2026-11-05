@@ -102,6 +102,20 @@ class PipelineDetails(unittest.TestCase):
         self.assertEqual(details(self.root, "video")["cost_usd"], 0.03)
         self.assertEqual(details(self.root, "video")["steps"][1]["attempts"], 2)
 
+    def test_hosted_media_cost_tracks_cumulative_run_usage_once(self):
+        from tubescribe.cloud_download import download_metrics
+
+        job = self.job()
+        state = {"nonce": "selected-request", "run": {"id": "media-run", "usageTotalUsd": 0}}
+        self.attempt(job, "download", download_metrics(state), "pending")
+        state["run"]["usageTotalUsd"] = .372
+        self.attempt(job, "download", download_metrics(state))
+        self.attempt(job, "download", download_metrics(state))
+        result = details(self.root, "video")
+        self.assertEqual(result["steps"][0]["cost_usd"], .372)
+        self.assertEqual(result["steps"][0]["cost_source"], "provider_reported")
+        self.assertEqual(result["cost_usd"], .372)
+
     def test_failures_interruptions_and_retry_are_presented_without_raw_errors(self):
         job_id = self.job("turbo-v1")
         with self.store.db:

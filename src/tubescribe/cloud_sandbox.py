@@ -116,12 +116,16 @@ def prepare(store, job, submission):
     manifest_key = prefix + "/manifest.json"
     if store.exists(manifest_key):
         return json.loads(store.read_key(manifest_key))
+    from .cloud_download import acquisition
+
+    media = acquisition(store, job)
     key = f"cloud/media/{submission}/prepare"
     parts = [prefix + f"/{i:06d}.pcm" for i in range(MAX_SECONDS // CHUNK_SECONDS)]
     result = media_job(store, key, lambda: {
         "operation": "prepare", "video_id": job["video_id"], "channel_id": job["channel_id"],
+        "source": media["file"], "title": job.get("title"),
         "parts": [signed(store, "put_object", part) for part in parts],
-        "video": signed(store, "put_object", prefix + "/video.webm"),
+        "video": signed(store, "put_object", prefix + "/video.mp4"),
     })
     if result.get("video_id") != job["video_id"] or result.get("channel_id") != job["channel_id"]:
         raise ValueError("Prepared media differs from the selected video")
@@ -129,7 +133,7 @@ def prepare(store, job, submission):
     if expected and abs(duration - expected) > max(5, expected * .01):
         raise ValueError("Decoded audio duration differs from video metadata")
     result["parts"] = [{**part, "key": parts[i]} for i, part in enumerate(result["parts"])]
-    result["video_key"] = prefix + "/video.webm"
+    result["video_key"] = prefix + "/video.mp4"
     store.blobs.put(manifest_key, json.dumps(result).encode())
     return result
 

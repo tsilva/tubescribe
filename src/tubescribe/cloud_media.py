@@ -18,6 +18,7 @@ from .speaker_continuity import RATE
 
 MAX_SECONDS = 4 * 60 * 60
 MAX_TOOL_BYTES = 64 * 1024 * 1024
+MAX_MEDIA_BYTES = 1024 * 1024 * 1024
 
 
 def upload(url, content):
@@ -35,19 +36,24 @@ def fetch_file(url, path):
     with httpx.stream("GET", url, timeout=180, trust_env=False) as response:
         response.raise_for_status()
         with path.open("wb") as output:
+            size = 0
             for block in response.iter_bytes():
+                size += len(block)
+                if size > MAX_MEDIA_BYTES:
+                    raise ValueError("Media exceeds the transfer bound")
                 output.write(block)
 
 
 def prepare(request, root):
-    from .youtube import download, download_video
+    from .apify_client import stored_file
 
-    audio, metadata = download(root, request["video_id"])
-    if metadata.get("channel_id") != request["channel_id"]:
-        raise ValueError("Downloaded video channel differs from the selection")
+    video = root / "source.mp4"
+    fetch_file(stored_file(request["source"]), video)
+    # One stored muxed file gives audio and frames the same timeline. No
+    # YouTube cookies, source-stream URLs or service token enter the Sandbox.
     decoded = root / "source.wav"
     subprocess.run([
-        "ffmpeg", "-nostdin", "-v", "error", "-i", str(audio), "-map", "0:a:0",
+        "ffmpeg", "-nostdin", "-xerror", "-v", "error", "-i", str(video), "-map", "0:a:0",
         "-ac", "1", "-ar", str(RATE), "-c:a", "pcm_s16le", str(decoded),
     ], check=True, capture_output=True, timeout=600)
     parts = []
@@ -60,13 +66,14 @@ def prepare(request, root):
             upload(request["parts"][index], pcm)
             parts.append({"sha256": hashlib.sha256(pcm).hexdigest(),
                           "seconds": len(pcm) / (RATE * 2)})
-    video, video_metadata = download_video(root, request["video_id"])
-    if video_metadata.get("channel_id") != request["channel_id"]:
-        raise ValueError("Visual source channel differs from the selection")
+    subprocess.run([
+        "ffmpeg", "-nostdin", "-xerror", "-v", "error", "-i", str(video), "-map", "0:v:0",
+        "-f", "null", "-",
+    ], check=True, capture_output=True, timeout=600)
     from .blobs import file_digest
 
     upload_file(request["video"], video)
-    return {"duration": duration, "parts": parts, "video_sha256": file_digest(video), "title": metadata.get("title"),
+    return {"duration": duration, "parts": parts, "video_sha256": file_digest(video), "title": request.get("title"),
         "video_id": request["video_id"], "channel_id": request["channel_id"]}
 
 

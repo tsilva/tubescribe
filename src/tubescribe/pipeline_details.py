@@ -51,7 +51,9 @@ def billing_totals(values):
                 legacy.append({})
                 continue
             previous = requests.get(item["request_key"])
-            if previous is None or number(previous.get("cost_usd")) is None:
+            if (previous is None or number(previous.get("cost_usd")) is None
+                    or (item.get("provider") == "apify" and
+                        item.get("observed_at", 0) > previous.get("observed_at", 0))):
                 requests[item["request_key"]] = item
     generations = {}
     for item in requests.values():
@@ -232,7 +234,10 @@ def details(root, video_id, profile=None):
                 seen[billing_key] = len(values)
             values.append(value)
         costs, tokens = billing_totals(values)
-        not_billable = key == "download" or integrated
+        # Hosted media retrieval has a provider receipt; legacy local download
+        # attempts remain unbilled. A missing hosted receipt is never zero.
+        hosted_download = key == "download" and any(v.get("hosted_media") for v in values)
+        not_billable = (key == "download" and not hosted_download) or integrated
         if not_billable:
             costs = [0]
         recorded = [cost for cost in costs if cost is not None]
