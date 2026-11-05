@@ -128,6 +128,63 @@ class DownloadRecovery(unittest.TestCase):
         finally:
             CURRENT_SUBMISSION.reset(token)
 
+    def test_manual_retry_replaces_empty_success_only_when_confirmed_free(self):
+        import time
+
+        from tubescribe.execution import CURRENT_SUBMISSION
+
+        old = {"nonce": "a" * 32, "created": time.time() - 60,
+               "phase": "running", "run": run("SUCCEEDED")}
+        token = CURRENT_SUBMISSION.set("new-manual-selection")
+        self.addCleanup(CURRENT_SUBMISSION.reset, token)
+        with patch.object(self.store, "submission", return_value={"created": time.time() - 30}):
+            cases = [
+                (run("SUCCEEDED"), None, True),
+                (run("SUCCEEDED"), FILE, False),
+                (run("SUCCEEDED", cost=.1), None, False),
+                (run("SUCCEEDED", cost=None), None, False),
+                ({**run("SUCCEEDED"), "eventUsage": {"download": {"eventTotalUsd": .1}}}, None, False),
+                ({**run("SUCCEEDED"), "eventUsage": {"download": {"eventTotalUsd": None}}}, None, False),
+            ]
+            for provider_run, file, replace in cases:
+                with self.subTest(cost=provider_run.get("usageTotalUsd"), file=file,
+                                  events=provider_run.get("eventUsage")):
+                    self.store.blobs.put(self.key, json.dumps(old).encode())
+                    send = Mock(side_effect=[{"status": 200, "run": provider_run},
+                                             {"status": 200, "file": file}])
+                    if replace:
+                        self.pending(send)
+                        state = json.loads(self.store.read_key(self.key))
+                        self.assertEqual(state["phase"], "ready")
+                        self.assertEqual(state["previous_run"], RUN)
+                        self.assertTrue(self.store.exists(self.key.removesuffix(".json") + "/" + old["nonce"] + ".json"))
+                    elif file:
+                        self.assertEqual(acquire(self.store, self.job, send=send)["file"], FILE)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "no complete stored video"):
+                            acquire(self.store, self.job, send=send)
+                        self.assertEqual(json.loads(self.store.read_key(self.key))["nonce"], old["nonce"])
+                    self.assertEqual([c.args[0]["operation"] for c in send.call_args_list], ["status", "output"])
+
+    def test_empty_success_without_new_owner_selection_never_starts_another_run(self):
+        import time
+
+        from tubescribe.execution import CURRENT_SUBMISSION
+
+        created = time.time()
+        old = {"nonce": "a" * 32, "created": created, "phase": "running", "run": run("SUCCEEDED")}
+        token = CURRENT_SUBMISSION.set("original-selection")
+        self.addCleanup(CURRENT_SUBMISSION.reset, token)
+        for selection in [None, {"created": created - 1}]:
+            with self.subTest(selection=selection), patch.object(self.store, "submission", return_value=selection):
+                self.store.blobs.put(self.key, json.dumps(old).encode())
+                send = Mock(side_effect=[{"status": 200, "run": run("SUCCEEDED")},
+                                         {"status": 200, "file": None}])
+                with self.assertRaisesRegex(ValueError, "no complete stored video"):
+                    acquire(self.store, self.job, send=send)
+                self.assertEqual(json.loads(self.store.read_key(self.key))["phase"], "running")
+                self.assertEqual([c.args[0]["operation"] for c in send.call_args_list], ["status", "output"])
+
     def test_finalization_refreshes_delayed_usage_without_repeating_download(self):
         from datetime import UTC, datetime, timedelta
 

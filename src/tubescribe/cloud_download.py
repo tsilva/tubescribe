@@ -88,21 +88,6 @@ def acquire(store, job, *, send=None, settle=False):
     state["run"] = run
     save()
     status = run["status"]
-    if status == "FAILED" and amount(run.get("usageTotalUsd")) == 0:
-        from .execution import CURRENT_SUBMISSION
-
-        selected = CURRENT_SUBMISSION.get()
-        selection = store.submission(selected) if selected else None
-        # A fresh owner Retry after a confirmed zero-cost failure may create a
-        # new run with repaired permissions. Same-submission retries never do.
-        # Re-read the provider status above: a stale failed checkpoint is not
-        # permission to duplicate a run an operator has since resumed.
-        if selection and selection["created"] > state["created"]:
-            history = key.removesuffix(".json") + "/" + state["nonce"] + ".json"
-            store.blobs.put(history, json.dumps(state).encode())
-            state = {"phase": "ready", "previous_run": run["id"], "created": time.time()}
-            save()
-            raise DurableRunPending("Manual retry admitted after a confirmed zero-cost failure")
     if status in {"READY", "RUNNING", "TIMING-OUT", "ABORTING"}:
         if time.time() - state["created"] > 3600:
             raise ValueError("Media acquisition exceeded the recovery deadline")
@@ -114,6 +99,25 @@ def acquire(store, job, *, send=None, settle=False):
             state["phase"] = "complete"
             save()
             return state
+    if (status in {"FAILED", "SUCCEEDED"} and amount(run.get("usageTotalUsd")) == 0
+            and all(amount(event.get("eventTotalUsd")) == 0
+                    for event in (run.get("eventUsage") or {}).values())):
+        from .execution import CURRENT_SUBMISSION
+
+        selected = CURRENT_SUBMISSION.get()
+        selection = store.submission(selected) if selected else None
+        # SUCCEEDED can still mean an empty output (for example, budget refusal).
+        # Check for reusable output above before replacing a zero-cost run.
+        # A fresh owner Retry after a confirmed zero-cost failure may create a
+        # new run with repaired permissions. Same-submission retries never do.
+        # Re-read the provider status above: a stale failed checkpoint is not
+        # permission to duplicate a run an operator has since resumed.
+        if selection and selection["created"] > state["created"]:
+            history = key.removesuffix(".json") + "/" + state["nonce"] + ".json"
+            store.blobs.put(history, json.dumps(state).encode())
+            state = {"phase": "ready", "previous_run": run["id"], "created": time.time()}
+            save()
+            raise DurableRunPending("Manual retry admitted after a confirmed zero-cost failure")
     if status == "TIMED-OUT":
         count = (run.get("stats") or {}).get("resurrectCount", 0)
         # Persist each observed resume intent. If its acknowledgement is lost,

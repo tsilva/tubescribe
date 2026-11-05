@@ -145,6 +145,10 @@ function canQueue(jobs) {
   return ownsLibrary && Boolean(processingSettings && processingRecords) &&
     (!state || state === "cancelled") && !jobs.some(job => job.transcript_url || job.scheduled);
 }
+function canRetry(jobs) {
+  return ownsLibrary && Boolean(processingSettings && processingRecords) &&
+    ["failed", "interrupted"].includes(processingRecord(jobs)?.state);
+}
 function transcriptionEstimate(durations) {
   const price = processingSettings?.price_per_second || 0;
   const chunk = processingSettings?.chunk_seconds || Infinity;
@@ -292,7 +296,7 @@ function videoRow(jobs) {
     description.append(bottom);
   } else if (displayStage(job) !== "complete") {
     bottom.append(statusBadge(job, jobs));
-    if (canQueue(jobs)) {
+    if (canQueue(jobs) || canRetry(jobs)) {
       const button = node("button", "Process", "button");
       button.dataset.focus = `process-${video.video_id}`;
       button.setAttribute("aria-label", `Process ${video.title || video.video_id}`);
@@ -300,7 +304,7 @@ function videoRow(jobs) {
       if (Number.isFinite(video.duration) && video.duration > 0) {
         button.title = transcriptionEstimate([video.duration]);
       }
-      button.addEventListener("click", () => changeProcessing("queue", [video.video_id]));
+      button.addEventListener("click", () => changeProcessing(canRetry(jobs) ? "retry" : "queue", [video.video_id]));
       bottom.append(button);
     }
     description.append(bottom);

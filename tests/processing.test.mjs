@@ -132,7 +132,7 @@ test("processing status preserves real pipeline progress and confirmed completio
 test("Process is hidden for unavailable queues, other owners and videos already admitted or transcribed", async () => {
   const f = fixture();
   await f.context.refreshProcessing();
-  for (const state of ["queued", "active", "complete", "failed", "interrupted"]) {
+  for (const state of ["queued", "active", "complete"]) {
     f.context.processingRecords = new Map([[video.video_id, {state}]]);
     assert.equal(f.button(), undefined, state);
   }
@@ -160,4 +160,34 @@ test("queue failures leave Process usable and surface feedback outside bulk cont
   assert.equal(f.controls.get("processing-message").textContent, "Queue temporarily unavailable");
   const html = await readFile(new URL("../src/tubescribe/dashboard_assets/index.html", import.meta.url), "utf8");
   assert.match(html, /<\/div>\s*<p id="processing-message" role="status">/);
+});
+
+test("failed and interrupted videos restore Process and submit a retry for that video", async () => {
+  for (const state of ["failed", "interrupted"]) {
+    const f = fixture();
+    await f.context.refreshProcessing();
+    f.context.processingRecords = new Map([[video.video_id, {state}]]);
+    assert.equal(f.button().textContent, "Process");
+    assert.equal(f.button().disabled, false);
+    const pending = f.button().listeners.click();
+    assert.equal(f.button().disabled, true);
+    assert.deepEqual(JSON.parse(f.requests.at(-1).options.body), {action: "retry", video_ids: [video.video_id]});
+    f.finish();
+    await pending;
+    assert.equal(f.context.canRetry([video]), false, "a queued retry cannot be admitted again");
+  }
+});
+
+test("retry remains available with saved transcript progress and respects library ownership", async () => {
+  const f = fixture();
+  await f.context.refreshProcessing();
+  f.context.processingRecords = new Map([[video.video_id, {state: "failed"}]]);
+  const saved = {...video, stage: "failed", transcript_url: "/saved-transcript"};
+  assert.equal(f.context.canQueue([saved]), false);
+  assert.ok(descendants(f.context.videoRow([saved])).some(node => node.dataset.focus === `process-${video.video_id}`));
+  f.context.ownsLibrary = false;
+  assert.equal(f.context.canRetry([saved]), false);
+  f.context.ownsLibrary = true;
+  f.context.processingSettings = null;
+  assert.equal(f.context.canRetry([saved]), false);
 });
