@@ -103,6 +103,31 @@ class DownloadRecovery(unittest.TestCase):
             acquire(self.store, self.job, send=send)
         self.assertEqual(len(send.call_args_list), 3)
 
+    def test_fresh_manual_retry_replaces_only_confirmed_zero_cost_failed_run(self):
+        import time
+
+        from tubescribe.execution import CURRENT_SUBMISSION
+
+        send = Mock(return_value={"status": 200, "run": run()})
+        self.pending(send)
+        old = json.loads(self.store.read_key(self.key))
+        old["created"] -= 60
+        self.store.blobs.put(self.key, json.dumps(old).encode())
+        token = CURRENT_SUBMISSION.set("new-manual-selection")
+        try:
+            with patch.object(self.store, "submission", return_value={"created": time.time() - 30}):
+                send.return_value = {"status": 200, "run": run("FAILED", cost=0)}
+                self.pending(send)
+                self.assertTrue(self.store.exists(self.key.removesuffix(".json") + "/" + old["nonce"] + ".json"))
+                send.return_value = {"status": 200, "run": run()}
+                self.pending(send)
+                self.assertNotEqual(json.loads(self.store.read_key(self.key))["nonce"], old["nonce"])
+                send.return_value = {"status": 200, "run": run("FAILED", cost=0)}
+                with self.assertRaisesRegex(ValueError, "stopped"):
+                    acquire(self.store, self.job, send=send)
+        finally:
+            CURRENT_SUBMISSION.reset(token)
+
 
 class MediaClient(unittest.TestCase):
     def test_start_pins_actor_build_limits_and_disables_transcription(self):

@@ -738,7 +738,9 @@ speaker anchors and publications remain in the private archive.
    before advancing. Workflow sleeps between polls, resumes the same timed-out
    run at most twice, and reuses a completed stored file. A lost submission
    acknowledgement is reconciled against the saved input nonce; it never causes
-   a blind second download. The media-only Sandbox fetches that Apify-hosted
+   a blind second download. A fresh owner Retry can replace a confirmed failed,
+   zero-cost run after a configuration repair; its prior journal is retained,
+   and automatic step retries cannot take that path. The media-only Sandbox fetches that Apify-hosted
    combined MP4, fully decodes both streams, creates mono 16 kHz PCM chunks and
    saves the video and chunks through expiring, object-specific S3 capabilities. The starting Function returns immediately.
    Workflow sleeps between completion checks and stops the Sandbox before model
