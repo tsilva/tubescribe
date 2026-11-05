@@ -13,9 +13,10 @@ from pathlib import Path
 import httpx
 
 from .agent_gateway import DurableRunPending
+from .billing import result_billing
 from .database import database_errors, transient_errors
 from .execution import job_stage, pipeline_lock
-from .inference import LocalTools
+from .inference import LocalTools, PostprocessingUnavailable, text_model, uses_openrouter
 from .postprocessing import render_preview
 from .postprocessing_worker import archive_path, bridge_endpoint, digest, log, ready
 from .storage import atomic_write, now
@@ -381,10 +382,12 @@ def validate(result, markdown, resources, definition):
 
 
 @job_stage
-def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, agent_runner=None):
+def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, agent_runner=None,
+              runner_factory=None):
     source, definition, directory, markdown, resources, caveats, input_hash, definition_hash = (
         inputs(store, job_id, name)
     )
+    gateway = store.config.agent_gateway and not uses_openrouter(store, source["profile"])
     row = store.ensure_stage("artifact", job_id, workflow=name)
     changed = row["input_sha256"] != input_hash or row["workflow_sha256"] != definition_hash
     if force or changed:
@@ -432,8 +435,8 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
     rejected_response = False
     try:
         if not checkpoint:
-            bridge = bridge or bridge_endpoint(store.root)
-            if agent_runner is None and not store.config.agent_gateway:
+            bridge = bridge or (None if uses_openrouter(store, source["profile"]) else bridge_endpoint(store.root))
+            if agent_runner is None and not gateway and not uses_openrouter(store, source["profile"]):
                 ready(bridge)
             output = (
                 output
@@ -476,7 +479,7 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
                 for i, r in resources.items()
             ]
             payload = {
-                "model": "codex/gpt-6.1-sol",
+                "model": text_model(store, source["profile"]),
                 "reasoning_effort": "high",
                 "instructions": COMMON
                 + "\nWorkflow: "
@@ -522,10 +525,10 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             if agent_runner is None:
                 from .inference import configured_runner
 
-                agent_runner = configured_runner(
-                    store, bridge, output.relative_to(store.root).as_posix()
+                agent_runner = (runner_factory or configured_runner)(
+                    store, bridge, output.relative_to(store.root).as_posix(), profile=source["profile"]
                 )
-            if store.config.agent_gateway:
+            if gateway:
                 payload["tool_context"] = {
                     "kind": "artifact",
                     "source_key": source["output_dir"],
@@ -603,10 +606,11 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             "words": count,
             "used_image_ids": sorted(used),
             "evidence": result["output"]["evidence"],
-            "model": "codex/gpt-6.1-sol",
+            "model": result.get("model", text_model(store, source["profile"])),
             "reasoning_effort": "high",
             "agent_seconds": result.get("elapsed_seconds"),
             "usage": result.get("usage"),
+            **result_billing(result),
             "created_at": now(),
             "schema_version": 1,
             "prompt_sha256": fingerprint(
@@ -633,7 +637,7 @@ def build_one(store, job_id, name, *, bridge=None, force=False, max_attempts=3, 
             run_pid=None,
             next_retry=0,
         )
-    except (DurableRunPending, *transient_errors()):
+    except (DurableRunPending, PostprocessingUnavailable, *transient_errors()):
         from contextlib import suppress
 
         counter = "save_attempts" if stage == "save" else "attempts"

@@ -408,6 +408,10 @@ class DurableRunFailed(RuntimeError):
 class DurableRunPending(RuntimeError):
     """The saved run may still finish; reconnect to its existing idempotency key."""
 
+    def __init__(self, message, *, retry_after=10):
+        super().__init__(message)
+        self.retry_after = retry_after
+
 
 class DurableAgentRunner:
     def __init__(self, endpoint, *, store, run_key, headers=None, transport=None):

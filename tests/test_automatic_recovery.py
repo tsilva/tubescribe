@@ -65,7 +65,7 @@ class AutomaticRecovery(unittest.TestCase):
                 return httpx.Response(202, json={"state": "active"})
             raise httpx.ReadTimeout("Response lost after the model completed")
 
-        def runner(store, endpoint, key):
+        def runner(store, endpoint, key, *, profile=None):
             if key.startswith("artifacts/"):
                 return DurableAgentRunner("http://127.0.0.1:1", store=store, run_key=key,
                                           transport=httpx.MockTransport(transport))
@@ -120,7 +120,7 @@ class AutomaticRecovery(unittest.TestCase):
             self.store.defer_submission(legacy)
 
     def test_cleanup_timeout_keeps_its_journal_and_model_budget(self):
-        def runner(store, endpoint, key):
+        def runner(store, endpoint, key, *, profile=None):
             replies = iter([httpx.Response(202, json={"state": "active"}),
                             httpx.ReadTimeout("lost"), httpx.ReadTimeout("lost"),
                             httpx.ReadTimeout("lost")])

@@ -13,8 +13,9 @@ from threading import RLock
 from urllib.parse import quote
 
 from .artifacts import fingerprint
+from .billing import result_billing
 from .execution import assert_owned, lease
-from .inference import LocalTools, configured_runner, tool_handler
+from .inference import LocalTools, configured_runner, text_model, tool_handler, uses_openrouter
 from .postprocessing import render_preview
 from .postprocessing_worker import bridge_endpoint
 from .repository import now
@@ -381,7 +382,7 @@ def render(text, title, metadata):
     return page.replace("</main>", "<p>" + html.escape(note) + "</p></main>")
 
 
-def build(store, scope, *, bridge=None, force=False, agent_runner=None, clock=None):
+def build(store, scope, *, bridge=None, force=False, agent_runner=None, clock=None, runner_factory=None):
     entry = next(e for e in index(store, clock=clock)["items"] if e["scope"] == scope)
     row = records(store).get(scope, {})
     same = row.get("input_hash") == entry["input_hash"]
@@ -440,7 +441,7 @@ def build(store, scope, *, bridge=None, force=False, agent_runner=None, clock=No
         with durable_writes(store):
             if sources:
                 payload = {
-                    "model": "codex/gpt-6.1-sol",
+                    "model": text_model(store),
                     "reasoning_effort": "high",
                     "instructions": PROMPT,
                     "input": json.dumps(
@@ -459,16 +460,16 @@ def build(store, scope, *, bridge=None, force=False, agent_runner=None, clock=No
                     "max_tool_calls": 1,
                     "timeout_seconds": 900,
                 }
-                if store.config.agent_gateway:
+                if store.config.agent_gateway and not uses_openrouter(store):
                     payload["tool_context"] = {"kind": "rollup"}
                 atomic_write(directory / "request.json", json.dumps(payload).encode())
                 response_key = directory.relative_to(store.root).as_posix() + "/response.json"
                 if store.exists(response_key):
                     result = json.loads(store.read_key(response_key))
                 else:
-                    runner = agent_runner or configured_runner(
+                    runner = agent_runner or (runner_factory or configured_runner)(
                         store,
-                        bridge or bridge_endpoint(store.root),
+                        bridge or (None if uses_openrouter(store) else bridge_endpoint(store.root)),
                         directory.relative_to(store.root).as_posix(),
                     )
                     result = runner.run(payload, LocalTools(tools))
@@ -487,6 +488,7 @@ def build(store, scope, *, bridge=None, force=False, agent_runner=None, clock=No
                 "since": start.isoformat(),
                 "until": end.isoformat(),
                 "sources": [{k: s[k] for k in ("id", "title", "url")} for s in sources],
+                **({"model": result.get("model", text_model(store)), "usage": result.get("usage"), **result_billing(result)} if sources else {}),
             }
             atomic_write(directory / "summary.md", (text.rstrip() + "\n").encode())
             atomic_write(directory / "read.md", (text.rstrip() + "\n").encode())
@@ -515,6 +517,11 @@ def build(store, scope, *, bridge=None, force=False, agent_runner=None, clock=No
             )
         return True
     except BaseException as error:
+        from .agent_gateway import DurableRunPending
+
+        if isinstance(error, DurableRunPending):
+            update(store, scope, state="pending", attempts=attempts, next_retry=0, error=None)
+            raise
         update(store, scope, state="failed", error=str(error), next_retry=time.time() + 300)
         raise
 

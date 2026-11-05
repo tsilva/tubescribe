@@ -9,7 +9,9 @@ const statusFunctions = source.slice(source.indexOf("function human("), source.i
   + source.slice(source.indexOf("function displayStage("), source.indexOf("function syncSelectedRows("));
 const video = {video_id: "testvideo01", title: "A discovered upload", channel_id: "channel", duration: 60, stage: "not_processed"};
 function element(tag, text, className) {
-  return {tag, text, className, dataset: {}, attributes: {}, children: [], listeners: {},
+  return {tag, text, className,
+    get textContent() {return this.text;}, set textContent(value) {this.text = value;},
+    dataset: {}, attributes: {}, children: [], listeners: {},
     classList: {toggle() {}},
     setAttribute(name, value) {this.attributes[name] = value;},
     append(...children) {this.children.push(...children);},

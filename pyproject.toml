@@ -9,6 +9,8 @@ dependencies = [
     "boto3>=1.35",
     "psycopg[binary]>=3.2",
     "clerk-backend-api>=7.0.0",
+    "vercel-workflow==0.12.0",
+    "vercel-sandbox==0.10.0",
 ]
 
 [project.optional-dependencies]
@@ -56,3 +58,9 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.vercel]
+entrypoint = "api/index.py"
+
+[[tool.vercel.workflows]]
+entrypoint = "cloud_workflows:wf"

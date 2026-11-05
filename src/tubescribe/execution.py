@@ -127,7 +127,10 @@ def job_stage(function):
             workflow = kwargs.get("name", args[0] if args else None) if function.__name__ == "build_one" else None
             attempt = store.begin_attempt(job_id, function.__name__, workflow)
             try:
-                result = function(store, job, *args, **kwargs)
+                from .billing import tracking
+
+                with tracking(store, attempt):
+                    result = function(store, job, *args, **kwargs)
                 stage = (
                     "artifact"
                     if function.__name__ == "build_one"
@@ -157,6 +160,9 @@ def job_stage(function):
                             k: report[k]
                             for k in [
                                 "usage",
+                                "charges",
+                                "cost",
+                                "cost_complete",
                                 "elapsed_seconds",
                                 "agent_seconds",
                                 "agent_elapsed_seconds",
@@ -234,7 +240,7 @@ def defer_downloads(root, seconds=1800):
 
 
 @contextmanager
-def capacity(root, kind):
+def capacity(root, kind, *, wait=True):
     """Independent database leases bound downloads, GPU inference, and agent calls."""
     import sys
 
@@ -251,6 +257,8 @@ def capacity(root, kind):
     try:
         while True:
             if cooldown and (delay := cooldown.download_delay()) > 0:
+                if not wait:
+                    raise ClaimBusy("Download capacity is in backoff")
                 time.sleep(min(30, max(1, delay)))
                 continue
             for slot in range(slots):
@@ -268,6 +276,8 @@ def capacity(root, kind):
                     return
                 finally:
                     context.__exit__(*sys.exc_info())
+            if not wait:
+                raise ClaimBusy("Stage capacity is occupied")
             time.sleep(0.2)
     finally:
         if cooldown:

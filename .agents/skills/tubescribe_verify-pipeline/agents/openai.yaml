@@ -1,0 +1,4 @@
+interface:
+  display_name: "tubescribe: Verify Pipeline"
+  short_description: "Verify selected videos through the live reader"
+  default_prompt: "Use $tubescribe_verify-pipeline to verify TubeScribe's pipeline and live transcript and summary for my selected video, reporting evidence and any incomplete steps."

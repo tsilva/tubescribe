@@ -7,19 +7,35 @@
     "api/index.py": {
       "maxDuration": 60,
       "excludeFiles": "{data/**,models/**,tests/**,scripts/**,node_modules/**,src/reader/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
+    },
+    "api/maintenance.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{data/**,models/**,tests/**,scripts/**,node_modules/**,src/reader/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
     }
   },
   "rewrites": [
     {
-      "source": "/api/live",
-      "destination": "/api/realtime"
+      "source": "/_py_workflows/:path*",
+      "destination": "/_py_workflows/:path*"
     },
     {
-      "source": "/(.*)",
-      "destination": "/api/index"
+      "source": "/api/maintenance",
+      "destination": "/api/maintenance"
+    },
+    {
+      "source": "/api/live",
+      "destination": "/api/realtime"
     }
   ],
   "git": {
     "deploymentEnabled": false
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/maintenance",
+      "schedule": "0 8 * * *"
+    }
+  ],
+  "framework": "python",
+  "fluid": true
 }

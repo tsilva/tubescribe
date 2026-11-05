@@ -23,6 +23,7 @@ from .execution import assert_owned
 from .repository import now
 
 MODEL = "microsoft/mai-transcribe-2"
+TEXT_MODEL = "openai/gpt-6.1-sol"
 LEGACY_MODEL = "nvidia/nemotron-3.5-transcribe"
 PLACEHOLDER = "tubescribe_openrouter_proxy_placeholder"
 PRICE_PER_SECOND = 0.10 / 3600
@@ -31,10 +32,14 @@ MAX_REQUEST_BYTES = 23 * 1024 * 1024
 REJECTIONS = {400, 401, 402, 403, 404, 413, 415, 422, 429}
 
 
+class TranscriptionRateLimited(ValueError):
+    """A confirmed rejection can safely retry without duplicating a paid call."""
+
+
 def launcher():
     path = Path(os.environ.get("TUBESCRIBE_OPENROUTER_LAUNCHER", ""))
     if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
-        raise ValueError("Configure an executable TubeScribe OpenRouter proxy launcher on the Mac")
+        raise ValueError("Configure an executable TubeScribe OpenRouter proxy launcher")
     return path
 
 
@@ -51,17 +56,28 @@ def proxy_request(payload):
     ):
         raise ValueError("The reviewed loopback proxy and process-local CA are required")
     request = json.loads(payload)
-    audio = base64.b64decode(request["input_audio"]["data"], validate=True)
-    audio_format = request["input_audio"]["format"]
-    if audio_format not in {"wav", "flac"}:
-        raise ValueError("Use WAV or lossless FLAC for transcription uploads")
+    chat = request.get("operation") == "chat"
+    if chat:
+        request = request["request"]
+        if request.get("model") != TEXT_MODEL or request.get("stream") is not False:
+            raise ValueError("Invalid TubeScribe text/vision request")
+    else:
+        audio = base64.b64decode(request["input_audio"]["data"], validate=True)
+        audio_format = request["input_audio"]["format"]
+        if audio_format not in {"wav", "flac"}:
+            raise ValueError("Use WAV or lossless FLAC for transcription uploads")
     with httpx.Client(
         proxy=proxy,
         verify=ssl.create_default_context(cafile=ca),
         trust_env=False,
-        timeout=httpx.Timeout(120, connect=10),
+        timeout=httpx.Timeout(float(os.environ.get("TUBESCRIBE_OPENROUTER_TIMEOUT", 600 if chat else 120)), connect=10),
     ) as client:
-        if request["model"] == MODEL:
+        if chat:
+            response = client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                json=request, headers={"Authorization": "Bearer " + PLACEHOLDER},
+            )
+        elif request["model"] == MODEL:
             # Azure diarization is a provider option, not a normalized top-level flag.
             response = client.post(
                 "https://openrouter.ai/api/v1/audio/transcriptions",
@@ -123,7 +139,7 @@ def call(path, audio, model=MODEL):
     return json.loads(result.stdout)
 
 
-def cached_response(store, key, path, audio, model=MODEL):
+def cached_response(store, key, path, audio, model=MODEL, *, send=None):
     response_key = key + ".json"
     pending_key = key + ".pending"
     digest = sha256(audio).hexdigest()
@@ -134,23 +150,31 @@ def cached_response(store, key, path, audio, model=MODEL):
             result = json.loads(store.read_key(response_key))
             if result["audio_sha256"] != digest:
                 raise ValueError("Decoded audio changed since the saved OpenRouter request")
+            from .billing import charge, record
+            record(charge(key, result["response"], generation_id=result.get("generation_id")))
             return result
         if store.exists(pending_key):
             raise ValueError(unknown)
         # Record intent before sending. A lost response must not cause a second charge.
         store.blobs.put(pending_key, b"request outcome pending\n")
+    from .billing import charge, record
+    record(charge(key))
     try:
-        result = call(path, audio) if model == MODEL else call(path, audio, model=model)
+        result = send(audio) if send else call(path, audio) if model == MODEL else call(path, audio, model=model)
     except (ValueError, OSError, subprocess.SubprocessError):
         raise ValueError(unknown) from None
     if result.get("status") in REJECTIONS:
+        record(charge(key, rejected=True))
         store.blobs.delete(pending_key)
+        if result["status"] == 429:
+            raise TranscriptionRateLimited("OpenRouter rejected the transcription request (429)")
         raise ValueError(f"OpenRouter rejected the transcription request ({result['status']})")
     if result.get("status") != 200:
         raise ValueError(unknown)
     result["audio_sha256"] = digest
     store.blobs.put(response_key, json.dumps(result).encode())
     store.blobs.delete(pending_key)
+    record(charge(key, result["response"], generation_id=result.get("generation_id")))
     return result
 
 
@@ -400,9 +424,10 @@ def main():
         payload = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
         if not payload or len(payload) > MAX_REQUEST_BYTES:
             raise ValueError("Invalid request size")
-        # Only the worker's fixed speech request may pass through this client.
+        # Only fixed TubeScribe speech and text/vision requests may pass.
         request = json.loads(payload)
-        if request.get("model") not in {MODEL, LEGACY_MODEL} or "input_audio" not in request:
+        chat = request.get("operation") == "chat" and isinstance(request.get("request"), dict)
+        if not chat and (request.get("model") not in {MODEL, LEGACY_MODEL} or "input_audio" not in request):
             raise ValueError("Invalid speech request")
         print(json.dumps(proxy_request(payload)))
     except Exception:

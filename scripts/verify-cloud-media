@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# No credentials, network inference, registry publication or plan changes.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+docker build --platform linux/amd64 --target cloud-media -t tubescribe-media-check .
+docker run --rm --platform linux/amd64 --network none \
+  --entrypoint python --workdir /verification \
+  -v "$PWD/tests:/verification:ro" \
+  tubescribe-media-check -m unittest -v test_cloud_workflows test_cloud_media

@@ -281,3 +281,22 @@ class ManualProcessing(unittest.TestCase):
             input=compressed, capture_output=True, check=True,
         ).stdout
         self.assertEqual(decoded, pcm)
+
+    def test_text_proxy_uses_same_placeholder_and_fixed_completion_endpoint(self):
+        from tubescribe.openrouter import TEXT_MODEL
+
+        with (
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": PLACEHOLDER,
+                "HTTPS_PROXY": "http://127.0.0.1:1234", "SSL_CERT_FILE": "fixture-ca.pem"}, clear=True),
+            patch("tubescribe.openrouter.httpx.Client") as client,
+            patch("tubescribe.openrouter.ssl.create_default_context"),
+        ):
+            upstream = client.return_value.__enter__.return_value
+            upstream.post.return_value = httpx.Response(200, json={"id": "test", "usage": {"cost": 0.01}})
+            body = {"model": TEXT_MODEL, "stream": False, "messages": [{"role": "user", "content": "Synthetic"}]}
+            result = proxy_request(json.dumps({"operation": "chat", "request": body}).encode())
+            self.assertEqual(result["response"]["usage"]["cost"], 0.01)
+            upstream.post.assert_called_once_with("https://openrouter.ai/api/v1/chat/completions",
+                json=body, headers={"Authorization": "Bearer " + PLACEHOLDER})
+            with self.assertRaisesRegex(ValueError, "Invalid TubeScribe"):
+                proxy_request(json.dumps({"operation": "chat", "request": {**body, "model": "other/model"}}).encode())

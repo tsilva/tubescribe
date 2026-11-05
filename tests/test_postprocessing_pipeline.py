@@ -442,7 +442,7 @@ class FinalStage(unittest.TestCase):
 
         directories = []
 
-        def runner(store, endpoint, key):
+        def runner(store, endpoint, key, *, profile=None):
             output = store.root / key
             directories.append(output)
             if len(directories) == 1:
@@ -708,6 +708,63 @@ class FinalStage(unittest.TestCase):
         self.assertEqual(self.row()["figures"], 1)
         self.assertFalse(retained.exists())
 
+
+
+    def test_hosted_profile_finishes_with_openrouter_costs_and_no_codex_bridge(self):
+        import httpx
+
+        from tubescribe.artifacts import build_one
+        from tubescribe.openrouter_agent import MODEL
+        from tubescribe.pipeline_details import details
+
+        profile = "mai-openrouter-v1"
+        self.store.index(CID, "upload", [{"id": VID, "title": "Test", "url": "https://youtube.com/watch?v=" + VID}], profile)
+        job = dict(self.store.db.execute(
+            "SELECT j.*,v.channel_id,v.title,v.url,v.kind FROM jobs j JOIN videos v ON j.video_id=v.id WHERE j.profile=?",
+            (profile,),
+        ).fetchone())
+        self.store.save(job, {**RESULT, "segments": [{**RESULT["segments"][0], "speaker_id": "Speaker 1"}]}, hosted_speakers=1)
+        with self.store.db:
+            self.store.db.execute("UPDATE jobs SET download_state='complete' WHERE id=?", (job["id"],))
+        attempt = self.store.begin_attempt(job["id"], "asr")
+        self.store.finish_attempt(attempt, "complete", metrics={"cost": 0.01})
+        charges = iter([0.03, 0.02])
+        requests = []
+
+        def send(body):
+            requests.append(body)
+            # The fixture supplies validated domain outputs. This is a local fake
+            # provider, never the real bridge or a paid model call.
+            with httpx.Client(trust_env=False) as client:
+                response = client.post(self.bridge + "/api/v1/agent/runs", json={
+                    "model": body["model"], "instructions": body["messages"][0]["content"],
+                    "input": body["messages"][1]["content"],
+                    "output_schema": body["response_format"]["json_schema"]["schema"],
+                })
+            response.raise_for_status()
+            output = response.json()["output"]
+            return {"status": 200, "response": {
+                "id": "generation-" + str(len(requests)), "model": MODEL,
+                "usage": {"cost": next(charges), "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+                "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": json.dumps(output)}}],
+            }}
+
+        with (
+            patch("tubescribe.openrouter_agent.transport", side_effect=send),
+            patch("tubescribe.inference.AgentRunner.run", side_effect=AssertionError("Codex fallback")),
+            patch("tubescribe.postprocessing_worker.ready", side_effect=AssertionError("Bridge readiness")),
+            patch("tubescribe.artifacts.ready", side_effect=AssertionError("Bridge readiness")),
+        ):
+            self.assertTrue(process_one(self.store, job, mode="text"))
+            self.assertTrue(build_one(self.store, job["id"], "summary"))
+            self.assertFalse(process_one(self.store, job, mode="text"))
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(body["model"] == MODEL for body in requests))
+        result = details(self.store.root, VID, profile)
+        self.assertTrue(result["complete"])
+        self.assertTrue(result["cost_complete"])
+        self.assertAlmostEqual(result["cost_usd"], 0.06)
+        self.assertTrue(next(row for row in snapshot(self.store.root)["jobs"] if row["profile"] == profile)["summary_url"])
 
 if __name__ == "__main__":
     unittest.main()

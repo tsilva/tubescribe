@@ -13,16 +13,16 @@ TubeScribe is for people who follow YouTube channels and want to revisit their i
 ## Try it
 
 1. Open [tubescribe.tsilva.eu](https://tubescribe.tsilva.eu/) and sign in if prompted. Choose a channel in the desktop sidebar, or use the channel dropdown on smaller screens. Search by channel name or video title.
-2. The newest video is selected automatically. Select any video to open its saved summary in the reading pane; switch to **Transcript** for the full text, **SRT timestamps** to follow the source video, or **Pipeline** for step statuses, recorded costs, timings, and usage.
+2. The newest video is selected automatically. Select any video to open its saved summary in the reading pane; switch to **Transcript** for the full text, **SRT timestamps** to follow the source video, or **Pipeline** for processing progress, step descriptions, recorded costs, timings, and usage.
 3. Choose **7-day summary** for a recent overview, or use **Open full page** and **Copy link** to keep a particular document.
 
 Libraries are private to each account. The existing archive belongs to its owner; new accounts see **No videos yet**. Local processors continue publishing to the owner’s library.
 
-With [owner-selected processing](docs/guide.md#owner-selected-processing-on-the-mac) enabled, followed channels are checked automatically. The owner can choose **Process** on an unprocessed video directly in the library, or open **Discovered**, select uploads and review the estimated transcription cost before choosing **Queue selected**. A Mac worker sends short audio parts to MAI-Transcribe 2 through OpenRouter, matches returning speakers using audio references, and publishes word-timed transcripts and summaries to the same library. Selected videos recover automatically from temporary service outages using saved progress. Saved text-only responses can finish too, with a clear notice that time links mark whole audio parts when word timestamps are unavailable.
+With [owner-selected cloud processing](docs/guide.md#owner-selected-cloud-processing) enabled, followed channels are checked automatically. Choose **Process** on a video, or open **Discovered** to queue selected uploads. Vercel Workflows coordinate the stages; temporary Sandboxes handle downloads, audio preparation and requested video frames. Bounded Functions call MAI-Transcribe 2 through OpenRouter, retain speaker references across chunks, and publish word-timed transcripts. OpenRouter also runs enrichment, image inspection and summaries with GPT-6.1 Sol. Discovery never selects videos for processing, and processing continues with the browser closed. Saved responses survive retries; ambiguous paid outcomes stop for review. The [Mac worker](docs/guide.md#owner-selected-processing-on-the-mac) remains available until a verified cloud cutover.
 
 A useful first result is a readable summary with links to the original video and any saved figures. Every discovered video has a YouTube thumbnail before processing, including videos already in the library. Videos still awaiting processing show their current state; raw transcripts can be read before the summary is ready. Browsing only reads saved content and never starts processing.
 
-The reader refreshes after sign-in, when you return to its tab, or when you choose **Refresh**. Library status and **Refresh** appear only while signed in. It does not poll in the background. Local PostgreSQL processors wake on database notifications, with timers only for retries and expiring work or summary windows.
+The reader refreshes after sign-in, when you return to its tab, or when you choose **Refresh**. Library status and **Refresh** appear only while signed in. Pipeline shows saved OpenRouter model charges, including tool-follow-up calls and retries, and preserves the selected tab, reading position, and loaded content during updates. The hosted library receives live changes without background polling. Local PostgreSQL processors wake on database notifications, with timers only for retries and expiring work or summary windows.
 
 ## Keep the parts worth revisiting
 
@@ -43,7 +43,7 @@ scripts/tubescribe --help
 scripts/tubescribe dashboard serve --port auto
 ```
 
-Open the URL printed by the last command. A fresh installation starts with an empty library. Follow the [installation guide](docs/guide.md#install), then [add channels](docs/guide.md#archive-commands). The [Mac and OpenRouter setup](docs/guide.md#owner-selected-processing-on-the-mac) supports manual selections. The [local GPU setup](docs/guide.md#configuration-access-and-inference-roles) uses separate Whisper and Nemotron services. Both use AgentBridge/Codex for summaries.
+Open the URL printed by the last command. A fresh installation starts with an empty library. Follow the [installation guide](docs/guide.md#install), then [add channels](docs/guide.md#archive-commands). The [cloud setup](docs/guide.md#owner-selected-cloud-processing) and [Mac setup](docs/guide.md#owner-selected-processing-on-the-mac) support manual selections and OpenRouter inference. The [local GPU setup](docs/guide.md#configuration-access-and-inference-roles) uses separate Whisper and Nemotron services and retains its explicit AgentBridge/Codex configuration.
 
 ## Further reading
 
@@ -56,6 +56,8 @@ The [operations guide](docs/guide.md) contains the complete reference:
 - [Production delivery](docs/production-delivery.md) — complete CI, public-origin sync and exact-commit deployment. Existing backend credential isolation is documented in the [hosting guide](docs/guide.md#vercel-hosting-with-local-processing).
 
 For development, run `scripts/verify` for lint and local tests. The [container rehearsal](docs/guide.md#local-postgresql-and-s3-rehearsal) checks CLI readiness and metrics alongside HTTP delivery, outages, recovery, and restore.
+
+For recurring end-to-end checks in Codex, use the project-local [pipeline verification skill](.agents/skills/tubescribe_verify-pipeline/SKILL.md) to inspect selected videos through the live transcript and summary, including timing, speaker continuity and saved-result recovery.
 
 The isolated [transcription and speaker-attribution benchmark](experiments/transcription_benchmark/README.md) compares the deployed pipeline with alternative models using human-annotated audio, without replacing running services or archive transcripts.
 

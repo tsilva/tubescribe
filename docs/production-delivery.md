@@ -30,3 +30,13 @@ and verification limits.
 Production credentials must differ from Development and Preview; explicitly public configuration stays Config, while private credentials stay write-only Secret. Require Separate Values remains enabled.
 
 Vercel Production domain assignment and required integration checks, including Clerk DNS verification, must succeed before release is reported live. A READY build alone is insufficient. Backend PostgreSQL, media/S3, local processing and protected administration remain governed by [the hosting guide](guide.md#vercel-hosting-with-local-processing).
+
+The optional [Workflow backend](guide.md#owner-selected-cloud-processing) preserves
+this delivery contract. Its dedicated cloud Agent Vault bindings, maintenance
+capability and immutable media image are separately provisioned Production
+configuration; the shared allowlist does not currently synchronize them. Keep
+`TUBESCRIBE_PROCESSING_BACKEND` unset until those bindings and the cloud smoke test
+pass. Deployment code never activates subscriptions or changes billing. A cloud
+cutover additionally requires verified automatic discovery, manual-only admission,
+saved-result recovery, and signed-in transcript and summary delivery before
+retiring the Mac services.

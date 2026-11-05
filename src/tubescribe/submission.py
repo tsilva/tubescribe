@@ -192,7 +192,7 @@ def execute_cli(store, args, operation):
     return Dispatcher(store).execute(request, Inline(operation), identifier=args.submission)
 
 
-def consume(store, *, once=False, poll=None, process=None):
+def consume(store, *, once=False, poll=None, process=None, stop=None):
     """Independent dispatcher; durable queued requests survive the web process."""
     if store.config.manual_queue:
         from .openrouter import launcher
@@ -200,16 +200,18 @@ def consume(store, *, once=False, poll=None, process=None):
         launcher()
     process = process or LocalProcess()
     if store.config.network:
-        return consume_network(store, once=once, poll=poll, process=process)
+        return consume_network(store, once=once, poll=poll, process=process, stop=stop)
     completed = failed = 0
     with lease(store.root, "dispatcher", reentrant=False):
-        while True:
+        while stop is None or not stop.is_set():
             from .rollups import schedule
 
             schedule(store, background=False)
             store.reclaim_submissions(manual=store.config.manual_queue)
             rows = store.queued_submissions(manual=store.config.manual_queue)
             for row in rows:
+                if stop is not None and stop.is_set():
+                    break
                 request = JobRequest(**json.loads(row["request"]))
                 try:
                     if store.config.manual_queue:
@@ -245,10 +247,14 @@ def consume(store, *, once=False, poll=None, process=None):
                     failed += 1
             if once:
                 return {"dispatched": completed, "failed": failed}
-            time.sleep(poll or store.config.worker_poll)
+            if stop is not None:
+                stop.wait(poll or store.config.worker_poll)
+            else:
+                time.sleep(poll or store.config.worker_poll)
+    return {"dispatched": completed, "failed": failed}
 
 
-def consume_network(store, *, once, poll, process):
+def consume_network(store, *, once, poll, process, stop=None):
     """Each consumer reserves requests transactionally; PIDs remain local diagnostics."""
     from contextlib import nullcontext
 
@@ -256,10 +262,10 @@ def consume_network(store, *, once, poll, process):
 
     completed = failed = 0
     with (
-        nullcontext(None) if once else notifications() as wake,
+        nullcontext(None) if once else notifications(stop=stop) if stop else notifications() as wake,
         lease(store.root, "dispatcher:" + store.config.worker_id, reentrant=False),
     ):
-        while True:
+        while stop is None or not stop.is_set():
             from .rollups import schedule
 
             schedule(store, background=False)
@@ -286,7 +292,10 @@ def consume_network(store, *, once, poll, process):
                     # A transient service failure retains this exact request for retry.
                     if once:
                         return {"dispatched": completed, "failed": failed, "paused": True}
-                    time.sleep(max(1, poll or store.config.worker_poll))
+                    if stop is not None:
+                        stop.wait(max(1, poll or store.config.worker_poll))
+                    else:
+                        time.sleep(max(1, poll or store.config.worker_poll))
                     continue
                 completed += 1
             except BaseException as error:
@@ -296,3 +305,4 @@ def consume_network(store, *, once, poll, process):
                 if isinstance(error, (KeyboardInterrupt, SystemExit)):
                     raise
                 failed += 1
+    return {"dispatched": completed, "failed": failed}

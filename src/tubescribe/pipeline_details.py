@@ -36,6 +36,78 @@ def recorded_cost(value):
     return None
 
 
+def billing_totals(values):
+    requests, legacy = {}, []
+    for value in values:
+        charges = value.get("charges")
+        if not isinstance(charges, list):
+            legacy.append(value)
+            continue
+        for item in charges:
+            if isinstance(item, dict) and item.get("state") == "rejected":
+                legacy.append({"cost": 0, "total_tokens": 0})
+                continue
+            if not isinstance(item, dict) or not isinstance(item.get("request_key"), str):
+                legacy.append({})
+                continue
+            previous = requests.get(item["request_key"])
+            if previous is None or number(previous.get("cost_usd")) is None:
+                requests[item["request_key"]] = item
+    generations = {}
+    for item in requests.values():
+        identity = (
+            item.get("key")
+            if isinstance(item.get("key"), str) and item["key"]
+            else item["request_key"]
+        )
+        previous = generations.get(identity)
+        if previous is None or number(previous.get("cost_usd")) is None:
+            generations[identity] = item
+
+    def generation_id(key, item):
+        value = item.get("generation_id")
+        return value if isinstance(value, str) and value else key.removeprefix("openrouter:")
+
+    known_ids = {
+        generation_id(key, item)
+        for key, item in generations.items()
+        if number(item.get("cost_usd")) is not None
+    }
+    costs, tokens, covered_cost, covered_tokens = [], [], set(), set()
+    for value in legacy:
+        identifiers = value.get("generation_ids")
+        identifiers = (
+            set(identifiers)
+            if isinstance(identifiers, list)
+            and identifiers
+            and all(isinstance(i, str) and i for i in identifiers)
+            else set()
+        )
+        if identifiers and identifiers <= known_ids:
+            continue  # Individual receipts provide the complete aggregate.
+        cost = recorded_cost(value)
+        count = (
+            number(value.get("total_tokens"))
+            if value.get("total_tokens") is not None
+            else number(usage_totals(value).get("totalTokens"))
+        )
+        if not identifiers or not identifiers <= covered_cost:
+            costs.append(None if identifiers & covered_cost else cost)
+        if cost is not None and not identifiers & covered_cost:
+            covered_cost.update(identifiers)
+        if not identifiers or not identifiers <= covered_tokens:
+            tokens.append(count)
+        if count is not None:
+            covered_tokens.update(identifiers)
+    for key, item in generations.items():
+        identifier = generation_id(key, item)
+        if identifier not in covered_cost:
+            costs.append(number(item.get("cost_usd")))
+        if identifier not in covered_tokens:
+            tokens.append(number(item.get("total_tokens")))
+    return costs, tokens
+
+
 def details(root, video_id, profile=None):
     """Select one profile and its attempts in a consistent database snapshot."""
     with closing(connect(root, readonly=True)) as db:
@@ -126,7 +198,7 @@ def details(root, video_id, profile=None):
             and job.get("state") == "failed"
         ):
             state = "failed"
-        values, seen = [], set()
+        values, seen = [], {}
         for attempt in history:
             value = metrics(attempt["metrics"])
             # Reusing a saved publication records another attempt, not another bill.
@@ -145,17 +217,25 @@ def details(root, video_id, profile=None):
                 billing_key = ("generations", tuple(sorted(generations)))
             if billing_key:
                 if billing_key in seen:
+                    previous = values[seen[billing_key]]
+
+                    def score(item):
+                        costs, _ = billing_totals([item])
+                        return (
+                            bool(costs) and all(c is not None for c in costs),
+                            sum(c is not None for c in costs),
+                        )
+
+                    if score(value) > score(previous):
+                        values[seen[billing_key]] = value
                     continue
-                seen.add(billing_key)
+                seen[billing_key] = len(values)
             values.append(value)
-        costs = [recorded_cost(value) for value in values]
+        costs, tokens = billing_totals(values)
+        not_billable = key == "download" or integrated
+        if not_billable:
+            costs = [0]
         recorded = [cost for cost in costs if cost is not None]
-        tokens = [
-            number(value.get("total_tokens"))
-            if value.get("total_tokens") is not None
-            else number(usage_totals(value).get("totalTokens"))
-            for value in values
-        ]
         elapsed = [number(a["elapsed"]) for a in history]
         fallback = (
             rows["transcription"].get("processing_seconds")
@@ -176,6 +256,11 @@ def details(root, video_id, profile=None):
                 else number(fallback),
                 "cost_usd": sum(recorded) if recorded else None,
                 "cost_complete": bool(costs) and all(cost is not None for cost in costs),
+                "cost_source": "not_billable"
+                if not_billable
+                else "provider_reported"
+                if costs and all(c is not None for c in costs)
+                else "unreported",
                 "total_tokens": sum(t for t in tokens if t is not None)
                 if any(t is not None for t in tokens)
                 else number(row.get("total_tokens")),
@@ -188,7 +273,11 @@ def details(root, video_id, profile=None):
                 else None,
             }
         )
-    known_costs = [s["cost_usd"] for s in steps if s["cost_usd"] is not None]
+    known_costs = [
+        s["cost_usd"]
+        for s in steps
+        if s["cost_usd"] is not None and s["cost_source"] != "not_billable"
+    ]
     started = [a["started"] for a in pipeline_attempts]
     finished = [
         a["finished"]

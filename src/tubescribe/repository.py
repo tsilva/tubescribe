@@ -614,9 +614,12 @@ class SQLJobRepository:
     def finish_attempt(self, identifier, state, *, metrics=None, error=None, run_id=None):
         stamp = database_clock(self.db)
         with self.db:
+            saved = self.db.execute("SELECT metrics FROM attempts WHERE id=?", (identifier,)).fetchone()
+            previous = json.loads(saved[0] or "{}") if saved else {}
+            combined = {**previous, **(metrics or {})}
             self.db.execute(
                 "UPDATE attempts SET state=?,finished=?,elapsed=?-started,metrics=?,error=?,run_id=COALESCE(run_id,?) WHERE id=?",
-                (state, stamp, stamp, json.dumps(metrics or {}), error, run_id, identifier),
+                (state, stamp, stamp, json.dumps(combined), error, run_id, identifier),
             )
 
     def reconcile_attempts(self):

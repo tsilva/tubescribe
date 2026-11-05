@@ -6,7 +6,9 @@
   "scripts": {
     "build:reader": "node scripts/build-reader.mjs",
     "check:reader": "node scripts/build-reader.mjs --check",
-    "test:reader": "node --test tests/*.test.mjs"
+    "test:reader": "node --test tests/*.test.mjs",
+    "build:media": "docker build --platform linux/amd64 --target cloud-media -t tubescribe-media .",
+    "verify:cloud": "scripts/verify-cloud-media"
   },
   "dependencies": {
     "@neon/realtime": "0.1.1"

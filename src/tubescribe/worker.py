@@ -257,9 +257,12 @@ def work(
                         )
                         log("asr_start", video_id=job["video_id"])
                         attempt = store.begin_attempt(job["id"], "asr")
+                        from .billing import tracking
+
                         try:
                             if hosted:
-                                result = client.transcribe(store, job, path)
+                                with tracking(store, attempt):
+                                    result = client.transcribe(store, job, path)
                             else:
                                 with capacity(store.root, "gpu"):
                                     result = client.transcribe(path)

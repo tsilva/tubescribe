@@ -97,3 +97,5 @@ jobs:
           persist-credentials: false
       - name: Rehearse disposable services with synthetic inference
         run: scripts/rehearse-containers
+      - name: Verify the media image and native Workflow boundaries without network access
+        run: scripts/verify-cloud-media

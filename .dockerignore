@@ -1,4 +1,6 @@
 .git
+.internal
+node_modules
 .venv
 __pycache__
 .ruff_cache
@@ -6,6 +8,7 @@ data
 models
 .env
 .env.*
+*.private.json
 *.log
 *.sqlite*
 experiments

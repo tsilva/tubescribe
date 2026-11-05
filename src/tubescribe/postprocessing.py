@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
 
+from .billing import result_billing
 from .inference import AgentRunner, LocalTools
 from .storage import atomic_write
 from .subtitles import COARSE_TIMING_NOTE
@@ -1357,6 +1358,7 @@ def process(
     on_response=None,
     agent_runner=None,
     tool_context=None,
+    media_factory=None,
 ):
     """Generate or recover one validated Markdown bundle; caller owns queue/state."""
     args = SimpleNamespace(
@@ -1455,14 +1457,16 @@ def process(
     if (args.output / "request.json").exists() and not (args.output / "agent-run.json").exists():
         raise ValueError("Output already contains a run; choose a fresh output directory")
     args.output.mkdir(parents=True, exist_ok=True)
-    if args.video:
+    if args.video and media_factory is None:
         validate_cached_video(args.video)
     screenshots = (
-        Screenshots(args.video, args.output, source["duration"], budgets) if args.video else None
+        (media_factory(args.output, source["duration"], budgets) if media_factory else
+         Screenshots(args.video, args.output, source["duration"], budgets)) if args.video else None
     )
     video_url = source["source_url"] or "Unavailable; use plain timestamps"
+    selected_model = getattr(agent_runner, "model", None)
     payload = {
-        "model": "codex/gpt-6.1-sol",
+        "model": selected_model if isinstance(selected_model, str) else "codex/gpt-6.1-sol",
         "reasoning_effort": "high",
         "instructions": run_instructions(
             args.defer_transcript, args.video is not None, compact, not args.legacy_visual_planning
@@ -1573,7 +1577,7 @@ def finish_run(
         **checks,
         "schema_version": 1,
         "prompt_sha256": hashlib.sha256(payload["instructions"].encode()).hexdigest(),
-        "model": "codex/gpt-6.1-sol",
+        "model": result.get("model", payload["model"]),
         "reasoning_effort": "high",
         "source": str(args.transcript.resolve()),
         "source_sha256": checkpoint_hash,
@@ -1613,6 +1617,7 @@ def finish_run(
         "deduplicated_views": sum(c["deduplicated_views"] for c in calls),
         "image_bytes": sum(c["encoded_bytes"] for c in calls),
         "usage": result["usage"],
+        **result_billing(result),
         "processed_words": len(markdown.split()),
         "speaker_names": result["output"]["speaker_names"],
     }

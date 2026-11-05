@@ -275,7 +275,7 @@ class Artifacts(unittest.TestCase):
         directories = []
         instructions = []
 
-        def configured_runner(store, bridge, key):
+        def configured_runner(store, bridge, key, *, profile=None):
             directory = store.root / key
             directories.append(directory)
 

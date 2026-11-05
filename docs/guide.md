@@ -352,9 +352,9 @@ scripts/tubescribe dashboard serve --port auto     # run in this terminal; Ctrl-
 
 The dashboard defaults to `127.0.0.1`; protected non-loopback binding is described below. The default `--port auto` asks the OS for an available port; use the printed URL, or `dashboard status` to find it again. Starting an already running dashboard reuses it, even if a different port was requested. To change its port, stop it first. An unavailable fixed port reports a startup failure rather than replacing another server. The background process survives chat/terminal completion, but does not automatically restart after a reboot. State and logs live in `data/dashboard.json`, `data/dashboard.lock`, and `data/dashboard.log` (or the selected `--data` directory).
 
-The full-width desktop dashboard has a channel sidebar, a compact chronological video feed, and a wider reading pane. Choose **All videos** or a channel in the sidebar; smaller screens use the **Channel scope** dropdown. Selected channels, videos, and content tabs use green accents. The reader limits the text width for comfortable long-form reading. Videos from all channels are interleaved by publish date, newest first; missing or invalid dates appear last, with video ID breaking date ties. Each video appears once, with its title, source channel, publish date, duration, and current status. Untouched backlog videos display **Not Processed**. Video-list and reader badges use the same status: queue updates immediately show **Queued**, **Processing**, **Retry scheduled**, or a terminal failure, while more specific pipeline progress and catalogue-confirmed completion remain visible. **Queued** is reserved for eligible videos selected by a waiting durable `work` submission, respecting its profile, video/channel scope, retry eligibility, and limit; merely indexing a video or running an unrelated worker does not make it queued. The newest visible video is selected on first load and its content appears in the reader. Click anywhere in the row to select the video and read without leaving the library. Search and channel filtering preserve a visible selection or select the first matching video; no matches clear the reader. Opening a seven-day overview clears the row highlight until a video is selected again. Eligible unprocessed videos offer **Process** directly in their row. The reading pane has **Summary**, **Transcript**, **SRT timestamps**, and **Pipeline** tabs that switch content in place with consistent top and side margins; **View on YouTube**, **Open full page**, and **Copy link** share a compact toolbar with the content tabs; the video status appears below its metadata. Before a document is ready, the **Pipeline** tab and YouTube button remain available. Each has an accessible label and tooltip; the full-page and copy buttons use the active tab’s stable resource URL. The YouTube button remains available before a transcript is ready. The inline transcript omits the repeated “Source: YouTube” attribution. Copying falls back to a selectable link if clipboard access is unavailable. Arrow keys, Home, and End navigate the tabs. **Processing details** expands independently. Keyboard users can select the title button. The pane offers the full summary, transcript, source video, and SRT timestamps. On desktop, the channel sidebar, video feed, and reading pane scroll independently, keeping the library controls and reading position available while browsing. Narrower screens use a scrolling library and open a full-screen reader with **Back to library**. Every video row uses its YouTube thumbnail, including newly discovered videos, existing catalogue entries and videos without processed figures. Preview URLs are derived from saved video IDs, so no reindexing, backfill or processing is needed. Unavailable images use a local play placeholder. Completed videos show an accessible check badge in the thumbnail’s bottom-right corner. The reader starts with the title and metadata, without a repeated cover or breadcrumb labels. Thumbnail images load directly from YouTube’s `https://i.ytimg.com` image host; saved figures in summaries and transcripts remain served by TubeScribe.
+The full-width desktop dashboard has a channel sidebar, a compact chronological video feed, and a wider reading pane. Choose **All videos** or a channel in the sidebar; smaller screens use the **Channel scope** dropdown. Selected channels, videos, and content tabs use green accents. The reader limits the text width for comfortable long-form reading. Videos from all channels are interleaved by publish date, newest first; missing or invalid dates appear last, with video ID breaking date ties. Each video appears once, with its title, source channel, publish date, duration, and current status. Untouched backlog videos display **Not Processed**. Video-list and reader badges use the same status: queue updates immediately show **Queued**, **Processing**, **Retry scheduled**, or a terminal failure, while more specific pipeline progress and catalogue-confirmed completion remain visible. **Queued** is reserved for eligible videos selected by a waiting durable `work` submission, respecting its profile, video/channel scope, retry eligibility, and limit; merely indexing a video or running an unrelated worker does not make it queued. The newest visible video is selected on first load and its content appears in the reader. Click anywhere in the row to select the video and read without leaving the library. Search and channel filtering preserve a visible selection or select the first matching video; no matches clear the reader. Opening a seven-day overview clears the row highlight until a video is selected again. Eligible unprocessed videos offer **Process** directly in their row. The reading pane has **Summary**, **Transcript**, **SRT timestamps**, and **Pipeline** tabs that switch content in place with consistent top and side margins; **View on YouTube**, **Open full page**, and **Copy link** share a compact toolbar with the content tabs; the video status appears below its metadata. Before a document is ready, the **Pipeline** tab and YouTube button remain available. Each has an accessible label and tooltip; the full-page and copy buttons use the active tab’s stable resource URL. The YouTube button remains available before a transcript is ready. The inline transcript omits the repeated “Source: YouTube” attribution. Copying falls back to a selectable link if clipboard access is unavailable. Arrow keys, Home, and End navigate the tabs. **Processing details** expands independently. Keyboard users can select the title button. The pane offers the full summary, transcript, source video, and SRT timestamps. On desktop, the channel sidebar, video feed, and reading pane use thin, theme-matched scrollbars and scroll independently, keeping the library controls and reading position available while browsing. Narrower screens use a scrolling library and open a full-screen reader with **Back to library**. Every video row uses its YouTube thumbnail, including newly discovered videos, existing catalogue entries and videos without processed figures. Preview URLs are derived from saved video IDs, so no reindexing, backfill or processing is needed. Unavailable images use a local play placeholder. Completed videos show an accessible check badge in the thumbnail’s bottom-right corner. The reader starts with the title and metadata, without a repeated cover or breadcrumb labels. Thumbnail images load directly from YouTube’s `https://i.ytimg.com` image host; saved figures in summaries and transcripts remain served by TubeScribe.
 
-Every video has a **Pipeline** tab, including discovered videos without a transcript. It shows audio download, transcription, speaker attribution, transcript enrichment, and summary statuses, plus recorded attempt counts, processing time, tokens, speaker/figure counts, model, language, and profile when available. Hosted transcription includes speaker attribution rather than running a separate speaker step. Dollar amounts are saved provider charges in USD, summed across recorded attempts; reused publications are counted once. Missing billing data stays **Not recorded**, and incomplete totals are labelled partial. These totals exclude unreported charges, subscriptions, local compute, and storage. The tab loads read-only details for the selected profile at `/api/videos/VIDEO_ID/pipeline?profile=PROFILE`, under the same library access checks as saved documents. Catalogue updates and **Refresh** reload the selected pipeline; opening it never starts processing. Full-page and copy-link actions appear for document tabs only.
+Every video has a **Pipeline** tab, including discovered videos without a transcript. A progress bar counts completed processing phases. Each step shows its status and a short description of what it does. The six metric cards retain recorded cost, processing time, video duration, tokens, speakers, and figures; model, language, and profile remain available below the steps. Hosted transcription includes speaker attribution rather than running a separate speaker step, so it is not counted as an already completed phase while transcription is still waiting. The **Model cost** card sums saved OpenRouter charges in USD across transcription, enrichment, summaries and their model follow-up calls. Charges are persisted when each response arrives, including responses whose output later fails validation. Cached requests are deduplicated across retries by request and generation identity. Download and included speaker attribution have no separate model charge. Unreported amounts stay unknown and incomplete totals are labelled partial; CPU, storage and subscription allocations are outside this model-cost total. Historical Codex runs did not report per-run dollar charges and remain partial. The tab loads read-only details for the selected profile at `/api/videos/VIDEO_ID/pipeline?profile=PROFILE`, under the same library access checks as saved documents. Catalogue updates and **Refresh** update the selected pipeline in place, preserving its panel, scroll position, focus, and loaded values. Concurrent updates are coalesced; a failed background read keeps the last loaded details and offers **Try again**. Queue-only status changes update badges without refetching a saved document; opening it never starts processing. Full-page and copy-link actions appear for document tabs only.
 
 Processing stages, model/profile, timings, failures, and retry details also remain available under **Processing details**. For multiple transcript profiles, the main row prefers a saved summary, then a processed transcript, then a raw transcript. All profiles remain accessible in the details and the reader’s **Transcript version** selector. A completed version does not hide the state of unfinished versions in those details. Search matches channel names/IDs and video titles/IDs without changing the chronological order. Channel discovery errors remain visible above the feed, labelled with their source channel.
 
@@ -698,12 +698,129 @@ The source model remains `codex/gpt-6.1-sol` with high reasoning for both Markdo
 summary generation. Models still inspect only the bounded, relevant figures requested
 through their tools.
 
+### Owner-selected cloud processing
+
+The optional `TUBESCRIBE_PROCESSING_BACKEND=workflow` backend uses Vercel Workflows,
+Queues, Functions with Fluid compute and temporary media Sandboxes within the
+existing plan's allowances. It never activates subscriptions or changes billing.
+Leave this binding unset until cloud configuration and a selected-video smoke
+test are verified.
+
+**Process** and **Queue selected** commit the same durable manual submissions as
+the Mac backend. The backend dispatches stages independently of the browser.
+Each step rechecks admission; canonical Workflow run pointers and existing leases
+prevent duplicate dispatch from repeating work. A lost dispatch acknowledgement
+leaves the selection in the durable outbox for repair.
+
+The pinned native Python Workflow SDK uses the registry declared in
+`[[tool.vercel.workflows]]`. Vercel generates its private queue consumer under
+`_py_workflows`; do not register another consumer manually for the same topic.
+`tool.vercel.entrypoint` keeps the existing Python reader as the web application,
+while its Realtime endpoint remains a JavaScript Function.
+Workflow history contains small identifiers and progress. Media, model receipts,
+speaker anchors and publications remain in the private archive.
+
+1. A discovery Workflow reads followed channels' public Atom feeds every 15
+   minutes and adds catalogue entries without jobs or submissions. An owner visit
+   bootstraps it; a daily authenticated cron repairs a missing clock. The clock
+   rotates after 32 cycles to bound its event log. Atom feeds contain recent
+   uploads, so this incremental discovery does not replace historical backfill
+   or guarantee recovery of a long discovery gap.
+   A whole poll is one Workflow step, with at most four simultaneous feed
+   requests; it does not create a separate billable step for every channel.
+   Each poll checks at most 32 channels, oldest checks first. Larger libraries
+   rotate across polls. Dispatch keeps at most ten selected runs in flight and
+   fills a freed slot when a run completes.
+2. A media-only Sandbox downloads the selected audio and modest video stream,
+   creates mono 16 kHz PCM chunks, and uploads them through expiring,
+   object-specific S3 capabilities. The starting Function returns immediately.
+   Workflow sleeps between completion checks and stops the Sandbox before model
+   processing. Media failures have three safe attempts, each bounded by a
+   30-minute Sandbox session. Videos are limited to four hours.
+3. Each transcription step sends at most one chunk to MAI through OpenRouter.
+   Word timings, anonymous speaker anchors, reference counters, receipts and
+   charges persist across steps. Prepared WAV bytes require no FFmpeg in the
+   Function. A synchronous provider request still needs its Function alive until
+   its response arrives.
+4. Enrichment and summary steps issue at most one new OpenRouter model call per
+   invocation. Saved calls reconstruct context on resume. Frame tools start
+   separate media Sandboxes and suspend until their outputs are ready. Those
+   machines receive no database credentials, model key, Agent Vault capability
+   or model workload.
+5. Existing checksum-verified publication code saves the transcript, figures and
+   summary for the live reader. Retries skip completed work. Unknown paid outcomes
+   retain their intent markers and require review; retries never clear them.
+
+Configure these **Production-only** bindings through the reviewed administrative
+credential flow, preserving separate values for other environments:
+
+| Binding | Purpose |
+| --- | --- |
+| Existing direct PostgreSQL, private S3/R2 and Clerk bindings | Same owned library and archive, without new storage subscriptions. |
+| `TUBESCRIBE_MANUAL_QUEUE=1`, `TUBESCRIBE_DISPATCH=queue`, `TUBESCRIBE_MIGRATIONS=check` | Manual admission and existing schema checks. |
+| `TUBESCRIBE_MEDIA_IMAGE` | Immutable `registry/image@sha256:...` built from the reviewed `cloud-media` Docker target. |
+| `TUBESCRIBE_INFISICAL_IDENTITY_ID` | Dedicated machine identity with Vercel Production OIDC trust and access only to the TubeScribe OpenRouter bundle. |
+| `TUBESCRIBE_VAULT_AUTH=session`, `INFISICAL_AGENT_VAULT_SESSION_TOKEN` | Explicit alternative when a machine identity is unavailable: a separately provisioned session restricted to the TubeScribe bundle, saved as a Production write-only secret. No automatic OIDC-to-session fallback. |
+| `INFISICAL_AGENT_VAULT_PROXY_TOKEN` | Dedicated cloud proxy bootstrap capability, provisioned as a write-only secret. Preserve the Mac proxy configuration. |
+| `TUBESCRIBE_VAULT_CA_FINGERPRINT` | Reviewed public CA pin for that cloud proxy. |
+| `CRON_SECRET` | Dedicated maintenance-trigger capability of at least 32 characters. |
+| `TUBESCRIBE_PROCESSING_BACKEND=workflow` | Activation switch for the verified cutover. |
+
+The cloud identity uses `https://app.infisical.com` and the reviewed
+`local-tubescribe-openrouter` bundle. Its `openrouter-transcription` service holds
+the dedicated OpenRouter key and permits POST only to
+`/api/v1/audio/transcriptions` and `/api/v1/chat/completions`. Model Functions
+start the checksum-pinned native Agent Vault CLI locally, create a 15-minute
+session, give the service client only the placeholder and short-lived proxy
+capability, pin its CA, and revoke the session afterward. No extra OS sandbox is
+required for model Functions. Never retrieve the real OpenRouter key into the
+application or use a human login as a cloud fallback.
+
+In explicitly configured session mode, the launcher reuses only the provisioned
+TubeScribe session and passes `--keep-session`, so one completed or failed Function
+cannot revoke access for concurrent jobs. It never signs in as a user or creates
+sessions. Provision this session through trusted administration with only the
+TubeScribe bundle. A session with no expiry supports unattended operation until
+explicit revocation; a leaked token remains usable through the proxy until revoked.
+Revoke and replace it in Infisical and Vercel when rotating access. This mode has
+no per-invocation workload identity proof and its audit logs share one session.
+OIDC mode remains available for a future dedicated machine identity.
+
+Enable Vercel System Environment Variables and, for OIDC mode, workload OIDC for
+the existing project. Processing rejects non-Production environments and missing deployment
+identity. Model requests have a 210-second deadline inside the 300-second Workflow
+Function; longer requests retain their ambiguous intent. The maintenance cron
+uses the Hobby-compatible `0 8 * * *` schedule. Workflow, Function, storage and
+transfer allowances apply independently of Sandbox usage.
+
+```sh
+pnpm run build:media
+scripts/verify
+scripts/verify-cloud-media
+python -m tubescribe.workflow_admin
+```
+
+The last command reports missing or invalid binding **names only**. It never
+fetches secrets, provisions resources, starts inference or changes billing.
+Publish the reviewed Linux amd64 image through an already available registry and
+configure its digest before activation. If a required product is unavailable on
+the existing plan, leave that part blocked; subscription and payment actions
+remain entirely with the account owner.
+
+Before cutover, verify fake-key Agent Vault transport, the selected credential scope, the actual media
+image, cloud YouTube downloads, and a manually selected video's transcript and
+summary through the signed-in site. Drain the Mac consumer before enabling cloud
+processing; do not run both consumers on the manual lane. Follow exact-commit
+Production delivery gates. Stop the Mac discovery service only after cloud
+discovery is verified. Synthetic tests and a READY reader build alone do not
+establish a live cutover.
+
 ### Owner-selected processing on the Mac
 
 Enable `TUBESCRIBE_MANUAL_QUEUE=1` in the hosted reader, Mac feed watcher and Mac queue consumer. They share the existing archive database, and the consumer shares the archive object store. The reader's database binding must permit the owner endpoint to insert jobs and submissions and update their queue state. Use the existing Clerk ownership registry.
 
-1. Store the dedicated `tubescribe-production` OpenRouter key in the `openrouter-transcription` service of the `local-tubescribe-openrouter` Agent Vault bundle. Set the key's spending limit in OpenRouter. Limit the service to POST requests to OpenRouter's audio transcription path. The Mac launcher supplies `tubescribe_openrouter_proxy_placeholder` as `OPENROUTER_API_KEY`, a loopback `HTTPS_PROXY`, and process-local `SSL_CERT_FILE` with pinned CA trust. It runs the project's Python with `-m tubescribe.openrouter`, forwarding JSON on stdin and returning the child JSON on stdout. Verify with fake credentials and a bounded authenticated smoke test before enabling processing.
-2. Review any outstanding legacy work and stop the legacy automatic watcher and consumer before the cutover. Use the existing Mac archive and AgentBridge configuration with these commands. Set `TUBESCRIBE_OPENROUTER_LAUNCHER` to the absolute path of the reviewed executable in the consumer's environment. The consumer handles audio download and conversion with FFmpeg and uses the existing AgentBridge stages for cleanup and summaries.
+1. Store the dedicated `tubescribe-production` OpenRouter key in the `openrouter-transcription` service of the `local-tubescribe-openrouter` Agent Vault bundle. Set the key's spending limit in OpenRouter. Limit the service to POST requests to the OpenRouter path prefixes `/api/v1/audio/transcriptions` and `/api/v1/chat/completions`. The Mac launcher supplies `tubescribe_openrouter_proxy_placeholder` as `OPENROUTER_API_KEY`, a loopback `HTTPS_PROXY`, and process-local `SSL_CERT_FILE` with pinned CA trust. It runs the project Python with `-m tubescribe.openrouter`, forwarding JSON on stdin and returning the child JSON on stdout. Audio uses the ordinary speech request; text/vision uses the envelope `{"operation":"chat","request":{...}}` with the fixed `openai/gpt-6.1-sol` model and non-streaming responses. Allow a 600-second HTTP deadline and a longer process/session lifetime for text/vision calls; retain the existing smaller audio deadlines. Verify with fake credentials and a bounded authenticated smoke test before enabling processing.
+2. Review any outstanding legacy work and stop the legacy automatic watcher and consumer before the cutover. Use the existing Mac archive with these commands. Set `TUBESCRIBE_OPENROUTER_LAUNCHER` to the absolute path of the reviewed executable in the consumer's environment. The consumer handles downloads, audio conversion and frame extraction with FFmpeg. Hosted profiles and the manual consumer route all model inference through OpenRouter: MAI for speech and GPT-6.1 Sol for enrichment, image inspection, summaries and seven-day overviews. No AgentBridge or Codex login is required for this path. Legacy native CLI profiles retain their explicit bridge support.
 
    ```bash
    TUBESCRIBE_MANUAL_QUEUE=1 scripts/tubescribe --data /absolute/scratch/watch feed-poll --watch
@@ -715,7 +832,9 @@ Enable `TUBESCRIBE_MANUAL_QUEUE=1` in the hosted reader, Mac feed watcher and Ma
 
 New manual selections use the `mai-openrouter-v1` profile with [Microsoft MAI-Transcribe 2 on OpenRouter](https://openrouter.ai/microsoft/mai-transcribe-2). The client forwards Azure's diarization option and requests word and segment timestamps. Each request contains at most 60 seconds of new speech and up to 50 seconds of speaker references, encoded as lossless 16 kHz mono PCM16-derived FLAC. Short real-audio samples of previously heard voices let the provider match returning speakers even after a gap. References are removed from the published transcript and timestamps. Up to 32 prior voices can be included; confident one-to-one matches retain their original IDs, while ambiguous matches remain unidentified. Speaker labels are anonymous, and this matching does not establish real names. Saved receipts deterministically rebuild the references after interruption, without repeating successful paid requests.
 
-OpenRouter currently charges $0.10 per uploaded audio hour for MAI. Speaker references also count as uploaded audio. The selection cost estimate therefore shows a range from the source duration alone to the configured reference budget for every additional part; saved provider charges include the actual reference usage. These estimates exclude transcript enrichment and summary generation. Full-length uploads can exceed the upstream request deadline even when the model supports longer recordings, so the worker uses the smaller parts above.
+OpenRouter currently charges $0.10 per uploaded audio hour for MAI. Speaker references also count as uploaded audio. The selection cost estimate therefore shows a range from the source duration alone to the configured reference budget for every additional part; saved provider charges include the actual reference usage. These estimates cover transcription only; GPT-6.1 Sol enrichment, visual-inspection follow-ups and summaries are billed separately through the same dedicated OpenRouter key and appear in Pipeline's actual model-cost total. Text/vision calls persist their request fingerprint, response, charge and an intent marker before issuing another call. Recovery replays saved model responses and local read-only tools; an ambiguous upstream outcome retains its marker for billing review rather than issuing another paid call. Existing completed Codex outputs remain reusable; unresolved legacy durable runs must finish before their provider is switched.
+
+Full-length uploads can exceed the upstream request deadline even when the model supports longer recordings, so the worker uses the smaller parts above.
 
 Existing `nemotron-openrouter-v1` transcripts, URLs, pending checkpoints and queued retries retain their original model and eight-minute request identities. They remain readable and resumable without being overwritten by the new profile. Selecting an already completed older profile explicitly through the queue API can create the new MAI version; upgrading the default never automatically reprocesses the library. A saved text-only legacy response can still finish with a visible coarse-timing notice, without inventing word times or voices. Each successful response is saved before continuing. Ambiguous failures retain a pending checkpoint and block a duplicate paid request. Review provider billing and activity before clearing any affected `.pending` checkpoint.
 
@@ -738,8 +857,10 @@ origin setting is synchronized as Config.
 
 `api/index.py` exposes the existing dashboard routes as a Vercel Python Function.
 The hosted role serves the library, transcripts, summaries, subtitles and published figures and can admit owner selections. It never starts a worker, download,
-FFmpeg process, inference service or rolling-summary scheduler. Those continue on your
-hardware through `queue serve` and the local AgentBridge gateway.
+FFmpeg process or inference service. With the Workflow backend enabled it starts
+durable coordination; otherwise processing continues on configured hardware
+through `queue serve`. Legacy native profiles retain their explicit AgentBridge
+configuration.
 
 Create a private R2 bucket and connect a Neon database to the Vercel project. Prefer a
 Frankfurt function/database region and the R2 EU jurisdiction. The hosted reader requires Clerk sign-in. Keep non-production deployments protected by Vercel as well. R2 public access stays off: the app serves published resources through its confined routes. Keep the local gateway authenticated and off public ingress.

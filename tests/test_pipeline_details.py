@@ -169,3 +169,70 @@ class PipelineDetails(unittest.TestCase):
         self.assertEqual(result["processing_seconds"], 20)
         self.assertFalse(result["cost_complete"])
         self.assertIsNone(result["cost_usd"])
+
+    def test_later_receipt_resolves_unknown_cached_generation_cost(self):
+        job = self.job()
+        self.attempt(job, "asr", {"cost": None, "generation_ids": ["known"]})
+        self.attempt(
+            job,
+            "asr",
+            {
+                "cost": 0.02,
+                "generation_ids": ["known"],
+                "charges": [
+                    {
+                        "request_key": "same-request",
+                        "key": "openrouter:known",
+                        "cost_usd": 0.02,
+                        "total_tokens": 10,
+                    },
+                ],
+            },
+        )
+        result = details(self.root, "video")
+        self.assertAlmostEqual(result["cost_usd"], 0.02)
+        self.assertTrue(result["steps"][1]["cost_complete"])
+
+    def test_legacy_aggregate_does_not_double_bill_replayed_partial_receipts(self):
+        job = self.job()
+        self.attempt(job, "asr", {"cost": 0.03, "generation_ids": ["one", "two"]})
+        self.attempt(
+            job,
+            "asr",
+            {
+                "charges": [
+                    {
+                        "request_key": "cached-one",
+                        "key": "openrouter:one",
+                        "generation_id": "one",
+                        "cost_usd": 0.01,
+                        "total_tokens": 10,
+                    }
+                ]
+            },
+            state="failed",
+        )
+        result = details(self.root, "video")
+        self.assertAlmostEqual(result["cost_usd"], 0.03)
+        self.assertTrue(result["steps"][1]["cost_complete"])
+
+    def test_malformed_charge_metadata_remains_unknown_without_breaking_reader(self):
+        job = self.job()
+        self.attempt(
+            job,
+            "asr",
+            {
+                "charges": [
+                    {
+                        "request_key": "saved-request",
+                        "key": {},
+                        "generation_id": {},
+                        "cost_usd": True,
+                        "total_tokens": "10",
+                    }
+                ]
+            },
+        )
+        result = details(self.root, "video")
+        self.assertIsNone(result["cost_usd"])
+        self.assertFalse(result["steps"][1]["cost_complete"])

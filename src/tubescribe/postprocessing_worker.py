@@ -15,7 +15,7 @@ from .agent_gateway import DurableRunFailed, DurableRunPending
 from .config import OPENROUTER_PROFILES
 from .database import database_errors, transient_errors
 from .execution import capacity, job_stage, pipeline_lock
-from .inference import PostprocessingUnavailable
+from .inference import PostprocessingUnavailable, uses_openrouter
 from .inference import ready_bridge as ready
 from .storage import now
 from .youtube import YouTubeError, download_video
@@ -199,13 +199,15 @@ def cached_video(store, job, cache):
 
 
 @job_stage
-def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agent_runner=None):
+def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agent_runner=None,
+                media_factory=None, runner_factory=None):
     if mode not in {"video", "text"}:
         raise ValueError("Postprocessing mode must be video or text")
     row, source = initialize(store, job, mode)
+    gateway = store.config.agent_gateway and not uses_openrouter(store, job["profile"])
     if row["state"] == "complete":
         return False
-    bridge = bridge or bridge_endpoint(store.root)
+    bridge = bridge or (None if uses_openrouter(store, job["profile"]) else bridge_endpoint(store.root))
     stage = "save"
     checkpoint = False
     try:
@@ -222,7 +224,7 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
         journal = output and (output / "agent-run.json").is_file()
         if not checkpoint:
             stage = "process"
-            if agent_runner is None and not store.config.agent_gateway:
+            if agent_runner is None and not gateway and not uses_openrouter(store, job["profile"]):
                 ready(bridge)
             if mode == "video":
                 stage = "download"
@@ -234,7 +236,7 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
                     download_attempts=row["download_attempts"] + 1,
                     error=None,
                 )
-                video = cached_video(store, job, video_cache)
+                video = "prepared-cloud-media" if media_factory else cached_video(store, job, video_cache)
                 update(store, job["id"], download_attempts=0)
             if not journal:
                 output = source.parent / "postprocessing" / uuid.uuid4().hex
@@ -269,11 +271,11 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
         if agent_runner is None:
             from .inference import configured_runner
 
-            agent_runner = configured_runner(
-                store, bridge, output.relative_to(store.root).as_posix()
+            agent_runner = (runner_factory or configured_runner)(
+                store, bridge, output.relative_to(store.root).as_posix(), profile=job["profile"]
             )
         remote_context = None
-        if store.config.agent_gateway:
+        if gateway:
             from .postprocessing import budgets_for, load_source
 
             metadata = load_source(source, None, None, ())
@@ -311,6 +313,7 @@ def process_one(store, job, *, bridge=None, mode="video", video_cache=None, agen
             on_response=saving_response,
             agent_runner=agent_runner,
             tool_context=remote_context,
+            **({"media_factory": media_factory} if media_factory else {}),
         )
         stage = "save"
         update(store, job["id"], stage=stage, save_attempts=row["save_attempts"] + 1)

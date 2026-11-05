@@ -463,6 +463,7 @@ function backToLibrary() {
 }
 function resetReader() {
   readerController?.abort();
+  delete $("reader").readerView;
   readerSignature = "";
   readerIdentity = "";
   const empty = node("div", undefined, "reader-empty");
@@ -477,169 +478,163 @@ async function renderReader(jobs, job) {
     {key: "summary", label: "Summary", url: job.summary_url},
     {key: "transcript", label: "Transcript", url: job.processed_url || job.transcript_url},
     {key: "srt", label: "SRT timestamps", url: job.srt_url},
-  ].filter((tab) => tab.url);
+  ].filter(tab => tab.url);
   tabs.push({key: "pipeline", label: "Pipeline"});
-  const identity = `${job.video_id}|${job.profile}`;
-  if (identity !== readerIdentity || !tabs.some((tab) => tab.key === readerTab)) readerTab = tabs[0]?.key || "";
+  const identity = job.video_id + "|" + job.profile;
+  if (identity !== readerIdentity || !tabs.some(tab => tab.key === readerTab)) readerTab = tabs[0].key;
   readerIdentity = identity;
-  const activeTab = tabs.find((tab) => tab.key === readerTab);
-  const sourceUrl = activeTab?.url;
+  const activeTab = tabs.find(tab => tab.key === readerTab);
+  const sourceUrl = activeTab.url;
   const status = processingStatus(jobs, job);
-  const signature = JSON.stringify([identity, readerTab, tabs, job.title, job.channel_title, job.published_at, job.duration, job.url, job.stage, job.scheduled, job.updated_at, job.summary_updated_at, job.summary_dir, job.postprocessing_dir, status, readerTab === "pipeline" ? feedRevision : null, processingRecord(jobs)]);
-  if (signature === readerSignature) return;
-  readerSignature = signature;
-  readerController?.abort();
-  const controller = new AbortController();
-  readerController = controller;
   const pane = $("reader");
-  const closeBar = node("div", undefined, "reader-close");
-  const close = node("button", undefined, "icon-button");
-  close.setAttribute("aria-label", "Back to library");
-  close.append(icon("x-mark"));
-  close.addEventListener("click", backToLibrary);
-  closeBar.append(node("span", "Your library"), close);
-  const parts = [];
-  const title = node("h2", job.title || job.video_id);
-  title.id = "reader-title";
-  const statusRow = node("div", undefined, "reader-status-row");
-  const youtube = externalLink("", job.url, "document-button");
-  youtube.title = "View on YouTube";
-  youtube.setAttribute("aria-label", youtube.title);
-  const play = node("span", "▶", "youtube-icon");
-  play.setAttribute("aria-hidden", "true");
-  youtube.append(play);
-  statusRow.append(statusBadge(job, jobs));
-  parts.push(title, node("p", [job.channel_title, date(job.published_at, true), duration(job.duration)].filter(Boolean).join(" · "), "reader-meta"), statusRow);
-  const readerToolbar = node("div", undefined, "reader-toolbar");
-  if (jobs.length > 1) {
-    const label = node("label", "Transcript version", "profile-picker");
-    const select = node("select");
-    select.setAttribute("aria-label", "Transcript version");
-    select.replaceChildren(...jobs.map((run) => new Option(run.profile, run.profile)));
-    select.value = job.profile;
-    select.addEventListener("change", () => {
-      selectVideo(jobs, jobs.find((run) => run.profile === select.value), false);
-      pane.querySelector(".profile-picker select")?.focus({preventScroll: true});
-    });
-    label.append(select);
-    parts.push(label);
+  const frame = JSON.stringify([identity, readerTab, jobs.map(run => run.profile)]);
+  let view = pane.readerView;
+  // Discovery has no profile yet. Starting its first job keeps the same panel,
+  // but cancels any profile-less detail request before reading the new job.
+  if (view && !view.controller.signal.aborted && view.tab === "pipeline" && readerTab === "pipeline"
+      && view.job.video_id === job.video_id && !view.job.profile && job.profile && jobs.length === 1) {
+    view.frame = frame;
+    view.controller.abort();
+    view.controller = new AbortController();
+    readerController = view.controller;
+    view.pipelineRequest = null;
   }
-  const chooseTab = (index) => {
-    readerTab = tabs[index].key;
-    renderReader(jobs, job);
-    $(`reader-tab-${readerTab}`)?.focus({preventScroll: true});
-  };
-  const actions = node("div", undefined, "reader-actions");
-  actions.append(youtube);
-  readerToolbar.append(actions);
-  const shareStatus = node("div", undefined, "reader-share-status");
-  shareStatus.setAttribute("role", "status");
-  if (sourceUrl) {
-    const tools = node("div", undefined, "reader-document-actions");
-    const fullPage = resourceLink("", sourceUrl, "arrow-top-right-on-square", "document-button");
-    fullPage.title = `Open ${activeTab.label} full page`;
-    fullPage.setAttribute("aria-label", fullPage.title);
-    const share = node("button", undefined, "document-button");
-    share.title = `Copy ${activeTab.label} link`;
-    share.setAttribute("aria-label", share.title);
-    share.append(icon("clipboard-document"));
-    share.addEventListener("click", async () => {
-      const url = new URL(sourceUrl, location.href).href;
-      share.disabled = true;
-      try {
-        await navigator.clipboard.writeText(url);
-        shareStatus.textContent = "Link copied.";
-      } catch {
-        const field = node("input");
-        field.type = "url";
-        field.readOnly = true;
-        field.value = url;
-        field.setAttribute("aria-label", "Full-page link");
-        shareStatus.replaceChildren(node("span", "Copy this link: "), field);
-        field.select();
-      } finally {
-        share.disabled = false;
-      }
-    });
-    tools.append(fullPage, share);
-    actions.append(tools);
-  }
-  const tabList = node("div", undefined, "reader-tabs");
-  tabList.setAttribute("role", "tablist");
-  tabList.setAttribute("aria-label", "Video content");
-  tabs.forEach((tab, index) => {
-    const button = node("button", tab.label, "reader-tab");
-    button.id = `reader-tab-${tab.key}`;
-    button.setAttribute("role", "tab");
-    button.setAttribute("aria-selected", String(tab.key === readerTab));
-    button.setAttribute("aria-controls", "reader-panel");
-    button.tabIndex = tab.key === readerTab ? 0 : -1;
-    button.addEventListener("click", () => chooseTab(index));
-    button.addEventListener("keydown", (event) => {
-      let next;
-      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
-      else if (event.key === "ArrowLeft") next = (index + tabs.length - 1) % tabs.length;
-      else if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = tabs.length - 1;
-      if (next !== undefined) {
-        event.preventDefault();
-        chooseTab(next);
-      }
-    });
-    tabList.append(button);
-  });
-  const body = node("div", undefined, "reader-body");
-  body.id = "reader-panel";
-  body.setAttribute("aria-live", "polite");
-  if (activeTab) {
+  const fresh = !view || view.frame !== frame || view.controller.signal.aborted;
+  const force = !readerSignature;
+  if (fresh) {
+    readerController?.abort();
+    view = {frame, tab: readerTab, job, jobs, tabs: [], tabButtons: new Map(), controller: new AbortController()};
+    pane.readerView = view;
+    readerController = view.controller;
+    const closeBar = node("div", undefined, "reader-close");
+    const close = node("button", undefined, "icon-button");
+    close.setAttribute("aria-label", "Back to library");
+    close.append(icon("x-mark"));
+    close.addEventListener("click", backToLibrary);
+    closeBar.append(node("span", "Your library"), close);
+    view.title = node("h2");
+    view.title.id = "reader-title";
+    view.meta = node("p", undefined, "reader-meta");
+    const statusRow = node("div", undefined, "reader-status-row");
+    view.badge = statusBadge(job, jobs);
+    statusRow.append(view.badge);
+    const parts = [view.title, view.meta, statusRow];
+    const readerToolbar = node("div", undefined, "reader-toolbar");
+    if (jobs.length > 1) {
+      const label = node("label", "Transcript version", "profile-picker");
+      const select = node("select");
+      select.setAttribute("aria-label", "Transcript version");
+      select.replaceChildren(...jobs.map(run => new Option(run.profile, run.profile)));
+      select.value = job.profile;
+      select.addEventListener("change", () => {
+        selectVideo(view.jobs, view.jobs.find(run => run.profile === select.value), false);
+        pane.querySelector(".profile-picker select")?.focus({preventScroll: true});
+      });
+      label.append(select);
+      parts.push(label);
+    }
+    view.chooseTab = key => {
+      readerTab = key;
+      renderReader(view.jobs, view.job);
+      $("reader-tab-" + readerTab)?.focus({preventScroll: true});
+    };
+    view.youtube = externalLink("", job.url, "document-button");
+    view.youtube.title = "View on YouTube";
+    view.youtube.setAttribute("aria-label", view.youtube.title);
+    const play = node("span", "▶", "youtube-icon");
+    play.setAttribute("aria-hidden", "true");
+    view.youtube.append(play);
+    const actions = node("div", undefined, "reader-actions");
+    actions.append(view.youtube);
+    const shareStatus = node("div", undefined, "reader-share-status");
+    shareStatus.setAttribute("role", "status");
+    if (sourceUrl) {
+      const tools = node("div", undefined, "reader-document-actions");
+      view.fullPage = resourceLink("", sourceUrl, "arrow-top-right-on-square", "document-button");
+      view.fullPage.title = "Open " + activeTab.label + " full page";
+      view.fullPage.setAttribute("aria-label", view.fullPage.title);
+      const share = node("button", undefined, "document-button");
+      share.title = "Copy " + activeTab.label + " link";
+      share.setAttribute("aria-label", share.title);
+      share.append(icon("clipboard-document"));
+      share.addEventListener("click", async () => {
+        const url = new URL(view.sourceUrl, location.href).href;
+        share.disabled = true;
+        try {
+          await navigator.clipboard.writeText(url);
+          shareStatus.textContent = "Link copied.";
+        } catch {
+          const field = node("input");
+          field.type = "url";
+          field.readOnly = true;
+          field.value = url;
+          field.setAttribute("aria-label", "Full-page link");
+          shareStatus.replaceChildren(node("span", "Copy this link: "), field);
+          field.select();
+        } finally {
+          share.disabled = false;
+        }
+      });
+      tools.append(view.fullPage, share);
+      actions.append(tools);
+    }
+    view.tabList = node("div", undefined, "reader-tabs");
+    view.tabList.setAttribute("role", "tablist");
+    view.tabList.setAttribute("aria-label", "Video content");
+    const body = node("div", undefined, "reader-body");
+    body.id = "reader-panel";
+    body.setAttribute("aria-live", readerTab === "pipeline" ? "off" : "polite");
     body.setAttribute("role", "tabpanel");
-    body.setAttribute("aria-labelledby", `reader-tab-${readerTab}`);
+    body.setAttribute("aria-labelledby", "reader-tab-" + readerTab);
     body.tabIndex = 0;
+    view.content = node("div", undefined, "reading-content");
+    body.append(view.content);
+    view.content.addEventListener("click", event => {
+      const link = event.target.closest("a[href]");
+      if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      const url = new URL(link.href);
+      const tab = view.tabs.find(tab => tab.url && new URL(tab.url, location.href).href === url.href);
+      if (tab) {event.preventDefault(); view.chooseTab(tab.key);}
+    });
+    readerToolbar.append(view.tabList, actions);
+    parts.push(shareStatus, readerToolbar, body);
+    const documentView = node("div", undefined, "reader-document");
+    documentView.append(...parts);
+    pane.replaceChildren(closeBar, documentView);
+    pane.scrollTop = 0;
   }
-  const content = node("div", undefined, "reading-content");
-  if (activeTab) parts.push(shareStatus);
-  body.append(content);
-  content.addEventListener("click", (event) => {
-    const link = event.target.closest("a[href]");
-    if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-    const url = new URL(link.href);
-    const index = tabs.findIndex((tab) => tab.url && new URL(tab.url, location.href).href === url.href);
-    if (index !== -1) {
-      event.preventDefault();
-      chooseTab(index);
-    }
-  });
-  if (tabs.length) readerToolbar.prepend(tabList);
-  else statusRow.append(actions);
-  if (tabs.length) parts.push(readerToolbar);
-  parts.push(body);
-  const documentView = node("div", undefined, "reader-document");
-  documentView.append(...parts);
-  pane.replaceChildren(closeBar, documentView);
-  pane.scrollTop = 0;
-  if (readerTab === "pipeline") {
-    content.append(node("p", "Loading pipeline…", "muted"));
-    try {
-      const query = job.profile ? `?profile=${encodeURIComponent(job.profile)}` : "";
-      const response = await libraryFetch(`/api/videos/${encodeURIComponent(job.video_id)}/pipeline${query}`, {signal: controller.signal});
-      if (!response.ok) throw new Error("Pipeline details are temporarily unavailable.");
-      const data = await response.json();
-      if (controller.signal.aborted || readerSignature !== signature) return;
-      renderPipeline(content, data, status);
-    } catch (error) {
-      if (controller.signal.aborted || readerSignature !== signature) return;
-      content.replaceChildren(node("p", error.message, "muted"));
-      const retry = node("button", "Try again");
-      retry.addEventListener("click", () => {readerSignature = ""; renderReader(jobs, job);});
-      content.append(retry);
-    }
-    return;
+  view.jobs = jobs;
+  view.job = job;
+  view.status = status;
+  view.sourceUrl = sourceUrl;
+  setReaderText(view.title, job.title || job.video_id);
+  setReaderText(view.meta, [job.channel_title, date(job.published_at, true), duration(job.duration)].filter(Boolean).join(" · "));
+  const badge = statusBadge(job, jobs);
+  setReaderText(view.badge, badge.textContent);
+  view.badge.className = badge.className;
+  view.youtube.href = job.url;
+  if (view.fullPage) view.fullPage.href = sourceUrl;
+  updateReaderTabs(view, tabs);
+  if (view.pipelineData) renderPipeline(view.content, view.pipelineData, status);
+  // Queue/status updates affect the chrome, never a saved document's cache key.
+  const version = readerTab === "pipeline" ? [feedRevision, job] :
+    readerTab === "summary" ? [job.summary_updated_at, job.summary_dir] : [job.postprocessing_dir];
+  const signature = JSON.stringify([identity, readerTab, sourceUrl, version]);
+  if (!fresh && !force && signature === readerSignature) return;
+  readerSignature = signature;
+  if (readerTab === "pipeline") return refreshReaderPipeline(view, signature);
+  if (!fresh) {
+    view.controller.abort();
+    view.controller = new AbortController();
+    readerController = view.controller;
   }
+  const controller = view.controller;
+  const content = view.content;
   if (!sourceUrl) {
     content.append(node("h3", "The transcript is not ready yet."), node("p", ["failed", "interrupted"].includes(status.stage) ? "The transcript is currently unavailable." : "This video is in your library. Refresh after processing finishes to read its transcript."));
     return;
   }
-  content.append(node("p", `Loading ${activeTab.label.toLowerCase()}…`, "muted"));
+  if (!view.documentLoaded) content.replaceChildren(node("p", "Loading " + activeTab.label.toLowerCase() + "…", "muted"));
   try {
     const cacheKey = sourceUrl + "|" + signature;
     let documentData = readingCache.get(cacheKey);
@@ -674,57 +669,190 @@ async function renderReader(jobs, job) {
       readingCache.set(cacheKey, documentData);
       if (readingCache.size > 8) readingCache.delete(readingCache.keys().next().value);
     }
+    view.documentLoaded = true;
     if (!content.textContent.trim()) content.append(node("p", "This document has no content."));
   } catch (error) {
     if (controller.signal.aborted || readerSignature !== signature) return;
     content.replaceChildren(node("p", error.message, "muted"));
     const retry = node("button", "Try again");
-    retry.addEventListener("click", () => {readerSignature = ""; renderReader(jobs, job);});
+    retry.addEventListener("click", () => {readerSignature = ""; renderReader(view.jobs, view.job);});
     content.append(retry);
   }
 }
 
+function setReaderText(element, value) {
+  if (element.textContent !== value) element.textContent = value;
+}
+
+function updateReaderTabs(view, tabs) {
+  const changed = JSON.stringify(view.tabs) !== JSON.stringify(tabs);
+  view.tabs = tabs;
+  if (!changed) return;
+  const buttons = tabs.map(tab => {
+    let button = view.tabButtons.get(tab.key);
+    if (!button) {
+      button = node("button", tab.label, "reader-tab");
+      button.id = "reader-tab-" + tab.key;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-controls", "reader-panel");
+      button.addEventListener("click", () => view.chooseTab(tab.key));
+      button.addEventListener("keydown", event => {
+        const index = view.tabs.findIndex(value => value.key === tab.key);
+        let next;
+        if (event.key === "ArrowRight") next = (index + 1) % view.tabs.length;
+        else if (event.key === "ArrowLeft") next = (index + view.tabs.length - 1) % view.tabs.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = view.tabs.length - 1;
+        if (next !== undefined) {event.preventDefault(); view.chooseTab(view.tabs[next].key);}
+      });
+      view.tabButtons.set(tab.key, button);
+    }
+    button.setAttribute("aria-selected", String(tab.key === readerTab));
+    button.tabIndex = tab.key === readerTab ? 0 : -1;
+    return button;
+  });
+  for (let index = 0; index < buttons.length; index++) {
+    const current = view.tabList.children[index];
+    if (!current) view.tabList.append(buttons[index]);
+    else if (current !== buttons[index]) view.tabList.insertBefore(buttons[index], current);
+  }
+  for (const [key, button] of view.tabButtons) {
+    if (!tabs.some(tab => tab.key === key)) {button.remove(); view.tabButtons.delete(key);}
+  }
+}
+
+function refreshReaderPipeline(view, signature) {
+  // A push and a queue response can arrive together. Keep one request in flight,
+  // then fetch only the newest pending revision; never blank a saved result.
+  view.pipelineNext = signature;
+  if (view.pipelineRequest) return view.pipelineRequest;
+  if (!view.pipelineData && !view.pipelineError) view.content.replaceChildren(node("p", "Loading pipeline…", "muted"));
+  const controller = view.controller;
+  const request = Promise.resolve().then(async () => {
+    try {
+      while (view.pipelineNext && !controller.signal.aborted) {
+        view.pipelineNext = null;
+        try {
+          const query = view.job.profile ? "?profile=" + encodeURIComponent(view.job.profile) : "";
+          const response = await libraryFetch("/api/videos/" + encodeURIComponent(view.job.video_id) + "/pipeline" + query,
+            {signal: controller.signal});
+          if (!response.ok) throw new Error("Pipeline details are temporarily unavailable.");
+          const data = await response.json();
+          if (controller.signal.aborted) return;
+          if (view.pipelineNext) continue;
+          view.pipelineData = data;
+          renderPipeline(view.content, data, view.status);
+          view.pipelineError?.remove();
+          view.pipelineError = null;
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (view.pipelineNext) continue;
+          if (!view.pipelineError) {
+            view.pipelineError = node("div", undefined, "pipeline-refresh-error");
+            view.pipelineError.setAttribute("role", "status");
+            view.pipelineErrorMessage = node("p", undefined, "muted");
+            const retry = node("button", "Try again");
+            retry.addEventListener("click", () => {readerSignature = ""; renderReader(view.jobs, view.job);});
+            view.pipelineError.append(view.pipelineErrorMessage, retry);
+            if (!view.pipelineData) view.content.replaceChildren(view.pipelineError);
+            else view.content.append(view.pipelineError);
+          }
+          setReaderText(view.pipelineErrorMessage, error.message);
+        }
+      }
+    } finally {if (view.pipelineRequest === request) view.pipelineRequest = null;}
+  });
+  view.pipelineRequest = request;
+  return request;
+}
+
 function renderPipeline(content, data, status) {
-  const money = value => value == null ? "Not recorded" : `$${value.toFixed(4)}`;
-  const elapsed = value => value == null ? "Not recorded" : value < 60 ? `${value.toFixed(1)}s` : duration(value);
+  let view = content.pipelineView;
+  const shape = JSON.stringify(data.steps.map(step => step.key));
+  if (!view || view.shape !== shape) {
+    const heading = node("div", undefined, "pipeline-progress");
+    const caption = node("div", undefined, "pipeline-progress-caption");
+    caption.setAttribute("role", "status");
+    caption.setAttribute("aria-live", "polite");
+    view = {shape, status: node("span"), count: node("span"), progress: node("progress"),
+      stats: [], steps: [], provenance: []};
+    view.progress.setAttribute("aria-label", "Video processing progress");
+    caption.append(view.status, view.count);
+    heading.append(caption, view.progress);
+    const stats = node("dl", undefined, "pipeline-stats");
+    for (let index = 0; index < 6; index++) {
+      const field = {label: node("dt"), value: node("dd")};
+      const item = node("div");
+      item.append(field.label, field.value);
+      stats.append(item);
+      view.stats.push(field);
+    }
+    const steps = node("ol", undefined, "pipeline-steps");
+    for (const step of data.steps) {
+      const item = node("li", undefined, "pipeline-step");
+      const title = node("div", undefined, "pipeline-step-heading");
+      const field = {label: node("strong"), badge: node("span"), description: node("p"),
+        retry: node("p", undefined, "pipeline-step-meta")};
+      title.append(field.label, field.badge);
+      item.append(title, field.description, field.retry);
+      steps.append(item);
+      view.steps.push(field);
+    }
+    const provenance = node("dl", undefined, "pipeline-provenance");
+    for (const label of ["Profile", "Transcription model", "Language", "First recorded attempt", "Finished"]) {
+      const field = {label: node("dt", label), value: node("dd")};
+      provenance.append(field.label, field.value);
+      view.provenance.push(field);
+    }
+    content.replaceChildren(heading, stats, steps, provenance);
+    content.pipelineView = view;
+  }
+  const money = value => value == null ? "Not recorded" : "$" + value.toFixed(4);
+  const elapsed = value => value == null ? "Not recorded" : value < 60 ? value.toFixed(1) + "s" : duration(value);
   const count = value => value == null ? "Not recorded" : value.toLocaleString();
-  const progress = data.steps.filter(step => ["complete", "included"].includes(step.state)).length;
-  const heading = node("div", undefined, "pipeline-heading");
-  heading.append(node("h3", data.complete ? "Pipeline complete" : status.label), node("span", `${progress} of ${data.steps.length} steps complete`, "muted"));
-  const stats = node("dl", undefined, "pipeline-stats");
-  for (const [label, value] of [
-    [data.cost_complete ? "Final recorded cost" : data.complete ? "Recorded cost · partial" : "Recorded cost so far", money(data.cost_usd)],
+  // Hosted speaker attribution happens inside transcription, not as another
+  // completed phase before downloading has even started.
+  const required = data.steps.filter(step => step.state !== "included");
+  const completed = required.filter(step => step.state === "complete").length;
+  const progressText = completed + " of " + required.length + " steps complete";
+  setReaderText(view.status, data.complete ? "Pipeline complete" : status.label);
+  setReaderText(view.count, progressText);
+  view.progress.max = Math.max(required.length, 1);
+  view.progress.value = completed;
+  view.progress.setAttribute("aria-valuetext", (data.complete ? "Pipeline complete. " : status.label + ". ") + progressText);
+  const stats = [
+    [data.cost_complete ? "Model cost" : data.complete ? "Model cost · partial" : "Model cost so far", money(data.cost_usd)],
     ["Processing time", elapsed(data.processing_seconds)],
     ["Video duration", data.duration_seconds == null ? "Unknown" : duration(data.duration_seconds)],
     ["Recorded tokens", count(data.total_tokens)],
     ["Speakers", count(data.speakers)], ["Figures", count(data.figures)],
-  ]) {
-    const stat = node("div");
-    stat.append(node("dt", label), node("dd", value));
-    stats.append(stat);
-  }
-  const steps = node("ol", undefined, "pipeline-steps");
-  for (const step of data.steps) {
-    const item = node("li", undefined, "pipeline-step");
-    const title = node("div", undefined, "pipeline-step-heading");
-    const label = ({pending: "Waiting", active: "In progress", included: "Included"})[step.state] || human(step.state);
-    title.append(node("strong", step.label), node("span", label, `badge ${step.state}`));
-    const facts = [];
-    if (step.elapsed_seconds != null) facts.push(elapsed(step.elapsed_seconds));
-    if (step.attempts != null) facts.push(`${step.attempts} attempt${step.attempts === 1 ? "" : "s"}`);
-    if (step.total_tokens != null) facts.push(`${count(step.total_tokens)} tokens`);
-    if (step.state !== "included") facts.push(step.cost_usd == null ? "Cost not recorded" : `${money(step.cost_usd)}${step.cost_complete ? "" : " recorded (partial)"}`);
-    item.append(title);
-    if (step.note) item.append(node("p", step.note, "muted"));
-    if (facts.length) item.append(node("p", facts.join(" · "), "pipeline-step-meta"));
-    if (step.retry_at) item.append(node("p", `Retry scheduled: ${date(step.retry_at)}`, "pipeline-step-meta"));
-    steps.append(item);
-  }
-  const provenance = node("dl", undefined, "pipeline-provenance");
-  for (const [label, value] of [["Profile", data.profile], ["Transcription model", data.model], ["Language", data.language], ["First recorded attempt", date(data.started_at)], ["Finished", date(data.completed_at)]]) {
-    if (value) provenance.append(node("dt", label), node("dd", value));
-  }
-  content.replaceChildren(heading, stats, node("p", data.cost_note, "pipeline-cost-note"), steps, provenance);
+  ];
+  stats.forEach(([label, value], index) => {
+    setReaderText(view.stats[index].label, label);
+    setReaderText(view.stats[index].value, value);
+  });
+  const descriptions = {
+    download: "Downloads the video's audio for transcription.",
+    transcription: "Turns speech into text with word-level timestamps.",
+    diarization: "Identifies speakers and labels their turns in the conversation.",
+    postprocessing: "Cleans up the transcript and adds speaker and visual context.",
+    summary: "Creates a concise summary of the video's main ideas.",
+  };
+  data.steps.forEach((step, index) => {
+    const field = view.steps[index];
+    setReaderText(field.label, step.label);
+    setReaderText(field.badge, ({pending: "Waiting", active: "In progress", included: "Included"})[step.state] || human(step.state));
+    field.badge.className = "badge " + step.state;
+    setReaderText(field.description, step.state === "included" ? "Identifies speakers as part of transcription." :
+      descriptions[step.key] || step.note || "Processes this part of the video.");
+    field.retry.hidden = !step.retry_at;
+    setReaderText(field.retry, step.retry_at ? "Retry scheduled: " + date(step.retry_at) : "");
+  });
+  [data.profile, data.model, data.language, date(data.started_at), date(data.completed_at)].forEach((value, index) => {
+    const field = view.provenance[index];
+    field.label.hidden = field.value.hidden = !value;
+    setReaderText(field.value, value || "");
+  });
 }
 
 function applyFeed(data) {
@@ -753,6 +881,8 @@ async function refresh(event) {
   if (readerTab === "pipeline") {
     readerSignature = "";
     rendered = "";
+    const view = $("reader").readerView;
+    if (view && !view.controller.signal.aborted) void renderReader(view.jobs, view.job);
   }
   if (realtimeSettings.enabled && ownsLibrary) {
     const generation = identityGeneration;

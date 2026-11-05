@@ -66,6 +66,19 @@ class LocalTools:
     def __init__(self, handler_factory):
         self.handler_factory = handler_factory
 
+    def direct(self, name, arguments):
+        """In-process hosted tools preserve durable suspension exceptions."""
+        handlers = self.handler_factory("").domain_handlers
+        if name not in handlers or not isinstance(arguments, dict):
+            raise ValueError("Unknown tool or invalid arguments")
+        import subprocess
+
+        try:
+            return handlers[name](arguments)
+        except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
+            return {"success": False,
+                    "contentItems": [{"type": "inputText", "text": "Tool error: " + str(error)}]}
+
     @contextmanager
     def open(self):
         token = secrets.token_urlsafe(32)
@@ -139,6 +152,7 @@ def tool_handler(handlers, token):
     context = copy_context()
 
     class Handler(BaseHTTPRequestHandler):
+        domain_handlers = handlers
         def log_message(self, *_):
             pass
 
@@ -183,10 +197,26 @@ def health_request(endpoint, *, headers=None, transport=None):
         return client.get(endpoint + "/health")
 
 
-def configured_runner(store, endpoint, run_key):
+def uses_openrouter(store, profile=None):
+    from .config import OPENROUTER_PROFILES
+
+    return getattr(store.config, "manual_queue", False) or profile in OPENROUTER_PROFILES
+
+
+def text_model(store, profile=None):
+    from .openrouter import TEXT_MODEL
+
+    return TEXT_MODEL if uses_openrouter(store, profile) else MODEL
+
+
+def configured_runner(store, endpoint, run_key, *, profile=None):
     """Runtime selection preserves the synchronous local bridge by default."""
     import os
 
+    if uses_openrouter(store, profile):
+        from .openrouter_agent import OpenRouterAgentRunner
+
+        return CapacityAgentRunner(OpenRouterAgentRunner(store, run_key), store.root)
     if store.config.agent_gateway:
         from .agent_gateway import DurableAgentRunner
 
@@ -202,14 +232,26 @@ def configured_runner(store, endpoint, run_key):
 
 
 class CapacityAgentRunner:
-    def __init__(self, runner, root):
+    def __init__(self, runner, root, *, defer=False):
         self.runner, self.root = runner, root
+        self.defer = defer
+
+    @property
+    def model(self):
+        return getattr(self.runner, "model", MODEL)
 
     def run(self, request, tools):
-        from .execution import capacity
+        from .execution import ClaimBusy, capacity
 
-        with capacity(self.root, "agent"):
-            return self.runner.run(request, tools)
+        try:
+            with capacity(self.root, "agent", **({"wait": False} if self.defer else {})):
+                return self.runner.run(request, tools)
+        except ClaimBusy:
+            if not self.defer:
+                raise
+            from .agent_gateway import DurableRunPending
+
+            raise DurableRunPending("Agent capacity occupied; suspend the Function", retry_after=30) from None
 
 
 def client_options():

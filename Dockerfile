@@ -32,3 +32,17 @@ USER tubescribe
 ENV TUBESCRIBE_NETWORK_TESTS=1
 ENTRYPOINT ["python"]
 CMD ["-m", "unittest", "discover", "-s", "tests", "-p", "test_network_runtime.py", "-v"]
+
+FROM runtime AS cloud-verification
+USER root
+RUN uv --config-file uv.toml sync --frozen --no-editable --extra cloud --group dev
+COPY . /app
+USER tubescribe
+ENV TUBESCRIBE_NETWORK_TESTS=0 TUBESCRIBE_DATA=""
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["ruff check src tests api scripts/rehearse-containers && python -m unittest discover -s tests -q && node --test tests/*.test.mjs"]
+
+# Media preparation has no model key, Agent Vault proxy or queue consumer.
+FROM runtime AS cloud-media
+ENTRYPOINT ["python", "-m", "tubescribe.cloud_media"]
+CMD []

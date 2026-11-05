@@ -663,6 +663,11 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     if not identity.owns_library:
                         self.empty_library(url.path, query)
                         return
+                if url.path == "/api/processing/worker" and access.enabled and config.manual_queue:
+                    from .workflow_dispatch import call
+
+                    self.send_json(call("status", request_token=self.headers.get("x-vercel-oidc-token")))
+                    return
                 if url.path == "/api/processing" and access.enabled and config.manual_queue:
                     from .manual_queue import status
 
@@ -879,6 +884,13 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                         }
                     )
                 elif url.path == "/api/feed":
+                    # Bootstrap the sleeping discovery clock from an authenticated
+                    # owner visit. Once started it continues with the browser closed.
+                    # Admission still comes exclusively from the explicit Process action.
+                    if access.enabled and config.manual_queue and not query.get("revision"):
+                        from .workflow_dispatch import bootstrap
+
+                        bootstrap(request_token=self.headers.get("x-vercel-oidc-token"))
                     self.send_json(
                         feed_changes.get(query.get("revision", [None])[0]), compress=True
                     )
@@ -1102,7 +1114,14 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                         raise ValueError("Invalid processing selection")
                     from .manual_queue import change
 
-                    self.send_json(change(root, payload["action"], payload["video_ids"]))
+                    result = change(root, payload["action"], payload["video_ids"])
+                    if result["changed"] and payload["action"] != "cancel":
+                        from .workflow_dispatch import call
+
+                        worker = call("wake", request_token=self.headers.get("x-vercel-oidc-token"))
+                        if worker.get("configured"):
+                            result["worker"] = worker
+                    self.send_json(result)
                 except (ValueError, TypeError):
                     self.send_json({"error": "Invalid queue action or video selection"}, 400)
                 except Exception:

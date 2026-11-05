@@ -11,7 +11,7 @@ def revisions(db):
 
 
 @contextmanager
-def notifications():
+def notifications(*, stop=None):
     """LISTEN must use a direct session, never a transaction-pool connection."""
     import psycopg
 
@@ -28,15 +28,25 @@ def notifications():
             # Notifications are hints; the durable queue is checked after every
             # wake and reconnect. Subscribe BEFORE checking it to close the race.
             while True:
+                if stop is not None and stop.is_set():
+                    return
                 timeout = None if deadline is None else max(0, deadline - time.time())
                 if timeout == 0:
                     return
+                # Only the local socket wait is bounded for graceful shutdown.
+                # A quiet timeout must not wake the dispatcher and query the DB.
+                if stop is not None:
+                    timeout = min(timeout, 1) if timeout is not None else 1
                 stream = connection.notifies(timeout=timeout, stop_after=1)
                 try:
                     notice = next(stream, None)
                 finally:
                     stream.close()
-                if notice is None or notice.payload == schema:
+                if notice is not None and notice.payload == schema:
+                    return
+                if notice is None and (
+                    stop is None or (deadline is not None and time.time() >= deadline)
+                ):
                     return
 
         yield wait
