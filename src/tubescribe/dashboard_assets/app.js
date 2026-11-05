@@ -31,7 +31,7 @@ let processingSettings = null;
 let discoveredView = false;
 let processingRecords = null;
 let processingRevision = 0;
-let processingBusy = false;
+const pendingProcessing = new Set();
 const selectedForProcessing = new Set();
 const dateFormatter = new Intl.DateTimeFormat(undefined, {day: "numeric", month: "short", year: "numeric"});
 const narrowReader = window.matchMedia("(max-width: 900px)");
@@ -164,7 +164,7 @@ function updateProcessingEstimate() {
   const missing = known.length < selected.length ? " · Some durations unknown" : "";
   const cost = known.length ? `${transcriptionEstimate(known)}${missing}` : "Duration unavailable";
   $("processing-estimate").textContent = selected.length ? `${selected.length} selected · ${cost}` : "Select videos to process";
-  $("queue-selected").disabled = processingBusy || !selected.length;
+  $("queue-selected").disabled = !selected.length || selected.some(id => pendingProcessing.has(id));
 }
 async function refreshProcessing() {
   if (!ownsLibrary || !processingSettings || !signedInUser) return;
@@ -186,9 +186,9 @@ async function refreshProcessing() {
   }
 }
 async function changeProcessing(action, ids) {
-  if (processingBusy || !ownsLibrary || !processingSettings) return;
+  if (!ownsLibrary || !processingSettings || !ids.length || ids.some(id => pendingProcessing.has(id))) return;
   const generation = identityGeneration;
-  processingBusy = true;
+  for (const id of ids) pendingProcessing.add(id);
   $("processing-message").textContent = action === "cancel" ? "Removing from the queue…" : "Queueing videos…";
   updateProcessingEstimate();
   renderFeed();
@@ -207,7 +207,7 @@ async function changeProcessing(action, ids) {
     if (generation === identityGeneration) $("processing-message").textContent = error.message;
   } finally {
     if (generation === identityGeneration) {
-      processingBusy = false;
+      for (const id of ids) pendingProcessing.delete(id);
       updateProcessingEstimate();
       renderFeed();
     }
@@ -273,6 +273,7 @@ function videoRow(jobs) {
       const checkbox = node("input");
       checkbox.type = "checkbox";
       checkbox.checked = selectedForProcessing.has(video.video_id);
+      checkbox.disabled = pendingProcessing.has(video.video_id);
       checkbox.setAttribute("aria-label", `Queue ${video.title}`);
       checkbox.addEventListener("change", () => {
         if (checkbox.checked && selectedForProcessing.size >= 50) {
@@ -290,24 +291,38 @@ function videoRow(jobs) {
     } else if (["queued", "failed", "interrupted"].includes(state)) {
       const action = state === "queued" ? "cancel" : "retry";
       const button = node("button", action === "cancel" ? "Remove" : "Retry", "button");
+      button.disabled = pendingProcessing.has(video.video_id);
       button.addEventListener("click", () => changeProcessing(action, [video.video_id]));
       bottom.append(button);
     }
     description.append(bottom);
   } else if (displayStage(job) !== "complete") {
     bottom.append(statusBadge(job, jobs));
-    if (canQueue(jobs) || canRetry(jobs)) {
-      const button = node("button", "Process", "button");
+    const {stage, label} = processingStatus(jobs, job);
+    const busy = pendingProcessing.has(video.video_id) || ["queued", "active", "downloading", "transcribing",
+      "awaiting_diarization", "diarizing", "awaiting_postprocessing", "postprocessing",
+      "awaiting_summary", "summarizing"].includes(stage);
+    if (busy || canQueue(jobs) || canRetry(jobs)) {
+      const button = node("button", undefined, "button process-button");
       button.dataset.focus = `process-${video.video_id}`;
-      button.setAttribute("aria-label", `Process ${video.title || video.video_id}`);
-      button.disabled = processingBusy;
-      if (Number.isFinite(video.duration) && video.duration > 0) {
+      button.setAttribute("aria-label", `${busy ? "Processing" : "Process"} ${video.title || video.video_id}`);
+      button.disabled = busy;
+      if (busy) {
+        button.setAttribute("aria-busy", "true");
+        button.title = pendingProcessing.has(video.video_id) ? "Updating processing queue" : label;
+        const spinner = node("span", undefined, "process-spinner");
+        spinner.setAttribute("aria-hidden", "true");
+        button.append(spinner, node("span", "Processing"));
+      } else {
+        button.textContent = "Process";
+      }
+      if (!busy && Number.isFinite(video.duration) && video.duration > 0) {
         button.title = transcriptionEstimate([video.duration]);
       }
       button.addEventListener("click", () => changeProcessing(canRetry(jobs) ? "retry" : "queue", [video.video_id]));
       bottom.append(button);
     }
-    description.append(bottom);
+    if (bottom.children.length) description.append(bottom);
   }
   main.append(description);
   row.append(main);
@@ -316,7 +331,7 @@ function videoRow(jobs) {
 function renderFeed() {
   if (!archive) return;
   const search = $("video-search").value.trim().toLowerCase();
-  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, feedRevision, discoveredView, processingRecords && [...processingRecords], processingBusy, [...selectedForProcessing]]);
+  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, feedRevision, discoveredView, processingRecords && [...processingRecords], [...pendingProcessing], [...selectedForProcessing]]);
   if (signature === rendered) return;
   rendered = signature;
   const focused = document.activeElement?.dataset.focus;
@@ -376,7 +391,7 @@ function renderFeed() {
   const visible = matches.slice(0, Math.max(feedLimit, selectedIndex + 1));
   const rows = visible.map(({jobs}) => {
     const id = jobs[0].video_id;
-    const signature = JSON.stringify([jobs, discoveredView, ownsLibrary, Boolean(processingSettings && processingRecords), processingRecord(jobs), processingBusy, selectedForProcessing.has(id)]);
+    const signature = JSON.stringify([jobs, discoveredView, ownsLibrary, Boolean(processingSettings && processingRecords), processingRecord(jobs), pendingProcessing.has(id), selectedForProcessing.has(id)]);
     let cached = rowCache.get(id);
     if (!cached || cached.signature !== signature) {
       cached = {signature, row: videoRow(jobs)};
@@ -1203,7 +1218,7 @@ function clearPrivateLibrary() {
   discoveredView = false;
   processingRecords = null;
   processingRevision += 1;
-  processingBusy = false;
+  pendingProcessing.clear();
   selectedForProcessing.clear();
   $("processing-controls").hidden = true;
   $("processing-message").textContent = "";

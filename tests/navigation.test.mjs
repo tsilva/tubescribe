@@ -67,7 +67,7 @@ test("switching accounts clears the former owner's channel names", () => {
   context.syncScopes();
   Object.assign(context, {
     identityGeneration: 0, liveFeed: null, processingRevision: 0,
-    selectedForProcessing: new Set(), readerController: null, feedObserver: null,
+    pendingProcessing: new Set(), selectedForProcessing: new Set(), readerController: null, feedObserver: null,
     readingCache: new Map(), rowCache: new Map(), feedRecords: new Map(),
     resetReader() {}, sessionStorage: {removeItem() {}},
   });
