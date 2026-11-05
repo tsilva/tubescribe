@@ -33,6 +33,6 @@ class handler(BaseHTTPRequestHandler):
         from tubescribe.workflow_dispatch import call
 
         result = call("wake", request_token=self.headers.get("x-vercel-oidc-token"))
-        self.send_response(204 if result.get("notified") else 503)
+        self.send_response(204 if not result.get("configured") or result.get("notified") else 503)
         self.send_header("Cache-Control", "no-store")
         self.end_headers()

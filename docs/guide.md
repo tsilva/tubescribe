@@ -820,6 +820,11 @@ Production delivery gates. Stop the Mac discovery service only after cloud
 discovery is verified. Synthetic tests and a READY reader build alone do not
 establish a live cutover.
 
+YouTube can require an authentication or bot check from cloud networks. This is
+a media-ingress blocker even when the same downloader works on local hardware.
+Do not activate the cloud backend until its media access is verified. Never copy
+browser cookies or bypass a challenge as an automatic recovery action.
+
 ### Owner-selected processing on the Mac
 
 Enable `TUBESCRIBE_MANUAL_QUEUE=1` in the hosted reader, Mac feed watcher and Mac queue consumer. They share the existing archive database, and the consumer shares the archive object store. The reader's database binding must permit the owner endpoint to insert jobs and submissions and update their queue state. Use the existing Clerk ownership registry.

@@ -60,7 +60,7 @@ line-length = 100
 select = ["E4", "E7", "E9", "F", "I", "UP"]
 
 [tool.vercel]
-entrypoint = "api/index.py"
+entrypoint = "api.index:handler"
 
 [[tool.vercel.workflows]]
 entrypoint = "cloud_workflows:wf"

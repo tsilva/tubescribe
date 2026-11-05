@@ -7,21 +7,9 @@
     "api/index.py": {
       "maxDuration": 60,
       "excludeFiles": "{data/**,models/**,tests/**,scripts/**,node_modules/**,src/reader/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
-    },
-    "api/maintenance.py": {
-      "maxDuration": 60,
-      "excludeFiles": "{data/**,models/**,tests/**,scripts/**,node_modules/**,src/reader/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
     }
   },
   "rewrites": [
-    {
-      "source": "/_py_workflows/:path*",
-      "destination": "/_py_workflows/:path*"
-    },
-    {
-      "source": "/api/maintenance",
-      "destination": "/api/maintenance"
-    },
     {
       "source": "/api/live",
       "destination": "/api/realtime"

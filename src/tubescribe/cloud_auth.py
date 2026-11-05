@@ -65,6 +65,11 @@ def launch(payload, *, probe=False, env=None, client=None, run=None):
     child_env = {k: env[k] for k in (
         "PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "PYTHONUNBUFFERED", "TMPDIR"
     ) if k in env}
+    # Vercel adds bundled dependencies to sys.path in its runtime trampoline.
+    # A fresh interpreter must inherit those paths to import the isolated client.
+    child_env["PYTHONPATH"] = os.pathsep.join(
+        str(Path(entry or ".").resolve()) for entry in sys.path
+    )
     from .openrouter import PLACEHOLDER
 
     child_env["OPENROUTER_API_KEY"] = PLACEHOLDER
