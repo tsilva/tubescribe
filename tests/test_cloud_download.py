@@ -128,6 +128,34 @@ class DownloadRecovery(unittest.TestCase):
         finally:
             CURRENT_SUBMISSION.reset(token)
 
+    def test_finalization_refreshes_delayed_usage_without_repeating_download(self):
+        from datetime import UTC, datetime, timedelta
+
+        state = {"nonce": "a" * 32, "file": FILE, "phase": "complete", "run": run("SUCCEEDED")}
+        self.store.blobs.put(self.key, json.dumps(state).encode())
+        finished = datetime.now(UTC) - timedelta(seconds=120)
+        settled = {**run("SUCCEEDED", cost=.012), "finishedAt": finished.isoformat(),
+                   "eventUsage": {"downloadMb": {"eventTotalUsd": .012}}}
+        send = Mock(return_value={"status": 200, "run": settled})
+        value = acquire(self.store, self.job, send=send, settle=True)
+        self.assertTrue(value["billing_settled"])
+        self.assertEqual(download_metrics(value)["charges"][0]["cost_usd"], .012)
+        self.assertEqual(send.call_args.args[0], {"operation": "status", "run_id": RUN})
+        acquire(self.store, self.job, send=Mock(side_effect=AssertionError), settle=True)
+
+    def test_finalization_waits_for_usage_receipt_to_cover_reported_events(self):
+        from datetime import UTC, datetime, timedelta
+
+        self.store.blobs.put(self.key, json.dumps({
+            "nonce": "a" * 32, "file": FILE, "run": run("SUCCEEDED"),
+        }).encode())
+        value = {**run("SUCCEEDED", cost=0),
+                 "finishedAt": (datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+                 "eventUsage": {"downloadMb": {"eventTotalUsd": .012}}}
+        with self.assertRaises(DurableRunPending):
+            acquire(self.store, self.job, send=Mock(return_value={"status": 200, "run": value}), settle=True)
+        self.assertNotIn("billing_settled", json.loads(self.store.read_key(self.key)))
+
 
 class MediaClient(unittest.TestCase):
     def test_start_pins_actor_build_limits_and_disables_transcription(self):

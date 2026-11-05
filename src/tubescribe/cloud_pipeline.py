@@ -168,6 +168,12 @@ def advance(store, identifier, *, send=None, media_prepare=None):
         stage = Plan().next_stage(job)
         asr_started = False
         if stage is None:
+            from .cloud_download import acquisition
+
+            try:
+                acquisition(store, job, settle=True)
+            except DurableRunPending as error:
+                return {"done": False, "delay": error.retry_after}
             store.update_submission(identifier, state="complete", worker_id=None,
                                     result=json.dumps({"completed": 1, "failed": 0}))
             return {"done": True, "state": "complete"}

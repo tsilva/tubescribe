@@ -42,7 +42,7 @@ def receipt(run):
         raise ValueError("Unexpected media actor")
     return {key: run.get(key) for key in (
         "id", "actId", "status", "startedAt", "finishedAt", "defaultDatasetId",
-        "defaultKeyValueStoreId", "usageTotalUsd", "stats", "options",
+        "defaultKeyValueStoreId", "usageTotalUsd", "stats", "options", "eventUsage",
     )}
 
 

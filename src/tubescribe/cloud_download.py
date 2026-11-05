@@ -14,7 +14,7 @@ from .apify_client import ACTOR, MAX_COST, stored_file
 from .billing import amount
 
 
-def acquire(store, job, *, send=None):
+def acquire(store, job, *, send=None, settle=False):
     if send is None:
         from .cloud_auth import workflow_send
 
@@ -59,6 +59,20 @@ def acquire(store, job, *, send=None):
         save()
         raise DurableRunPending("Media acquisition started", retry_after=20)
     if state.get("file"):
+        if settle and not state.get("billing_settled"):
+            run = call("status", run_id=state["run"]["id"])["run"]
+            state["run"] = run
+            save()
+            finished = datetime.fromisoformat(run["finishedAt"].replace("Z", "+00:00")).timestamp()
+            cost = amount(run.get("usageTotalUsd"))
+            events = sum(amount(e.get("eventTotalUsd")) or 0
+                         for e in (run.get("eventUsage") or {}).values())
+            # Apify can return SUCCEEDED before its final charge is visible.
+            # A delayed metadata GET does not repeat the download or model work.
+            if time.time() - finished < 60 or cost is None or cost + 1e-9 < events:
+                raise DurableRunPending("Waiting for media usage settlement", retry_after=30)
+            state["billing_settled"] = True
+            save()
         return state
     if not state.get("run"):
         result = call("recover", nonce=state["nonce"], started_at=state["started_at"])
@@ -136,12 +150,14 @@ def download_metrics(state):
     }]}
 
 
-def acquisition(store, job):
-    attempt = store.begin_attempt(job["id"], "download")
+def acquisition(store, job, *, settle=False):
     key = f"transcripts/{job['channel_id']}/{job['video_id']}/{job['profile']}/cloud-media/apify.json"
+    if settle and not store.exists(key):
+        return None  # Existing non-Apify publications have no media bill to refresh.
+    attempt = store.begin_attempt(job["id"], "download")
     state = "failed"
     try:
-        result = acquire(store, job)
+        result = acquire(store, job, settle=settle)
         state = "complete"
         return result
     except DurableRunPending:

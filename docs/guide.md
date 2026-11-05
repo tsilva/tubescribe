@@ -858,7 +858,9 @@ copied into the private archive during preparation rather than relying on its
 short provider retention. Only `downloadedFileUrl` on Apify's stored-file host is
 accepted; raw IP-bound YouTube stream URLs are rejected. Pipeline totals include
 Apify's cumulative reported run usage once, including resumed runs, separately
-from OpenRouter model receipts.
+from OpenRouter model receipts. Before completing a selection, the coordinator
+refreshes the terminal media receipt after a settlement delay and checks it
+covers reported charge events; it never repeats the download for that check.
 
 ### Owner-selected processing on the Mac
 
