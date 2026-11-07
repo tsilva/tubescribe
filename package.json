@@ -14,7 +14,6 @@
     "@neon/realtime": "0.1.1"
   },
   "devDependencies": {
-    "@clerk/ui": "1.40.0",
     "esbuild": "0.25.12"
   }
 }

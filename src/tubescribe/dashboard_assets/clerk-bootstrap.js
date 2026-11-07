@@ -17,11 +17,10 @@ window.tubeScribeClerkReady ??= (async () => {
   if (document.readyState === "loading") {
     await new Promise(resolve => document.addEventListener("readystatechange", resolve, {once: true}));
   }
-  const [ui, sdk] = settings.browser_scripts.map(path => frontend.origin + path);
-  for (const url of [settings.ui_script ?? ui, sdk]) {
+  for (const path of settings.browser_scripts) {
     await new Promise((resolve, reject) => {
       const script = document.createElement("script");
-      script.src = url;
+      script.src = frontend.origin + path;
       script.crossOrigin = "anonymous";
       script.dataset.clerkPublishableKey = settings.publishable_key;
       script.onload = resolve;

@@ -34,23 +34,10 @@ from .transfer import operation
 ASSETS = Path(__file__).with_name("dashboard_assets")
 CLERK_BOOTSTRAP = (ASSETS / "clerk-bootstrap.js").read_text(encoding="utf-8")
 CLERK_BOOTSTRAP_HASH = base64.b64encode(hashlib.sha256(CLERK_BOOTSTRAP.encode()).digest()).decode()
-CLERK_UI_VERSION = "1.40.0"
 CLERK_BROWSER_SCRIPTS = (
-    f"/npm/@clerk/ui@{CLERK_UI_VERSION}/dist/ui.browser.js",
+    "/npm/@clerk/ui@1.40.0/dist/ui.browser.js",
     "/npm/@clerk/clerk-js@6.39.0/dist/clerk.browser.js",
 )
-CLERK_UI_PREFIX = f"/clerk-ui/{CLERK_UI_VERSION}/"
-CLERK_UI_ENTRY = CLERK_UI_PREFIX + "ui.browser.js"
-# Vercel can import tubescribe from its vendored Python package. Build outputs
-# live at the application root, independently of that package's location.
-CLERK_UI_BUILD = Path(os.environ.get("LAMBDA_TASK_ROOT") or (
-    Path.cwd() if os.environ.get("VERCEL") else ASSETS.parents[2]
-)) / "clerk-ui-build"
-CLERK_UI_ASSETS = {
-    CLERK_UI_PREFIX + path.name: path
-    for path in (CLERK_UI_BUILD / CLERK_UI_VERSION).glob("*")
-    if path.is_file() and (path.suffix == ".js" or path.name == "LICENSE")
-}
 STATIC_ASSETS = {
     "/": "index.html",
     "/app.js": "app.js",
@@ -483,8 +470,6 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
         settings = {**access.configuration(), "realtime": configuration()}
         if access.enabled:
             settings["browser_scripts"] = CLERK_BROWSER_SCRIPTS
-            if CLERK_UI_ENTRY in CLERK_UI_ASSETS:
-                settings["ui_script"] = CLERK_UI_ENTRY
         if access.enabled and config.manual_queue:
             from .manual_queue import PROFILE
             from .openrouter import CHUNK_SECONDS, PRICE_PER_SECOND
@@ -511,7 +496,6 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             generated_html=False,
             content_encoding=None,
             vary_encoding=False,
-            clerk_ui=False,
         ):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -530,16 +514,11 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     cache = "public, max-age=0, s-maxage=5, stale-while-revalidate=10"
                 elif path.endswith("/cover.png"):
                     cache = "public, max-age=300, s-maxage=3600"
-            vary = "Accept, Accept-Encoding" if vary_encoding else "Accept"
-            if clerk_ui and not config.access_token:
-                cache = "public, max-age=31536000, immutable"
-                self.send_header("Vercel-CDN-Cache-Control", "public, s-maxage=31536000")
-                vary += ", Origin, Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest"
-            elif access.enabled:
+            self.send_header("Cache-Control", cache)
+            if access.enabled:
                 self.send_header("CDN-Cache-Control", "no-store")
                 self.send_header("Vercel-CDN-Cache-Control", "no-store")
-            self.send_header("Cache-Control", cache)
-            self.send_header("Vary", vary)
+            self.send_header("Vary", "Accept, Accept-Encoding" if vary_encoding else "Accept")
             if content_encoding:
                 self.send_header("Content-Encoding", content_encoding)
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -673,7 +652,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     return
                 # Check ownership before resolving ANY data URL, including legacy
                 # paths, figures, metadata, downloads, and HEAD requests.
-                static = url.path in STATIC_ASSETS or url.path in CLERK_UI_ASSETS
+                static = url.path in STATIC_ASSETS
                 if access.enabled and not static and url.path != "/llms.txt":
                     identity = access.identify(self.headers)
                     if identity is None:
@@ -1059,27 +1038,17 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             else None,
                         )
                         self.write_data(data)
-                elif url.path in CLERK_UI_ASSETS:
-                    path = CLERK_UI_ASSETS[url.path]
-                    data = path.read_bytes()
-                    self.send_headers(
-                        200, CONTENT_TYPES.get(path.suffix, "text/plain; charset=utf-8"),
-                        len(data), clerk_ui=True,
-                    )
-                    self.write_data(data)
                 elif url.path in STATIC_ASSETS:
                     path = ASSETS / STATIC_ASSETS[url.path]
                     data = path.read_bytes()
                     if url.path == "/":
-                        settings = reader_configuration()
-                        public_config = html.escape(json.dumps(settings), quote=True)
+                        public_config = html.escape(json.dumps(reader_configuration()), quote=True)
                         head = [f'<meta name="tubescribe-config" content="{public_config}">']
                         if access.enabled:
                             head.append(f'<link rel="preconnect" href="{access.issuer}" crossorigin="anonymous">')
-                            ui, sdk = (access.issuer + script for script in CLERK_BROWSER_SCRIPTS)
                             head.extend(
-                                f'<link rel="preload" as="script" href="{script}" crossorigin="anonymous">'
-                                for script in (settings.get("ui_script", ui), sdk)
+                                f'<link rel="preload" as="script" href="{access.issuer}{script}" crossorigin="anonymous">'
+                                for script in CLERK_BROWSER_SCRIPTS
                             )
                             head.append(f"<script>{CLERK_BOOTSTRAP}</script>")
                         data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)

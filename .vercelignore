@@ -1,8 +1,7 @@
 data/
 models/
 tests/
-/scripts/*
-!/scripts/stage-clerk-ui.mjs
+scripts/
 .agents/
 .github/
 .venv/
