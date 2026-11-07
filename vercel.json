@@ -1,11 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm exec --yes --ignore-scripts --package=pnpm@10.33.0 -- pnpm install --frozen-lockfile --ignore-scripts --prod=false && node scripts/stage-clerk-ui.mjs",
   "regions": [
     "fra1"
   ],
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
+      "includeFiles": "src/tubescribe/dashboard_assets/clerk-ui/**",
       "excludeFiles": "{data/**,models/**,tests/**,scripts/**,node_modules/**,src/reader/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
     }
   },

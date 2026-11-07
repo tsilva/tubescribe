@@ -20,6 +20,7 @@ for (const signedIn of [false, true]) {
     const mounts = [];
     const unmounts = [];
     let loaded;
+    const config = signedIn ? {...settings, ui_script: "/clerk-ui/1.40.0/ui.browser.js"} : settings;
     const context = {
       URL,
       window: {
@@ -35,7 +36,7 @@ for (const signedIn of [false, true]) {
       },
       document: {
         readyState: "loading",
-        querySelector: () => ({content: JSON.stringify(settings)}),
+        querySelector: () => ({content: JSON.stringify(config)}),
         getElementById: id => ({"sign-in": container, "auth-message": message})[id],
         addEventListener: (event, callback) => {listeners[event] = callback;},
         createElement: () => ({dataset: {}}),
@@ -50,7 +51,10 @@ for (const signedIn of [false, true]) {
     context.document.readyState = "interactive";
     listeners.readystatechange();
     const setSignInVisible = await ready;
-    assert.deepEqual(scripts.map(script => script.src), settings.browser_scripts.map(path => settings.frontend_api + path));
+    assert.deepEqual(scripts.map(script => script.src), [
+      config.ui_script ?? settings.frontend_api + settings.browser_scripts[0],
+      settings.frontend_api + settings.browser_scripts[1],
+    ]);
     assert.ok(scripts.every(script => script.crossOrigin === "anonymous" && script.dataset.clerkPublishableKey === settings.publishable_key));
     assert.equal(loaded.ui.ClerkUI, ui);
     assert.equal(loaded.localization.signIn.start.title, "Sign in to TubeScribe");

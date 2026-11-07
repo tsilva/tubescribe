@@ -9,6 +9,7 @@ for task_setting in ${!TUBESCRIBE_@}; do
 done
 unset NEON_REALTIME_URL NEON_REALTIME_SECRET
 pnpm install --frozen-lockfile --ignore-scripts
+node scripts/stage-clerk-ui.mjs
 pnpm run test:reader
 pnpm run check:reader
 uv --config-file uv.toml run --frozen --inexact --extra cloud --group dev ruff check src tests api cloud_workflows.py scripts/rehearse-containers

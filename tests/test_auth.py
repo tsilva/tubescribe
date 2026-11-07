@@ -185,7 +185,8 @@ class ClerkReader(unittest.TestCase):
         self.assertNotIn(self.settings["CLERK_SECRET_KEY"], page.text)
         self.assertNotIn("Private title", page.text)
         preloads = re.findall(r'<link rel="preload" as="script" href="([^"]+)" crossorigin="anonymous">', page.text)
-        self.assertEqual(preloads, [ISSUER + path for path in settings["browser_scripts"]])
+        ui, sdk = (ISSUER + path for path in settings["browser_scripts"])
+        self.assertEqual(preloads, [settings.get("ui_script", ui), sdk])
         self.assertEqual(len(preloads), 2)
         self.assertNotIn('src="/realtime.js"', page.text)
         csp = dict(part.strip().split(" ", 1) for part in page.headers["content-security-policy"].split(";"))
@@ -201,6 +202,28 @@ class ClerkReader(unittest.TestCase):
         self.assertIn("https://*.protect.clerk.com:*", csp["connect-src"].split())
         self.assertNotIn("https://*.protect.clerk.com:*", csp["script-src"].split())
         self.assertNotIn("https://*.protect.clerk.com:*", csp["frame-src"].split())
+
+    def test_staged_clerk_ui_is_public_and_does_not_cache_auth_responses(self):
+        from tubescribe.dashboard import ASSETS, CLERK_UI_ASSETS, CLERK_UI_ENTRY
+
+        if not (ASSETS / "clerk-ui").is_dir():
+            self.skipTest("Stage the pinned Clerk UI with scripts/stage-clerk-ui.mjs")
+        self.assertIn(CLERK_UI_ENTRY, CLERK_UI_ASSETS)
+        self.assertEqual(self.client.get("/auth/config").json()["ui_script"], CLERK_UI_ENTRY)
+        chunk = next(url for url in CLERK_UI_ASSETS if "signin_ui_" in url)
+        for url in (CLERK_UI_ENTRY, chunk):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content, CLERK_UI_ASSETS[url].read_bytes())
+            self.assertIn("immutable", response.headers["cache-control"])
+            self.assertIn("s-maxage", response.headers["vercel-cdn-cache-control"])
+            self.assertIn("Sec-Fetch-Site", response.headers["vary"])
+            blocked = self.client.get(url, headers={"Sec-Fetch-Site": "cross-site"})
+            self.assertEqual(blocked.status_code, 403)
+            self.assertEqual(blocked.headers["cache-control"], "no-store")
+        for url in ("/", "/auth/config", "/api/feed"):
+            self.assertEqual(self.client.get(url).headers["cache-control"], "no-store")
+        self.assertEqual(self.client.get("/api/feed").status_code, 401)
 
     def test_owner_claims_once_and_new_users_have_an_empty_feed(self):
         owner = self.client.get("/api/feed", headers=self.headers())
