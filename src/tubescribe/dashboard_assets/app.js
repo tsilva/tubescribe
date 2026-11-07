@@ -1294,6 +1294,14 @@ async function libraryFetch(url, options = {}) {
   }
   return response;
 }
+// Older documents may finish loading across a deployment.
+let setSignInVisible = visible => {
+  if (visible) {
+    window.Clerk.mountSignIn($("sign-in"), {routing: "hash", forceRedirectUrl: "/" + window.location.search});
+  } else {
+    window.Clerk.unmountSignIn($("sign-in"));
+  }
+};
 async function syncIdentity({user, session}) {
   const next = user && session ? user.id : null;
   if (next === signedInUser) return;
@@ -1307,10 +1315,10 @@ async function syncIdentity({user, session}) {
     window.Clerk.unmountUserButton($("user-button"));
     $("worker-status").textContent = "";
     $("auth-message").textContent = "";
-    window.Clerk.mountSignIn($("sign-in"), {routing: "hash", forceRedirectUrl: "/" + window.location.search});
+    setSignInVisible(true);
     return;
   }
-  window.Clerk.unmountSignIn($("sign-in"));
+  setSignInVisible(false);
   window.Clerk.mountUserButton($("user-button"));
   try {
     const response = await libraryFetch("/api/session");
@@ -1367,7 +1375,7 @@ async function initializeAuthentication() {
         document.head.append(script);
       });
     }
-    await window.tubeScribeClerkReady;
+    setSignInVisible = (await window.tubeScribeClerkReady) ?? setSignInVisible;
     // Force initial signed-out rendering, then clear every cache on account changes.
     signedInUser = undefined;
     window.Clerk.addListener((state) => { void syncIdentity(state); });

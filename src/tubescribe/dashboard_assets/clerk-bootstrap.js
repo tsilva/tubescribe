@@ -41,6 +41,25 @@ window.tubeScribeClerkReady ??= (async () => {
       },
     },
   });
+
+  const container = document.getElementById("sign-in");
+  let mounted = false;
+  function setSignInVisible(visible) {
+    if (visible === mounted) return;
+    if (visible) {
+      window.Clerk.mountSignIn(container, {routing: "hash", forceRedirectUrl: "/" + window.location.search});
+    } else {
+      window.Clerk.unmountSignIn(container);
+    }
+    mounted = visible;
+  }
+
+  // Sign-in can start loading its UI before the dashboard script is available.
+  if (!window.Clerk.user || !window.Clerk.session) {
+    document.getElementById("auth-message").textContent = "";
+    setSignInVisible(true);
+  }
+  return setSignInVisible;
 })();
 // The reader handles any error when it awaits startup, even if it arrives later.
 window.tubeScribeClerkReady.catch(() => {});
