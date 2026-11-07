@@ -41,9 +41,14 @@ CLERK_BROWSER_SCRIPTS = (
 )
 CLERK_UI_PREFIX = f"/clerk-ui/{CLERK_UI_VERSION}/"
 CLERK_UI_ENTRY = CLERK_UI_PREFIX + "ui.browser.js"
+# Vercel can import tubescribe from its vendored Python package. Build outputs
+# live at the application root, independently of that package's location.
+CLERK_UI_BUILD = Path(os.environ.get("LAMBDA_TASK_ROOT") or (
+    Path.cwd() if os.environ.get("VERCEL") else ASSETS.parents[2]
+)) / "clerk-ui-build"
 CLERK_UI_ASSETS = {
     CLERK_UI_PREFIX + path.name: path
-    for path in (ASSETS / "clerk-ui" / CLERK_UI_VERSION).glob("*")
+    for path in (CLERK_UI_BUILD / CLERK_UI_VERSION).glob("*")
     if path.is_file() and (path.suffix == ".js" or path.name == "LICENSE")
 }
 STATIC_ASSETS = {

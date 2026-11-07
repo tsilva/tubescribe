@@ -5,7 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 node_modules/
-/src/tubescribe/dashboard_assets/clerk-ui/
+/clerk-ui-build/
 data/
 .env
 .env.*

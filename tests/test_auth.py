@@ -204,9 +204,9 @@ class ClerkReader(unittest.TestCase):
         self.assertNotIn("https://*.protect.clerk.com:*", csp["frame-src"].split())
 
     def test_staged_clerk_ui_is_public_and_does_not_cache_auth_responses(self):
-        from tubescribe.dashboard import ASSETS, CLERK_UI_ASSETS, CLERK_UI_ENTRY
+        from tubescribe.dashboard import CLERK_UI_ASSETS, CLERK_UI_BUILD, CLERK_UI_ENTRY
 
-        if not (ASSETS / "clerk-ui").is_dir():
+        if not CLERK_UI_BUILD.is_dir():
             self.skipTest("Stage the pinned Clerk UI with scripts/stage-clerk-ui.mjs")
         self.assertIn(CLERK_UI_ENTRY, CLERK_UI_ASSETS)
         self.assertEqual(self.client.get("/auth/config").json()["ui_script"], CLERK_UI_ENTRY)

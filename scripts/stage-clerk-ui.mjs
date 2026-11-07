@@ -13,7 +13,7 @@ if (!chunkHash) throw new Error("Could not identify the pinned Clerk UI browser 
 const chunks = (await readdir(dist)).filter(file => file.endsWith(`_ui_${chunkHash}_${version}.js`));
 if (!chunks.length) throw new Error("The pinned Clerk UI browser chunks are missing");
 
-const out = join("src/tubescribe/dashboard_assets/clerk-ui", version);
+const out = join("clerk-ui-build", version);
 await mkdir(out, {recursive: true});
 await Promise.all([
   copyFile(join(root, "LICENSE"), join(out, "LICENSE")),

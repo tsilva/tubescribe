@@ -7,7 +7,7 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
-      "includeFiles": "src/tubescribe/dashboard_assets/clerk-ui/**",
+      "includeFiles": "clerk-ui-build/**",
       "excludeFiles": "{data/**,models/**,tests/**,scripts/**,node_modules/**,src/reader/**,.agents/**,.github/**,.env*,compose*.yaml,Dockerfile,uv.lock}"
     }
   },
