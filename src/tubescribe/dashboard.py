@@ -31,6 +31,10 @@ from .storage import atomic_write, now
 from .transfer import operation
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
+CLERK_BROWSER_SCRIPTS = (
+    "/npm/@clerk/ui@1.40.0/dist/ui.browser.js",
+    "/npm/@clerk/clerk-js@6.39.0/dist/clerk.browser.js",
+)
 STATIC_ASSETS = {
     "/": "index.html",
     "/app.js": "app.js",
@@ -455,6 +459,23 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
 
     access = ClerkAccess(root, (config.public_origin, *public_origins))
 
+    def reader_configuration():
+        from .realtime import configuration
+
+        settings = {**access.configuration(), "realtime": configuration()}
+        if access.enabled:
+            settings["browser_scripts"] = CLERK_BROWSER_SCRIPTS
+        if access.enabled and config.manual_queue:
+            from .manual_queue import PROFILE
+            from .openrouter import CHUNK_SECONDS, PRICE_PER_SECOND
+            from .speaker_continuity import REFERENCE_BUDGET
+
+            settings["processing"] = {
+                "profile": PROFILE, "price_per_second": PRICE_PER_SECOND,
+                "chunk_seconds": CHUNK_SECONDS, "reference_seconds": REFERENCE_BUDGET,
+            }
+        return settings
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
             # Polling is quiet; errors are still returned visibly to the UI.
@@ -502,7 +523,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             live_origin = realtime_origin() or ""
             clerk_csp = (
                 f"default-src 'self'; script-src 'self' {access.issuer} https://challenges.cloudflare.com https://*.protect.clerk.com; "
-                f"connect-src 'self' {access.issuer} {live_origin} https://*.protect.clerk.com https://clerk-telemetry.com https://*.clerk-telemetry.com; style-src 'self' 'unsafe-inline'; "
+                f"connect-src 'self' {access.issuer} {live_origin} https://*.protect.clerk.com:* https://clerk-telemetry.com https://*.clerk-telemetry.com; style-src 'self' 'unsafe-inline'; "
                 f"img-src 'self' data: https://i.ytimg.com https://img.clerk.com {access.issuer}; "
                 "frame-src https://challenges.cloudflare.com https://*.protect.clerk.com; worker-src 'self' blob:; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
@@ -611,19 +632,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             try:
                 self.resource = None
                 if url.path == "/auth/config":
-                    from .realtime import configuration
-
-                    settings = {**access.configuration(), "realtime": configuration()}
-                    if access.enabled and config.manual_queue:
-                        from .manual_queue import PROFILE
-                        from .openrouter import CHUNK_SECONDS, PRICE_PER_SECOND
-                        from .speaker_continuity import REFERENCE_BUDGET
-
-                        settings["processing"] = {
-                            "profile": PROFILE, "price_per_second": PRICE_PER_SECOND,
-                            "chunk_seconds": CHUNK_SECONDS, "reference_seconds": REFERENCE_BUDGET,
-                        }
-                    self.send_json(settings)
+                    self.send_json(reader_configuration())
                     return
                 if url.path == "/api/realtime-authorization":
                     if not access.enabled:
@@ -1026,6 +1035,16 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 elif url.path in STATIC_ASSETS:
                     path = ASSETS / STATIC_ASSETS[url.path]
                     data = path.read_bytes()
+                    if url.path == "/":
+                        public_config = html.escape(json.dumps(reader_configuration()), quote=True)
+                        head = [f'<meta name="tubescribe-config" content="{public_config}">']
+                        if access.enabled:
+                            head.append(f'<link rel="preconnect" href="{access.issuer}" crossorigin="anonymous">')
+                            head.extend(
+                                f'<link rel="preload" as="script" href="{access.issuer}{script}" crossorigin="anonymous">'
+                                for script in CLERK_BROWSER_SCRIPTS
+                            )
+                        data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)
                     self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
                     self.write_data(data)
                 else:

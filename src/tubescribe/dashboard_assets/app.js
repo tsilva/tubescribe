@@ -1308,9 +1308,15 @@ async function syncIdentity({user, session}) {
 async function initializeAuthentication() {
   clearPrivateLibrary();
   try {
-    const response = await fetch("/auth/config", {cache: "no-store"});
-    if (!response.ok) throw new Error("Sign-in configuration is unavailable. Refresh to retry.");
-    const settings = await response.json();
+    const bootstrap = document.querySelector('meta[name="tubescribe-config"]');
+    let settings;
+    if (bootstrap) {
+      settings = JSON.parse(bootstrap.content);
+    } else {
+      const response = await fetch("/auth/config", {cache: "no-store"});
+      if (!response.ok) throw new Error("Sign-in configuration is unavailable. Refresh to retry.");
+      settings = await response.json();
+    }
     authEnabled = settings.enabled;
     processingSettings = settings.processing || null;
     realtimeSettings = settings.realtime || {enabled: false};
@@ -1324,11 +1330,7 @@ async function initializeAuthentication() {
     }
     const frontend = new URL(settings.frontend_api);
     if (frontend.protocol !== "https:" || frontend.pathname !== "/") throw new Error("Invalid sign-in configuration");
-    const scripts = [
-      "/npm/@clerk/ui@1.40.0/dist/ui.browser.js",
-      "/npm/@clerk/clerk-js@6.39.0/dist/clerk.browser.js",
-    ];
-    for (const path of scripts) {
+    for (const path of settings.browser_scripts) {
       await new Promise((resolve, reject) => {
         const script = document.createElement("script");
         script.src = frontend.origin + path;

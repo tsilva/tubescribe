@@ -1,7 +1,10 @@
 """Signed session verification, durable claiming, and cross-account resource isolation."""
 
 import base64
+import html
+import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -167,6 +170,26 @@ class ClerkReader(unittest.TestCase):
             page = self.client.get("/")
             self.assertIn("wss://project.realtime.neon.tech", page.headers["content-security-policy"])
             self.assertNotIn("wss:", response.text)
+            self.assertNotIn("test-fixture-secret", page.text)
+
+    def test_reader_bootstrap_preloads_clerk_without_exposing_private_configuration(self):
+        page = self.client.get("/")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.headers["cache-control"], "no-store")
+        self.assertEqual(page.headers["vercel-cdn-cache-control"], "no-store")
+        bootstrap = re.search(r'<meta name="tubescribe-config" content="([^"]+)">', page.text)
+        self.assertIsNotNone(bootstrap)
+        settings = json.loads(html.unescape(bootstrap[1]))
+        self.assertEqual(settings, self.client.get("/auth/config").json())
+        self.assertNotIn(self.settings["CLERK_SECRET_KEY"], page.text)
+        self.assertNotIn("Private title", page.text)
+        preloads = re.findall(r'<link rel="preload" as="script" href="([^"]+)" crossorigin="anonymous">', page.text)
+        self.assertEqual(preloads, [ISSUER + path for path in settings["browser_scripts"]])
+        self.assertEqual(len(preloads), 2)
+        csp = dict(part.strip().split(" ", 1) for part in page.headers["content-security-policy"].split(";"))
+        self.assertIn("https://*.protect.clerk.com:*", csp["connect-src"].split())
+        self.assertNotIn("https://*.protect.clerk.com:*", csp["script-src"].split())
+        self.assertNotIn("https://*.protect.clerk.com:*", csp["frame-src"].split())
 
     def test_owner_claims_once_and_new_users_have_an_empty_feed(self):
         owner = self.client.get("/api/feed", headers=self.headers())
