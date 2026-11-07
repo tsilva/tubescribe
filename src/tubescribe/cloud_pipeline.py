@@ -120,8 +120,10 @@ def advance_rollup(store, identifier, row, request):
             return {"done": False, "delay": 60}
         clock = datetime.fromtimestamp(row["created"], UTC)
         entries = rollups.index(store, clock=clock)["items"]
-        entry = rollups.next_eligible_digest(store, entries, rollups.records(store))
+        entry, retry_at = rollups.next_digest_work(store, entries, rollups.records(store))
         if entry is None:
+            if retry_at is not None:
+                return {"done": False, "delay": max(1, math.ceil(retry_at - time.time()))}
             store.update_submission(identifier, state="complete", worker_id=None,
                                     result=json.dumps({"completed": 1, "failed": 0}))
             return {"done": True, "state": "complete"}

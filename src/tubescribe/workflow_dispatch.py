@@ -105,15 +105,15 @@ async def maintain(*, clock=True):
     return {"configured": True, "notified": True, "started": started}
 
 
-async def signal():
+async def signal(*, clock=True):
     """Admission requests only start coordination; they never wait for queue scans."""
     from .workflows import discovery_clock, dispatch_queue
 
+    operations = [("cloud/control/dispatcher.json", "cloud-queue-dispatch", dispatch_queue)]
+    if clock:
+        operations.append(("cloud/control/discovery.json", "cloud-discovery-dispatch", discovery_clock))
     with archive() as store:
-        for key, resource, operation in (
-            ("cloud/control/discovery.json", "cloud-discovery-dispatch", discovery_clock),
-            ("cloud/control/dispatcher.json", "cloud-queue-dispatch", dispatch_queue),
-        ):
+        for key, resource, operation in operations:
             with lease(store.root, resource):
                 if not await running(store, key, current_deployment=operation is discovery_clock):
                     run = await workflow.start(operation)
@@ -126,13 +126,13 @@ def call(operation, *, request_token=None, **_):
         return {"configured": False}
     if operation == "status":
         return {"configured": True, "backend": "workflow", "media": "sandbox"}
-    if operation != "wake":
+    if operation not in {"wake", "dispatch"}:
         raise ValueError("Unknown Workflow operation")
     try:
         from vercel.headers import HeadersContext
 
         with HeadersContext({"x-vercel-oidc-token": request_token} if request_token else None).use():
-            return asyncio.run(signal())
+            return asyncio.run(signal(clock=operation == "wake"))
     except Exception:
         # Selection is committed already. Discovery and the daily repair cron
         # rescan this outbox even if dispatch acknowledgement was lost.

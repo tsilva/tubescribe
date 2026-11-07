@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from .artifacts import fingerprint
 from .billing import result_billing
-from .execution import assert_owned, lease
+from .execution import ClaimBusy, assert_owned, lease
 from .inference import LocalTools, configured_runner, text_model, tool_handler, uses_openrouter
 from .postprocessing import render_preview
 from .postprocessing_worker import bridge_endpoint
@@ -24,6 +24,7 @@ from .storage import atomic_write, durable_writes
 from .transfer import operation
 
 DAYS = 7
+_CLOUD_SCHEDULE_KEY = "cloud/control/digest-schedule.json"
 _INDEX_CACHE = OrderedDict()
 _INDEX_LOCK = RLock()
 PROMPT = """Produce a concise seven-day rolling digest from the supplied saved summaries.
@@ -174,7 +175,7 @@ def channel_input(channel):
 
 
 @operation("rollup.index")
-def index(store, *, clock=None):
+def index(store, *, clock=None, include_window_deadline=False):
     """Only changed inputs or window/retry deadlines require a catalogue read."""
     from .changes import revisions
     from .database import identity
@@ -205,6 +206,8 @@ def index(store, *, clock=None):
                 _INDEX_CACHE.move_to_end(key)
                 while len(_INDEX_CACHE) > 32:
                     _INDEX_CACHE.popitem(last=False)
+    if not include_window_deadline:
+        result.pop("window_refresh_at")
     result.update(
         revision=revision,
         since=(end - timedelta(days=DAYS)).isoformat(),
@@ -218,6 +221,7 @@ def _index(store, *, clock):
     boundaries = []
     channels, start, end = catalogue(store, clock=clock, boundaries=boundaries)
     saved = records(store)
+    window_refresh_at = min(boundaries, default=None)
     boundaries.extend(
         row["next_retry"]
         for row in saved.values()
@@ -287,6 +291,7 @@ def _index(store, *, clock):
         "since": start.isoformat(),
         "until": end.isoformat(),
         "next_refresh_at": min(boundaries, default=None),
+        "window_refresh_at": window_refresh_at,
         "items": entries,
     }
 
@@ -585,17 +590,18 @@ def run(store, *, bridge=None, force=False, agent_runner=None, clock=None):
     return {"completed": completed, "failed": failed, "skipped": skipped}
 
 
-def next_eligible_digest(store, entries, saved):
-    """Select runnable work in index order, with the all-channels digest last."""
+def next_digest_work(store, entries, saved):
+    """Return the next runnable digest or the earliest retry for this window."""
     if not saved and not any(entry["coverage"]["summarized"] for entry in entries):
-        return None
+        return None, None
 
     stamp = time.time()
     channels_ready = True
+    retry_at = None
     for entry in entries:
         scope = entry["scope"]
         if scope == "all" and not channels_ready:
-            return None
+            break
         row = saved.get(scope, {})
         same_input = row.get("input_hash") == entry["input_hash"]
         if (
@@ -604,12 +610,15 @@ def next_eligible_digest(store, entries, saved):
             and store.bundle_valid(row["output_dir"], row["manifest_sha256"])
         ):
             continue
-        if not same_input or (
-            row.get("next_retry", 0) <= stamp and row.get("attempts", 0) < 3
-        ):
-            return entry
+        if not same_input:
+            return entry, None
+        if row.get("attempts", 0) < 3:
+            deadline = row.get("next_retry", 0)
+            if deadline <= stamp:
+                return entry, None
+            retry_at = deadline if retry_at is None else min(retry_at, deadline)
         channels_ready = False
-    return None
+    return None, retry_at
 
 
 @operation("rollup.schedule")
@@ -624,7 +633,69 @@ def schedule(store, *, background=True):
     signature = (metadata["revision"], metadata["next_refresh_at"])
     if getattr(store, "_scheduled_revision", None) == signature:
         return None
-    if next_eligible_digest(store, metadata["items"], records(store)) is not None:
+    entry, _ = next_digest_work(store, metadata["items"], records(store))
+    if entry is not None:
         return Dispatcher(store).submit(JobRequest("rollups", {}), background=background)
     store._scheduled_revision = signature
     return None
+
+
+@operation("rollup.schedule")
+def schedule_cloud(store, *, clock=None):
+    """Reconcile only a changed set of saved summaries or a due window boundary."""
+    try:
+        with lease(store.root, "cloud-digest-schedule"):
+            return _schedule_cloud(store, clock=clock)
+    except ClaimBusy:
+        # A concurrent scheduler or submitter can finish first. Keep the trigger for repair.
+        return None, "busy"
+
+
+def _schedule_cloud(store, *, clock=None):
+    from .changes import revisions
+    from .submission import Dispatcher, JobRequest
+
+    clock = clock or datetime.now(UTC)
+    previous = (
+        json.loads(store.read_key(_CLOUD_SCHEDULE_KEY))
+        if store.exists(_CLOUD_SCHEDULE_KEY) else {}
+    )
+    revision = revisions(store.db)["sources"]
+    deadline = previous.get("window_refresh_at")
+    window_due = deadline is not None and deadline <= clock.timestamp()
+    if previous.get("source_revision") == revision and not window_due:
+        return None, "unchanged"
+
+    summaries = previous.get("summary_signature")
+    if previous.get("source_revision") != revision:
+        summaries = fingerprint([tuple(row) for row in store.db.execute(
+            "SELECT job_id,output_dir,manifest_sha256,updated_at FROM artifacts "
+            "WHERE workflow='summary' AND state='complete' AND output_dir IS NOT NULL ORDER BY job_id"
+        )])
+    if summaries == previous.get("summary_signature") and not window_due:
+        # Feed and job updates also advance the broad revision. Remember them
+        # without rebuilding the digest index or touching the queue.
+        store.blobs.put(_CLOUD_SCHEDULE_KEY, json.dumps({
+            **previous, "source_revision": revision,
+        }).encode())
+        return None, "unchanged"
+
+    request = JobRequest("rollups", {})
+    if video_work_pending(store) or store.db.execute(
+        "SELECT 1 FROM submissions WHERE dedupe=? AND state IN ('queued','active')",
+        (request.dedupe,),
+    ).fetchone():
+        # Leave the trigger unconsumed until the current work drains. Its
+        # submission may have pinned an earlier digest window.
+        return None, "deferred"
+
+    metadata = index(store, clock=clock, include_window_deadline=True)
+    entry, retry_at = next_digest_work(store, metadata["items"], records(store))
+    identifier = None
+    if entry is not None or retry_at is not None:
+        identifier = Dispatcher(store).submit(request, background=False)
+    store.blobs.put(_CLOUD_SCHEDULE_KEY, json.dumps({
+        "source_revision": revision, "summary_signature": summaries,
+        "window_refresh_at": metadata["window_refresh_at"],
+    }).encode())
+    return identifier, "reconciled"

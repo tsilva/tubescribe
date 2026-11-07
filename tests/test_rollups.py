@@ -3,6 +3,7 @@
 import json
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from tubescribe.rollups import (
     records,
     run,
     schedule,
+    schedule_cloud,
     timestamp,
     update,
     validate,
@@ -247,6 +249,58 @@ class RollingSummaries(unittest.TestCase):
             self.store.db.execute("UPDATE videos SET published_at=NULL")
         self.assertEqual(self.build()["completed"], 3)
         self.assertFalse(self.runner.calls)
+
+    def test_cloud_schedule_reconciles_saved_summary_changes_and_window_expiry(self):
+        self.assertEqual(self.build()["completed"], 3)
+        self.assertEqual(schedule_cloud(self.store, clock=NOW), (None, "reconciled"))
+        self.video("discovered-only", NOW - timedelta(minutes=15))
+        cold_store = Store(self.store.root)
+        with closing(cold_store.db):
+            with patch("tubescribe.rollups.index") as scan:
+                self.assertEqual(schedule_cloud(cold_store, clock=NOW + timedelta(minutes=15)), (None, "unchanged"))
+                self.assertEqual(schedule_cloud(cold_store, clock=NOW + timedelta(minutes=30)), (None, "unchanged"))
+                scan.assert_not_called()
+
+            self.video("new-summary", NOW - timedelta(hours=2), summarized=True)
+            selected = Dispatcher(self.store).submit(JobRequest("work", {"video": ["recent"]}))
+            self.assertEqual(schedule_cloud(cold_store, clock=NOW + timedelta(minutes=30)), (None, "deferred"))
+            self.store.update_submission(selected, state="complete")
+            digest, outcome = schedule_cloud(cold_store, clock=NOW + timedelta(minutes=30))
+            self.assertIsNotNone(digest)
+            self.assertEqual(outcome, "reconciled")
+            self.assertEqual(self.build()["failed"], 0)
+            self.store.update_submission(digest, state="complete")
+            with patch("tubescribe.rollups.index") as scan:
+                self.assertEqual(schedule_cloud(cold_store, clock=NOW + timedelta(minutes=45)), (None, "unchanged"))
+                scan.assert_not_called()
+
+            # The saved summaries are unchanged, but all have aged out.
+            digest, outcome = schedule_cloud(cold_store, clock=NOW + timedelta(days=8))
+            self.assertIsNotNone(digest)
+            self.assertEqual(outcome, "reconciled")
+
+    def test_cloud_digest_waits_for_backoff_inside_the_existing_submission(self):
+        self.assertEqual(self.build()["completed"], 3)
+        entry = index(self.store, clock=NOW)["items"][0]
+        update(self.store, entry["scope"], state="failed", attempts=1,
+               next_retry=time.time() + 240)
+        digest, outcome = schedule_cloud(self.store, clock=NOW)
+        self.assertIsNotNone(digest)
+        self.assertEqual(outcome, "reconciled")
+        with self.store.db:
+            self.store.db.execute(
+                "UPDATE submissions SET created=? WHERE id=?", (NOW.timestamp(), digest)
+            )
+        result = advance(self.store, digest)
+        self.assertFalse(result["done"])
+        self.assertGreater(result["delay"], 0)
+        with patch("tubescribe.rollups.index") as scan:
+            self.assertEqual(schedule_cloud(self.store, clock=NOW + timedelta(hours=1)), (None, "unchanged"))
+            scan.assert_not_called()
+        update(self.store, entry["scope"], next_retry=0)
+        with patch("tubescribe.cloud_pipeline.agent_runner", return_value=self.runner):
+            self.assertEqual(advance(self.store, digest), {"done": False, "delay": 0})
+        self.assertEqual(records(self.store)[entry["scope"]]["state"], "complete")
 
     def test_retry_save_checkpoint_reuses_model_response(self):
         original = self.store.publish

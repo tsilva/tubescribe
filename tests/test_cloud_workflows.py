@@ -460,6 +460,29 @@ class CloudCredentials(unittest.TestCase):
 
 
 class DiscoveryBatch(unittest.TestCase):
+    def test_discovery_clock_sleeps_an_hour_between_feed_polls(self):
+        from tubescribe import workflows
+
+        batch = AsyncMock(side_effect=[{"owner": "current"}, {"owner": "superseded"}])
+        with patch.object(workflows, "discover_batch", batch), patch.object(
+            workflows.workflow, "sleep", AsyncMock()
+        ) as sleep:
+            self.assertEqual(asyncio.run(workflows.discovery_clock.func()), {"state": "superseded"})
+            sleep.assert_awaited_once_with("1h")
+
+    def test_queue_dispatch_runs_before_digest_scheduling(self):
+        from tubescribe import workflow_dispatch, workflows
+
+        dispatched = {"configured": True, "notified": True, "started": 1}
+        with patch.object(workflow_dispatch, "maintain", AsyncMock(return_value=dispatched)) as maintain:
+            async def check_digest(operation):
+                maintain.assert_awaited_once_with(clock=False)
+                self.assertEqual(operation, "rollups_schedule")
+                return {"scheduled": False, "outcome": "unchanged"}
+
+            with patch.object(workflows, "execute", check_digest):
+                self.assertEqual(asyncio.run(workflows.reconcile()), {**dispatched, "digest_check": "unchanged"})
+
     def test_feed_poll_batches_channels_with_bounded_parallelism(self):
         from tubescribe import workflows
 
@@ -481,10 +504,11 @@ class DiscoveryBatch(unittest.TestCase):
                 return {"discovered": 1}
 
         with patch.object(workflows, "execute", execute), patch.object(
-            workflows, "reconcile", AsyncMock()
+            workflows, "reconcile", AsyncMock(return_value={"digest_check": "unchanged"})
         ), patch.object(workflows.workflow, "get_workflow_metadata", return_value=Mock(run_id="synthetic")):
             result = asyncio.run(workflows.discover_batch.func())
         self.assertEqual((len(checked), result["discovered"]), (19, 19))
+        self.assertEqual(result["digest_check"], "unchanged")
         self.assertLessEqual(peak, 4)
 
 

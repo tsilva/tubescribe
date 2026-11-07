@@ -53,9 +53,15 @@ async def process_selection(identifier: str):
 
 async def reconcile():
     from .workflow_dispatch import maintain
-    await execute("rollups_schedule")
+
     try:
-        return await maintain(clock=False)
+        result = await maintain(clock=False)
+        if not result["configured"]:
+            return {**result, "digest_check": "unconfigured"}
+        digest = await execute("rollups_schedule")
+        if digest["scheduled"]:
+            result["started"] += (await maintain(clock=False))["started"]
+        return {**result, "digest_check": digest["outcome"]}
     except Exception:
         raise RuntimeError("Cloud dispatch unavailable; selections retained") from None
 
@@ -81,9 +87,9 @@ async def discover_batch():
                 return {"failed": 1}
 
     results = await asyncio.gather(*(check(channel) for channel in channels))
-    await reconcile()
+    queue = await reconcile()
     return {"owner": "current", "discovered": sum(r.get("discovered", 0) for r in results),
-            "failed": sum(r.get("failed", 0) for r in results)}
+            "failed": sum(r.get("failed", 0) for r in results), "digest_check": queue["digest_check"]}
 
 
 @wf.workflow
@@ -105,14 +111,14 @@ async def continue_discovery():
 async def discovery_clock():
     # Rotate well before the per-run event limit. Sleeping uses no Sandbox and
     # leaves no Function running. The daily cron repairs a lost clock bootstrap.
-    for _ in range(32):
+    for _ in range(8):
         result = await discover_batch()
         if result["owner"] == "pending":
             await workflow.sleep("10s")
             continue
         if result["owner"] != "current":
             return {"state": "superseded"}
-        await workflow.sleep("15m")
+        await workflow.sleep("1h")
     if result["owner"] != "current":
         return {"state": "unregistered"}
     return await continue_discovery()

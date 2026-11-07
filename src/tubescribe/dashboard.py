@@ -1144,7 +1144,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                     if result["changed"] and payload["action"] != "cancel":
                         from .workflow_dispatch import call
 
-                        worker = call("wake", request_token=self.headers.get("x-vercel-oidc-token"))
+                        worker = call("dispatch", request_token=self.headers.get("x-vercel-oidc-token"))
                         if worker.get("configured"):
                             result["worker"] = worker
                     self.send_json(result)

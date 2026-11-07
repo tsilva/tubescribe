@@ -709,7 +709,8 @@ Leave this binding unset until cloud configuration and a selected-video smoke
 test are verified.
 
 **Process** and **Queue selected** commit the same durable manual submissions as
-the Mac backend. The backend dispatches stages independently of the browser.
+the Mac backend and signal dispatch immediately. The backend dispatches stages
+independently of the browser.
 Each step rechecks admission; canonical Workflow run pointers and existing leases
 prevent duplicate dispatch from repeating work. A lost dispatch acknowledgement
 leaves the selection in the durable outbox for repair.
@@ -722,10 +723,10 @@ while its Realtime endpoint remains a JavaScript Function.
 Workflow history contains small identifiers and progress. Media, model receipts,
 speaker anchors and publications remain in the private archive.
 
-1. A discovery Workflow reads followed channels' public Atom feeds every 15
-   minutes and adds catalogue entries without jobs or submissions. An owner visit
+1. A discovery Workflow reads followed channels' public Atom feeds once an hour
+   and adds catalogue entries without jobs or submissions. An owner visit
    bootstraps it; a daily authenticated cron repairs a missing clock. The clock
-   rotates after 32 cycles to bound its event log. A new deployment replaces the
+   rotates after eight cycles to bound its event log. A new deployment replaces the
    discovery clock so feed fixes take effect immediately; already selected
    processing runs keep their existing ownership and saved results. Atom feeds contain recent
    uploads, so this incremental discovery does not replace historical backfill
@@ -762,11 +763,13 @@ speaker anchors and publications remain in the private archive.
    summary for the live reader. Retries skip completed work. Unknown paid outcomes
    retain their intent markers and require review; retries never clear them.
 
-Discovery queues a digest refresh only when a channel or the all-channels digest
-can run. The worker skips channels in backoff or with exhausted attempts for the
-current inputs and continues with other eligible channels. A later discovery
-pass can pick up a retry after backoff or when inputs change. The all-channels
-digest waits for current, valid channel digests.
+The cloud scheduler remembers the last saved summaries and the next seven-day
+window boundary across Workflow invocations. A completed selection can refresh
+digests as soon as the video queue drains. Hourly maintenance also detects changes
+to saved summaries and any window boundary that has passed. An active digest
+refresh continues with eligible channels before waiting for any pending retry.
+Exhausted channels stay skipped for the same inputs. The all-channels digest
+waits for current, valid channel digests.
 
 Configure these **Production-only** bindings through the reviewed administrative
 credential flow, preserving separate values for other environments:

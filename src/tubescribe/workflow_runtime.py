@@ -114,10 +114,10 @@ def with_store(operation, identifier=None, run_id=None):
                     return "pending"
                 return "current" if json.loads(store.read_key(key))["run_id"] == identifier else "superseded"
             if operation == "rollups_schedule":
-                from .rollups import schedule
+                from .rollups import schedule_cloud
 
-                schedule(store, background=False)
-                return {"scheduled": True}
+                identifier, outcome = schedule_cloud(store)
+                return {"scheduled": identifier is not None, "outcome": outcome}
             if operation == "discover":
                 return discover(store, identifier)
             if operation == "fail":
