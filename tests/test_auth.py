@@ -1,6 +1,7 @@
 """Signed session verification, durable claiming, and cross-account resource isolation."""
 
 import base64
+import hashlib
 import html
 import json
 import os
@@ -188,6 +189,15 @@ class ClerkReader(unittest.TestCase):
         self.assertEqual(len(preloads), 2)
         self.assertNotIn('src="/realtime.js"', page.text)
         csp = dict(part.strip().split(" ", 1) for part in page.headers["content-security-policy"].split(";"))
+        scripts = re.findall(r"<script>(.*?)</script>", page.text, re.DOTALL)
+        self.assertEqual(len(scripts), 1)
+        digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode()
+        self.assertIn(f"'sha256-{digest}'", csp["script-src"].split())
+        self.assertNotIn("'unsafe-inline'", csp["script-src"].split())
+        self.assertLess(page.text.index("<script>"), page.text.index('href="/style.css"'))
+        fallback = self.client.get("/clerk-bootstrap.js")
+        self.assertEqual(fallback.text, scripts[0])
+        self.assertNotIn(f"'sha256-{digest}'", fallback.headers["content-security-policy"])
         self.assertIn("https://*.protect.clerk.com:*", csp["connect-src"].split())
         self.assertNotIn("https://*.protect.clerk.com:*", csp["script-src"].split())
         self.assertNotIn("https://*.protect.clerk.com:*", csp["frame-src"].split())

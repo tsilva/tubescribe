@@ -934,7 +934,8 @@ account portal, and email/DKIM). The vanilla JavaScript reader uses Clerk's host
 and user components, styled to match the reader. The signed-out page shows one sign-in
 card; library status and Refresh appear after authentication. Its pinned ClerkJS/UI
 versions obey the seven-day package cutoff. The reader document includes the public
-configuration and preloads both pinned scripts. The CSP allows Clerk Protect's
+configuration and preloads both pinned scripts. A hash-authorized startup script
+initializes Clerk while the reader bundle downloads. The CSP allows Clerk Protect's
 alternate HTTPS ports for connections to its protection hosts.
 The Python backend verifies session signatures, expiry, issuer, authorized party, and
 session token type with the official Clerk SDK. Agents use the same authenticated cookie

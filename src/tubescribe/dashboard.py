@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import gzip
 import hashlib
@@ -31,6 +32,8 @@ from .storage import atomic_write, now
 from .transfer import operation
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
+CLERK_BOOTSTRAP = (ASSETS / "clerk-bootstrap.js").read_text(encoding="utf-8")
+CLERK_BOOTSTRAP_HASH = base64.b64encode(hashlib.sha256(CLERK_BOOTSTRAP.encode()).digest()).decode()
 CLERK_BROWSER_SCRIPTS = (
     "/npm/@clerk/ui@1.40.0/dist/ui.browser.js",
     "/npm/@clerk/clerk-js@6.39.0/dist/clerk.browser.js",
@@ -38,6 +41,7 @@ CLERK_BROWSER_SCRIPTS = (
 STATIC_ASSETS = {
     "/": "index.html",
     "/app.js": "app.js",
+    "/clerk-bootstrap.js": "clerk-bootstrap.js",
     "/realtime.js": "realtime.js",
     "/style.css": "style.css",
     "/favicon.ico": "brand/favicon.ico",
@@ -521,8 +525,9 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             from .realtime import origin as realtime_origin
 
             live_origin = realtime_origin() or ""
+            bootstrap_source = f" 'sha256-{CLERK_BOOTSTRAP_HASH}'" if path == "/" and status == 200 else ""
             clerk_csp = (
-                f"default-src 'self'; script-src 'self' {access.issuer} https://challenges.cloudflare.com https://*.protect.clerk.com; "
+                f"default-src 'self'; script-src 'self' {access.issuer} https://challenges.cloudflare.com https://*.protect.clerk.com{bootstrap_source}; "
                 f"connect-src 'self' {access.issuer} {live_origin} https://*.protect.clerk.com:* https://clerk-telemetry.com https://*.clerk-telemetry.com; style-src 'self' 'unsafe-inline'; "
                 f"img-src 'self' data: https://i.ytimg.com https://img.clerk.com {access.issuer}; "
                 "frame-src https://challenges.cloudflare.com https://*.protect.clerk.com; worker-src 'self' blob:; "
@@ -1044,6 +1049,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                                 f'<link rel="preload" as="script" href="{access.issuer}{script}" crossorigin="anonymous">'
                                 for script in CLERK_BROWSER_SCRIPTS
                             )
+                            head.append(f"<script>{CLERK_BOOTSTRAP}</script>")
                         data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)
                     self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
                     self.write_data(data)
