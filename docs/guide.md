@@ -762,6 +762,12 @@ speaker anchors and publications remain in the private archive.
    summary for the live reader. Retries skip completed work. Unknown paid outcomes
    retain their intent markers and require review; retries never clear them.
 
+Discovery queues a digest refresh only when a channel or the all-channels digest
+can run. The worker skips channels in backoff or with exhausted attempts for the
+current inputs and continues with other eligible channels. A later discovery
+pass can pick up a retry after backoff or when inputs change. The all-channels
+digest waits for current, valid channel digests.
+
 Configure these **Production-only** bindings through the reviewed administrative
 credential flow, preserving separate values for other environments:
 

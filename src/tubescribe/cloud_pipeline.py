@@ -120,17 +120,11 @@ def advance_rollup(store, identifier, row, request):
             return {"done": False, "delay": 60}
         clock = datetime.fromtimestamp(row["created"], UTC)
         entries = rollups.index(store, clock=clock)["items"]
-        entry = next((entry for entry in entries if entry["state"] != "ready" and entry["scope"] != "all"), None)
-        entry = entry or next((entry for entry in entries if entry["state"] != "ready"), None)
+        entry = rollups.next_eligible_digest(store, entries, rollups.records(store))
         if entry is None:
             store.update_submission(identifier, state="complete", worker_id=None,
                                     result=json.dumps({"completed": 1, "failed": 0}))
             return {"done": True, "state": "complete"}
-        saved = rollups.records(store).get(entry["scope"], {})
-        if saved.get("state") == "failed" and saved.get("attempts", 0) >= 3:
-            raise ValueError("Digest attempt budget exhausted")
-        if saved.get("next_retry", 0) > time.time():
-            return {"done": False, "delay": 60}
         store.update_submission(identifier, state="active", worker_id="workflow", pid=None)
         try:
             rollups.build(store, entry["scope"], runner_factory=agent_runner, clock=clock)

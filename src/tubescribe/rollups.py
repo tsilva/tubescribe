@@ -585,6 +585,33 @@ def run(store, *, bridge=None, force=False, agent_runner=None, clock=None):
     return {"completed": completed, "failed": failed, "skipped": skipped}
 
 
+def next_eligible_digest(store, entries, saved):
+    """Select runnable work in index order, with the all-channels digest last."""
+    if not saved and not any(entry["coverage"]["summarized"] for entry in entries):
+        return None
+
+    stamp = time.time()
+    channels_ready = True
+    for entry in entries:
+        scope = entry["scope"]
+        if scope == "all" and not channels_ready:
+            return None
+        row = saved.get(scope, {})
+        same_input = row.get("input_hash") == entry["input_hash"]
+        if (
+            same_input
+            and row.get("state") == "complete"
+            and store.bundle_valid(row["output_dir"], row["manifest_sha256"])
+        ):
+            continue
+        if not same_input or (
+            row.get("next_retry", 0) <= stamp and row.get("attempts", 0) < 3
+        ):
+            return entry
+        channels_ready = False
+    return None
+
+
 @operation("rollup.schedule")
 def schedule(store, *, background=True):
     from .submission import Dispatcher, JobRequest
@@ -597,32 +624,7 @@ def schedule(store, *, background=True):
     signature = (metadata["revision"], metadata["next_refresh_at"])
     if getattr(store, "_scheduled_revision", None) == signature:
         return None
-    saved = records(store)
-    entries = metadata["items"]
-    if not saved and not any(e["coverage"]["summarized"] for e in entries):
-        store._scheduled_revision = signature
-        return None
-    for e in entries:
-        row = saved.get(e["scope"], {})
-        if e["state"] == "ready" and not store.bundle_valid(
-            row["output_dir"], row["manifest_sha256"]
-        ):
-            e["state"] = "pending"
-    channels_ready = all(e["state"] == "ready" for e in entries if e["scope"] != "all")
-    stale = [
-        e
-        for e in entries
-        if (e["scope"] != "all" or channels_ready)
-        and e["state"] != "ready"
-        and (
-            saved.get(e["scope"], {}).get("input_hash") != e["input_hash"]
-            or (
-                saved.get(e["scope"], {}).get("next_retry", 0) <= time.time()
-                and saved.get(e["scope"], {}).get("attempts", 0) < 3
-            )
-        )
-    ]
-    if stale:
+    if next_eligible_digest(store, metadata["items"], records(store)) is not None:
         return Dispatcher(store).submit(JobRequest("rollups", {}), background=background)
     store._scheduled_revision = signature
     return None

@@ -4,15 +4,27 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import httpx
 
+from tubescribe.cloud_pipeline import advance
 from tubescribe.dashboard import make_server
 from tubescribe.execution import lease
-from tubescribe.rollups import TOOL, catalogue, index, records, run, schedule, timestamp, validate
+from tubescribe.rollups import (
+    TOOL,
+    catalogue,
+    index,
+    records,
+    run,
+    schedule,
+    timestamp,
+    update,
+    validate,
+)
 from tubescribe.storage import Store
 from tubescribe.submission import Dispatcher, JobRequest
 
@@ -187,6 +199,48 @@ class RollingSummaries(unittest.TestCase):
         self.assertEqual(TOOL["type"], "function")
         self.assertIn("parameters", TOOL["function"])
         self.store.update_submission(first, state="complete")
+
+    def test_cloud_digest_skips_exhausted_channel_and_does_not_requeue_it(self):
+        exhausted = index(self.store, clock=NOW)["items"][0]
+        update(
+            self.store, exhausted["scope"], state="failed", attempts=3,
+            input_hash=exhausted["input_hash"],
+        )
+        with patch("tubescribe.rollups.datetime", wraps=datetime) as clock:
+            clock.now.return_value = NOW
+            identifier = schedule(self.store, background=False)
+            self.assertIsNotNone(identifier)
+            with self.store.db:
+                self.store.db.execute(
+                    "UPDATE submissions SET created=? WHERE id=?", (NOW.timestamp(), identifier)
+                )
+            self.assertFalse(advance(self.store, identifier)["done"])
+            self.assertEqual(advance(self.store, identifier), {"done": True, "state": "complete"})
+            self.assertEqual(records(self.store)["channel:two"]["state"], "complete")
+            self.assertNotIn("all", records(self.store))
+            self.assertEqual(records(self.store)[exhausted["scope"]]["attempts"], 3)
+
+            clock.now.return_value = NOW + timedelta(minutes=15)
+            next_tick = Store(self.store.root)
+            with closing(next_tick.db):
+                self.assertIsNone(schedule(next_tick, background=False))
+                self.assertEqual(
+                    next_tick.db.execute("SELECT COUNT(*) FROM submissions").fetchone()[0], 1
+                )
+
+                self.video("changed", NOW - timedelta(hours=1), summarized=True)
+                refreshed = schedule(next_tick, background=False)
+                self.assertIsNotNone(refreshed)
+                with next_tick.db:
+                    next_tick.db.execute(
+                        "UPDATE submissions SET created=? WHERE id=?",
+                        ((NOW + timedelta(minutes=15)).timestamp(), refreshed),
+                    )
+                with patch("tubescribe.cloud_pipeline.agent_runner", return_value=self.runner):
+                    self.assertFalse(advance(next_tick, refreshed)["done"])
+                recovered = records(next_tick)[exhausted["scope"]]
+                self.assertEqual(recovered["state"], "complete")
+                self.assertEqual(recovered["attempts"], 1)
 
     def test_completed_empty_rollup_does_not_start_inference(self):
         with self.store.db:
