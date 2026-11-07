@@ -192,6 +192,35 @@ test("live failure diagnostics exclude provider messages and credentials", async
   assert.ok(!JSON.stringify(failures).includes(env.NEON_REALTIME_SECRET));
 });
 
+test("Realtime shares one script load and can retry a failed download", async () => {
+  const source = await readFile(new URL("../src/tubescribe/dashboard_assets/app.js", import.meta.url), "utf8");
+  const scripts = [];
+  const context = {
+    window: {}, realtimeLoader: null,
+    document: {
+      createElement: () => ({remove() {this.removed = true;}}),
+      head: {append: script => scripts.push(script)},
+    },
+  };
+  runInNewContext(source.slice(source.indexOf("function loadRealtime()"),
+    source.indexOf("function showLiveUnavailable()")), context);
+  const first = context.loadRealtime();
+  assert.equal(context.loadRealtime(), first);
+  assert.equal(scripts.length, 1);
+  assert.equal(scripts[0].src, "/realtime.js");
+  scripts[0].onerror();
+  assert.equal(await first, null);
+  assert.equal(scripts[0].removed, true);
+  const retry = context.loadRealtime();
+  assert.equal(scripts.length, 2);
+  const sdk = {connect() {}};
+  context.window.TubeScribeRealtime = sdk;
+  scripts[1].onload();
+  assert.equal(await retry, sdk);
+  assert.equal(await context.loadRealtime(), sdk);
+  assert.equal(scripts.length, 2);
+});
+
 test("the reader loads its channel snapshot before a failed live connection and refreshes it on request", async () => {
   const source = await readFile(new URL("../src/tubescribe/dashboard_assets/app.js", import.meta.url), "utf8");
   const controls = new Map();
@@ -211,15 +240,15 @@ test("the reader loads its channel snapshot before a failed live connection and 
     },
     applyFeed: data => {context.archive = data;},
     showArchive() {}, refreshDigests() {},
-    TubeScribeRealtime: {connect: ({onState}) => ({
+    loadRealtime: async () => ({connect: ({onState}) => ({
       status: "error", close() {},
       start: async () => {
         assert.equal(context.archive, snapshot);
         onState("error");
       },
-    })},
+    })}),
   };
-  runInNewContext(source.slice(source.indexOf("async function refresh(event)"),
+  runInNewContext(source.slice(source.indexOf("function showLiveUnavailable()"),
     source.indexOf('document.addEventListener("keydown"')), context);
   await context.refresh();
   assert.deepEqual(requests, ["/api/feed"]);
@@ -228,6 +257,21 @@ test("the reader loads its channel snapshot before a failed live connection and 
   await context.refresh({type: "click"});
   assert.deepEqual(requests, ["/api/feed", "/api/feed"]);
 
+  const loadRealtime = context.loadRealtime;
+  context.liveFeed = null;
+  context.loadRealtime = async () => null;
+  await context.refresh();
+  assert.equal(context.archive, snapshot);
+  assert.match(controls.get("error").textContent, /last snapshot is preserved/);
+
+  context.loadRealtime = async () => {
+    context.identityGeneration++;
+    return {connect() {assert.fail("An obsolete identity must not open a subscription");}};
+  };
+  await context.refresh();
+  assert.equal(context.liveFeed, null);
+
+  context.loadRealtime = loadRealtime;
   context.archive = null;
   context.liveFeed = null;
   context.libraryFetch = async () => {

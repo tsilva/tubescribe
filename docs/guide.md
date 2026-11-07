@@ -1250,8 +1250,9 @@ revision do not reread the catalogue. Changes that arrive during a request are
 coalesced, and an obsolete response is discarded before it reaches the page.
 Catalogue data is fetched on entry, a committed change, or an explicit refresh.
 
-On entry, the reader loads an authenticated snapshot before starting the
-subscription. A failed stream preserves that snapshot and offers manual
+The Realtime script loads when the authenticated library starts live updates.
+The reader displays its authenticated snapshot before starting the subscription.
+A failed script download or stream preserves that snapshot and offers manual
 reconnection. Explicit **Refresh** also reloads the snapshot when the stream is
 unavailable. Summaries and documents remain on-demand reads; ordinary feed
 updates do not reread them. Local SQLite readers retain their existing

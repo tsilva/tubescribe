@@ -186,6 +186,7 @@ class ClerkReader(unittest.TestCase):
         preloads = re.findall(r'<link rel="preload" as="script" href="([^"]+)" crossorigin="anonymous">', page.text)
         self.assertEqual(preloads, [ISSUER + path for path in settings["browser_scripts"]])
         self.assertEqual(len(preloads), 2)
+        self.assertNotIn('src="/realtime.js"', page.text)
         csp = dict(part.strip().split(" ", 1) for part in page.headers["content-security-policy"].split(";"))
         self.assertIn("https://*.protect.clerk.com:*", csp["connect-src"].split())
         self.assertNotIn("https://*.protect.clerk.com:*", csp["script-src"].split())

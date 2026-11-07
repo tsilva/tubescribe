@@ -25,6 +25,7 @@ let feedLimit = 50;
 let feedSearch = "";
 let feedObserver = null;
 let realtimeSettings = {enabled: false};
+let realtimeLoader = null;
 let liveFeed = null;
 let ownsLibrary = true;
 let processingSettings = null;
@@ -895,6 +896,32 @@ function showArchive(cached = false) {
   renderFeed();
   void refreshProcessing();
 }
+function loadRealtime() {
+  if (window.TubeScribeRealtime?.connect) return Promise.resolve(window.TubeScribeRealtime);
+  if (!realtimeLoader) {
+    realtimeLoader = new Promise((resolve) => {
+      const script = document.createElement("script");
+      const unavailable = () => {
+        script.remove();
+        realtimeLoader = null;
+        resolve(null);
+      };
+      script.src = "/realtime.js";
+      script.onload = () => {
+        if (window.TubeScribeRealtime?.connect) resolve(window.TubeScribeRealtime);
+        else unavailable();
+      };
+      script.onerror = unavailable;
+      document.head.append(script);
+    });
+  }
+  return realtimeLoader;
+}
+function showLiveUnavailable() {
+  $("worker-status").textContent = "Live connection unavailable";
+  $("error").textContent = "Live updates unavailable. Refresh to reconnect. Your last snapshot is preserved.";
+  $("error").classList.remove("hidden");
+}
 async function refresh(event) {
   if (refreshing || !signedInUser) return;
   if (readerTab === "pipeline") {
@@ -905,10 +932,16 @@ async function refresh(event) {
   }
   if (realtimeSettings.enabled && ownsLibrary) {
     const generation = identityGeneration;
+    const pendingRealtime = loadRealtime();
     if (!archive || (event?.type === "click" && (!liveFeed || liveFeed.status === "error"))) {
       await refreshSnapshot();
     }
+    const realtime = await pendingRealtime;
     if (generation !== identityGeneration) return;
+    if (!realtime) {
+      if (archive) showLiveUnavailable();
+      return;
+    }
     if (liveFeed && liveFeed.status !== "error") {
       await liveFeed.wake();
       if (event?.type === "click") refreshDigests();
@@ -916,7 +949,7 @@ async function refresh(event) {
     }
     liveFeed?.close();
     let initial = !archive;
-    liveFeed = TubeScribeRealtime.connect({
+    liveFeed = realtime.connect({
       getCapabilities: async () => {
         const response = await libraryFetch(realtimeSettings.endpoint);
         if (!response.ok) {
@@ -942,12 +975,8 @@ async function refresh(event) {
       },
       onState: state => {
         if (generation !== identityGeneration) return;
-        $("worker-status").textContent = state === "live" ? "Library live" :
-          state === "error" ? "Live connection unavailable" : "Reconnecting…";
-        if (state === "error") {
-          $("error").textContent = "Live updates stopped. Refresh to reconnect. Your last snapshot is preserved.";
-          $("error").classList.remove("hidden");
-        }
+        if (state === "error") showLiveUnavailable();
+        else $("worker-status").textContent = state === "live" ? "Library live" : "Reconnecting…";
       },
     });
     await liveFeed.start();
