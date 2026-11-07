@@ -53,6 +53,7 @@ STATIC_ASSETS = {
             "favicon-16.png",
             "favicon-32.png",
             "favicon-48.png",
+            "header-96.png",
             "apple-touch-icon.png",
             "android-chrome-192.png",
             "android-chrome-512.png",

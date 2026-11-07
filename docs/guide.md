@@ -328,7 +328,9 @@ inference services and resume `work` or `queue serve` afterward.
 
 ## Library dashboard
 
-The header uses the reel-and-pages brand mark alongside the TubeScribe name.
+The header displays the 32-pixel reel-and-pages icon alongside the TubeScribe
+name. Higher-density displays use `header-96.png`, a 96-pixel export of the
+Android icon.
 Packaged assets in `src/tubescribe/dashboard_assets/brand/` supply PNG and ICO
 favicons, the Apple touch icon, and a web manifest with Android icons. Both local
 and hosted handlers serve only the explicitly allowed brand files, including the
