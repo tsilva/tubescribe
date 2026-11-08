@@ -1055,6 +1055,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             head.append(f"<style>{READER_STYLES}</style>")
                         else:
                             head.append('<link rel="stylesheet" href="/style.css">')
+                            head.append('<script src="/app.js" defer></script>')
                         data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)
                     self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
                     self.write_data(data)

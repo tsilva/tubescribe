@@ -54,12 +54,39 @@ window.tubeScribeClerkReady ??= (async () => {
     mounted = visible;
   }
 
-  // Sign-in can start loading its UI before the dashboard script is available.
-  if (!window.Clerk.user || !window.Clerk.session) {
+  function loadReader() {
+    // A document left open across deployment may already include the reader.
+    if (document.querySelector('script[src="/app.js"]')) return;
+    const script = document.createElement("script");
+    script.src = "/app.js";
+    script.onerror = () => {
+      document.getElementById("auth-message").textContent = "Your library could not load. Refresh to retry.";
+    };
+    document.head.append(script);
+  }
+
+  if (window.Clerk.user && window.Clerk.session) {
+    loadReader();
+  } else {
     document.getElementById("auth-message").textContent = "";
     setSignInVisible(true);
+    const unsubscribe = window.Clerk.addListener(({user, session}) => {
+      if (!user || !session) return;
+      loadReader();
+      // The reader now owns identity changes. Defer cleanup in case Clerk emits synchronously.
+      void Promise.resolve().then(() => unsubscribe());
+    });
   }
   return setSignInVisible;
 })();
-// The reader handles any error when it awaits startup, even if it arrives later.
-window.tubeScribeClerkReady.catch(() => {});
+void window.tubeScribeClerkReady.catch(error => {
+  const report = () => {
+    const message = document.getElementById("auth-message");
+    if (message) message.textContent = error.message;
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", report, {once: true});
+  } else {
+    report();
+  }
+});

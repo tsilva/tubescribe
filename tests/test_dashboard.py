@@ -415,6 +415,7 @@ class Dashboard(unittest.TestCase):
 
     def test_brand_assets_are_served_with_types_and_confined_paths(self):
         page = self.client.get("/").text
+        self.assertIn('<script src="/app.js" defer></script>', page)
         self.assertIn('class="brand-mark" src="/brand/favicon-32.png"', page)
         self.assertIn('srcset="/brand/header-96.png 3x"', page)
         self.assertIn('href="/favicon.ico"', page)
