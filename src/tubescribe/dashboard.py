@@ -695,6 +695,28 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
 
                     self.send_json(details(root, segment(match[1]), query.get("profile", [None])[0]))
                     return
+                if static:
+                    path = ASSETS / STATIC_ASSETS[url.path]
+                    data = path.read_bytes()
+                    if url.path == "/":
+                        public_config = html.escape(json.dumps(reader_configuration()), quote=True)
+                        head = [f'<meta name="tubescribe-config" content="{public_config}">']
+                        if access.enabled:
+                            head.append(f'<link rel="preconnect" href="{access.issuer}" crossorigin="anonymous">')
+                            head.extend(
+                                f'<link rel="preload" as="script" href="{access.issuer}{script}" crossorigin="anonymous">'
+                                for script in CLERK_BROWSER_SCRIPTS
+                            )
+                            head.append(f"<script>{CLERK_BOOTSTRAP}</script>")
+                            head.append(f"<style>{READER_STYLES}</style>")
+                        else:
+                            head.append('<link rel="stylesheet" href="/style.css">')
+                            head.append('<script src="/app.js" defer></script>')
+                        data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)
+                    self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
+                    self.write_data(data)
+                    return
+
                 from .resources import render_video, resolve, segment, video_metadata
                 from .rollups import index as digest_index
                 from .rollups import records as digest_records
@@ -1039,26 +1061,6 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             else None,
                         )
                         self.write_data(data)
-                elif url.path in STATIC_ASSETS:
-                    path = ASSETS / STATIC_ASSETS[url.path]
-                    data = path.read_bytes()
-                    if url.path == "/":
-                        public_config = html.escape(json.dumps(reader_configuration()), quote=True)
-                        head = [f'<meta name="tubescribe-config" content="{public_config}">']
-                        if access.enabled:
-                            head.append(f'<link rel="preconnect" href="{access.issuer}" crossorigin="anonymous">')
-                            head.extend(
-                                f'<link rel="preload" as="script" href="{access.issuer}{script}" crossorigin="anonymous">'
-                                for script in CLERK_BROWSER_SCRIPTS
-                            )
-                            head.append(f"<script>{CLERK_BOOTSTRAP}</script>")
-                            head.append(f"<style>{READER_STYLES}</style>")
-                        else:
-                            head.append('<link rel="stylesheet" href="/style.css">')
-                            head.append('<script src="/app.js" defer></script>')
-                        data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)
-                    self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
-                    self.write_data(data)
                 else:
                     self.send_json({"error": "Not found"}, 404)
             except AuthenticationUnavailable:
