@@ -32,6 +32,7 @@ from .storage import atomic_write, now
 from .transfer import operation
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
+READER_STYLES = (ASSETS / "style.css").read_text(encoding="utf-8")
 CLERK_BOOTSTRAP = (ASSETS / "clerk-bootstrap.js").read_text(encoding="utf-8")
 CLERK_BOOTSTRAP_HASH = base64.b64encode(hashlib.sha256(CLERK_BOOTSTRAP.encode()).digest()).decode()
 CLERK_BROWSER_SCRIPTS = (
@@ -1051,6 +1052,9 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                                 for script in CLERK_BROWSER_SCRIPTS
                             )
                             head.append(f"<script>{CLERK_BOOTSTRAP}</script>")
+                            head.append(f"<style>{READER_STYLES}</style>")
+                        else:
+                            head.append('<link rel="stylesheet" href="/style.css">')
                         data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)
                     self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
                     self.write_data(data)

@@ -194,7 +194,12 @@ class ClerkReader(unittest.TestCase):
         digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode()
         self.assertIn(f"'sha256-{digest}'", csp["script-src"].split())
         self.assertNotIn("'unsafe-inline'", csp["script-src"].split())
-        self.assertLess(page.text.index("<script>"), page.text.index('href="/style.css"'))
+        self.assertLess(page.text.index("<script>"), page.text.index("<style>"))
+        self.assertNotIn('href="/style.css"', page.text)
+        self.assertEqual(
+            re.findall(r"<style>(.*?)</style>", page.text, re.DOTALL),
+            [self.client.get("/style.css").text],
+        )
         fallback = self.client.get("/clerk-bootstrap.js")
         self.assertEqual(fallback.text, scripts[0])
         self.assertNotIn(f"'sha256-{digest}'", fallback.headers["content-security-policy"])

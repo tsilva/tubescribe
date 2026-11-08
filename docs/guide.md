@@ -950,6 +950,8 @@ versions obey the seven-day package cutoff. The reader document includes the pub
 configuration and preloads both pinned scripts. A hash-authorized startup script
 initializes Clerk and mounts the sign-in form for signed-out visitors while the
 reader bundle downloads. The reader takes over session changes after it loads.
+When Clerk is enabled, the same reader stylesheet is included in the document
+so the sign-in card can render without a separate stylesheet request.
 The CSP allows Clerk Protect's alternate HTTPS ports for connections to its protection hosts.
 The Python backend verifies session signatures, expiry, issuer, authorized party, and
 session token type with the official Clerk SDK. Agents use the same authenticated cookie
