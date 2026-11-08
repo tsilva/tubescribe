@@ -89,7 +89,8 @@ async def discover_batch():
     results = await asyncio.gather(*(check(channel) for channel in channels))
     queue = await reconcile()
     return {"owner": "current", "discovered": sum(r.get("discovered", 0) for r in results),
-            "failed": sum(r.get("failed", 0) for r in results), "digest_check": queue["digest_check"]}
+            "failed": sum(r.get("failed", 0) for r in results), "eligible_channels": len(channels),
+            "digest_check": queue["digest_check"]}
 
 
 @wf.workflow

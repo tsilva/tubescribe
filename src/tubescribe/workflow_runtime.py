@@ -3,6 +3,7 @@
 import json
 import os
 import xml.etree.ElementTree as ET
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -15,6 +16,11 @@ from .youtube import CHANNEL, ID
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 YT = "{http://www.youtube.com/xml/schemas/2015}"
+_FEED_RETRY_DELAY = timedelta(minutes=90)
+_FEED_ROWS = (
+    " FROM channels c LEFT JOIN discovery d ON d.channel_id=c.id AND d.kind='cloud-feed'"
+)
+_FEED_DUE = "COALESCE(d.state<>'failed' OR d.updated_at<=?, TRUE)"
 
 
 def feed_channel(value):
@@ -41,12 +47,32 @@ def validate_runtime(root):
         raise ValueError("Vercel System Environment Variables are required; local fallback is disabled")
 
 
+def _feed_cutoff():
+    return (datetime.now(UTC) - _FEED_RETRY_DELAY).isoformat()
+
+
+def due_feed_channels(store):
+    # Apply the cooldown before the batch limit so failed feeds leave room for others.
+    return [row[0] for row in store.db.execute(
+        "SELECT c.id" + _FEED_ROWS + " WHERE " + _FEED_DUE
+        + " ORDER BY COALESCE(d.updated_at,''),c.id LIMIT 32",
+        (_feed_cutoff(),),
+    )]
+
+
 def discover(store, channel_id, *, request=None):
-    if not CHANNEL.fullmatch(channel_id) or not any(
-        row["id"] == channel_id for row in store.channels()
-    ):
+    if not CHANNEL.fullmatch(channel_id):
         raise ValueError("Unknown followed channel")
     with lease(store.root, "cloud-feed:" + channel_id):
+        # Another poll may have failed this channel since the batch was selected.
+        row = store.db.execute(
+            "SELECT " + _FEED_DUE + _FEED_ROWS + " WHERE c.id=?",
+            (_feed_cutoff(), channel_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Unknown followed channel")
+        if not row[0]:
+            return {"skipped": 1}
         store.discovery(channel_id, "cloud-feed", "active")
         try:
             response = (request or httpx.get)(
@@ -64,18 +90,23 @@ def discover(store, channel_id, *, request=None):
                 video_id = entry.findtext(YT + "videoId") or ""
                 if not ID.fullmatch(video_id) or feed_channel(entry.findtext(YT + "channelId")) != channel_id:
                     raise ValueError("Feed entry identity mismatch")
-                if store.db.execute("SELECT 1 FROM videos WHERE id=?", (video_id,)).fetchone():
-                    continue
                 videos.append({"id": video_id, "title": entry.findtext(ATOM + "title") or video_id,
                                "published_at": entry.findtext(ATOM + "published"),
                                "url": "https://www.youtube.com/watch?v=" + video_id})
-            # profile=None is the catalogue-only path: it never creates a job.
-            store.index(channel_id, "upload", videos, None)
-            store.discovery(channel_id, "cloud-feed", "complete", count=len(videos))
-            return {"discovered": len(videos)}
-        except Exception:
+        except httpx.HTTPStatusError as error:
+            store.discovery(channel_id, "cloud-feed", "failed",
+                            error=f"Public feed returned HTTP {error.response.status_code}")
+            raise
+        except (httpx.RequestError, ValueError, ET.ParseError):
             store.discovery(channel_id, "cloud-feed", "failed", error="Public feed unavailable")
             raise
+        new_videos = [video for video in videos if not store.db.execute(
+            "SELECT 1 FROM videos WHERE id=?", (video["id"],)
+        ).fetchone()]
+        # profile=None is the catalogue-only path: it never creates a job.
+        store.index(channel_id, "upload", new_videos, None)
+        store.discovery(channel_id, "cloud-feed", "complete", count=len(new_videos))
+        return {"discovered": len(new_videos)}
 
 
 def canonical(store, identifier, run_id):
@@ -102,12 +133,7 @@ def with_store(operation, identifier=None, run_id=None):
 
                 return advance(store, identifier)
             if operation == "channels":
-                # Bound one Function even if the library later grows substantially.
-                # Least-recently checked channels are served first on every poll.
-                return [row[0] for row in store.db.execute(
-                    "SELECT c.id FROM channels c LEFT JOIN discovery d ON d.channel_id=c.id "
-                    "AND d.kind='cloud-feed' ORDER BY COALESCE(d.updated_at,''),c.id LIMIT 32"
-                )]
+                return due_feed_channels(store)
             if operation == "discovery_owner":
                 key = "cloud/control/discovery.json"
                 if not store.exists(key):

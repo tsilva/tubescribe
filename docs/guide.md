@@ -733,8 +733,10 @@ speaker anchors and publications remain in the private archive.
    or guarantee recovery of a long discovery gap.
    A whole poll is one Workflow step, with at most four simultaneous feed
    requests; it does not create a separate billable step for every channel.
-   Each poll checks at most 32 channels, oldest checks first. Larger libraries
-   rotate across polls. Dispatch keeps at most ten selected runs in flight and
+   Each poll checks at most 32 eligible channels, oldest checks first. Failed
+   feeds cool down for 90 minutes from their last failure. A successful check
+   restores the hourly cadence for that channel. Larger libraries rotate across
+   polls. Dispatch keeps at most ten selected runs in flight and
    fills a freed slot when a run completes.
 2. A separate Agent Vault capability starts the pinned Apify media downloader
    for the selected video. Its asynchronous run ID and reported usage are saved

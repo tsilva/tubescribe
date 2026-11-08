@@ -11,6 +11,7 @@ import tempfile
 import unittest
 import wave
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -23,7 +24,7 @@ from tubescribe.config import OPENROUTER_PROFILE
 from tubescribe.manual_queue import change
 from tubescribe.openrouter_agent import OpenRouterAgentRunner
 from tubescribe.storage import Store
-from tubescribe.workflow_runtime import canonical, discover, feed_channel
+from tubescribe.workflow_runtime import canonical, discover, due_feed_channels, feed_channel
 
 CHANNEL = "UCabcdefghijklmnopqrstuv"
 VIDEO = "abcdefghijk"
@@ -107,6 +108,53 @@ class CloudPipeline(unittest.TestCase):
         response = httpx.Response(200, content=xml, request=httpx.Request("GET", "https://example.test"))
         with self.assertRaises(ValueError):
             discover(self.store, CHANNEL, request=lambda *a, **k: response)
+
+    def test_discovery_retries_only_due_failures_and_restores_hourly_checks_after_success(self):
+        healthy, missing, unavailable = ("UC" + letter * 22 for letter in "abc")
+        for channel in (healthy, missing, unavailable):
+            self.store.channel({"id": channel, "title": "Example", "url": "https://example.test"})
+
+        def feed(_url, *, params, **_):
+            channel = params["channel_id"]
+            xml = (
+                f'<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">'
+                f"<yt:channelId>{channel}</yt:channelId></feed>"
+            )
+            return httpx.Response(statuses[channel], content=xml,
+                                  request=httpx.Request("GET", "https://example.test"))
+
+        request = Mock(side_effect=feed)
+        current = datetime(2026, 11, 8, tzinfo=UTC)
+        statuses = {healthy: 200, missing: 404, unavailable: 500}
+        with patch("tubescribe.workflow_runtime.datetime", wraps=datetime) as clock, patch(
+            "tubescribe.repository.now", side_effect=lambda: current.isoformat()
+        ):
+            clock.now.side_effect = lambda tz: current.astimezone(tz)
+            self.assertEqual(discover(self.store, healthy, request=request), {"discovered": 0})
+            for channel in (missing, unavailable):
+                with self.assertRaises(httpx.HTTPStatusError):
+                    discover(self.store, channel, request=request)
+                error = self.store.db.execute(
+                    "SELECT error FROM discovery WHERE channel_id=? AND kind='cloud-feed'", (channel,)
+                ).fetchone()[0]
+                self.assertEqual(error, f"Public feed returned HTTP {statuses[channel]}")
+
+            current += timedelta(hours=1)
+            self.assertEqual(set(due_feed_channels(self.store)), {CHANNEL, healthy})
+            request.reset_mock()
+            self.assertEqual(discover(self.store, missing, request=request), {"skipped": 1})
+            self.assertEqual(discover(self.store, unavailable, request=request), {"skipped": 1})
+            request.assert_not_called()
+            self.assertEqual(discover(self.store, healthy, request=request), {"discovered": 0})
+
+            current += timedelta(minutes=30)
+            self.assertEqual(set(due_feed_channels(self.store)), {CHANNEL, healthy, missing, unavailable})
+            statuses[unavailable] = 200
+            self.assertEqual(discover(self.store, unavailable, request=request), {"discovered": 0})
+            with self.assertRaises(httpx.HTTPStatusError):
+                discover(self.store, missing, request=request)
+            current += timedelta(hours=1)
+            self.assertEqual(set(due_feed_channels(self.store)), {CHANNEL, healthy, unavailable})
 
     def test_each_step_transcribes_one_chunk_and_retains_speaker_references(self):
         identifier, job = self.select()
@@ -508,6 +556,7 @@ class DiscoveryBatch(unittest.TestCase):
         ), patch.object(workflows.workflow, "get_workflow_metadata", return_value=Mock(run_id="synthetic")):
             result = asyncio.run(workflows.discover_batch.func())
         self.assertEqual((len(checked), result["discovered"]), (19, 19))
+        self.assertEqual(result["eligible_channels"], 19)
         self.assertEqual(result["digest_check"], "unchanged")
         self.assertLessEqual(peak, 4)
 
