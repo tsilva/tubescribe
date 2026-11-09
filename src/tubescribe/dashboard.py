@@ -46,10 +46,10 @@ CLERK_BROWSER_SCRIPTS = (
     f"{CLERK_UI_DIST}ui.browser.js",
     "/npm/@clerk/clerk-js@6.39.0/dist/clerk.browser.js",
 )
-# The pinned UI bundle lists this build hash in its chunk filename resolver.
+# The pinned UI bundle lists the SignIn dependency graph and chunk build hash.
 CLERK_UI_CHUNKS = tuple(
     f"{CLERK_UI_DIST}{name}_ui_96623b_{CLERK_UI_VERSION}.js"
-    for name in ("framework", "vendors", "ui-common", "signin")
+    for name in ("framework", "vendors", "ui-common", "signin", "7181", "signup", "8746")
 )
 STATIC_ASSETS = {
     "/": "index.html",
