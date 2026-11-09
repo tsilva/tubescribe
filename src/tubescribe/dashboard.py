@@ -49,7 +49,7 @@ CLERK_BROWSER_SCRIPTS = (
 # The pinned UI bundle lists this build hash in its chunk filename resolver.
 CLERK_UI_CHUNKS = tuple(
     f"{CLERK_UI_DIST}{name}_ui_96623b_{CLERK_UI_VERSION}.js"
-    for name in ("framework", "vendors", "ui-common")
+    for name in ("framework", "vendors", "ui-common", "signin")
 )
 STATIC_ASSETS = {
     "/": "index.html",

@@ -948,7 +948,7 @@ and user components, styled to match the reader. The signed-out page shows one s
 card; library status and Refresh appear after authentication. Its pinned ClerkJS/UI
 versions obey the seven-day package cutoff. The reader document includes the public
 configuration and preloads both pinned scripts. A hash-authorized startup script
-preloads three shared UI chunks at low priority while Clerk checks the session.
+preloads the shared UI and sign-in chunks at low priority while Clerk checks the session.
 When updating the pinned UI package, verify the chunk filenames in `ui.browser.js`
 and update `CLERK_UI_CHUNKS` in `dashboard.py`. The startup script mounts the
 sign-in form for signed-out visitors. The reader bundle loads once a session
