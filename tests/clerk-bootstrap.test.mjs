@@ -7,6 +7,7 @@ const source = await readFile(new URL("../src/tubescribe/dashboard_assets/clerk-
 const settings = {
   frontend_api: "https://clerk.example.test",
   browser_scripts: ["/ui.js", "/clerk.js"],
+  browser_ui_chunks: ["/shared-ui.js"],
   publishable_key: "pk_test_fixture",
 };
 
@@ -17,6 +18,7 @@ for (const {signedIn, existingReader} of [
 ]) {
   test(`Clerk starts for a signed-${signedIn ? "in" : "out"} visitor${existingReader ? " with an older document" : ""}`, async () => {
     const scripts = existingReader ? [{src: "/app.js"}] : [];
+    const hints = [];
     const listeners = {};
     const ui = {};
     const container = {};
@@ -33,7 +35,10 @@ for (const {signedIn, existingReader} of [
         Clerk: {
           user: signedIn ? {id: "user_fixture"} : null,
           session: signedIn ? {} : null,
-          async load(options) {loaded = options;},
+          async load(options) {
+            assert.equal(hints.length, 1);
+            loaded = options;
+          },
           mountSignIn(node, options) {mounts.push({node, ...options});},
           unmountSignIn(node) {unmounts.push(node);},
           addListener(listener) {
@@ -50,7 +55,14 @@ for (const {signedIn, existingReader} of [
         getElementById: id => ({"sign-in": container, "auth-message": message})[id],
         addEventListener: (event, callback) => {listeners[event] = callback;},
         createElement: () => ({dataset: {}}),
-        head: {append(script) {scripts.push(script); if (script.onload) queueMicrotask(script.onload);}},
+        head: {append(element) {
+          if (element.rel === "preload") {
+            hints.push(element);
+          } else {
+            scripts.push(element);
+            if (element.onload) queueMicrotask(element.onload);
+          }
+        }},
       },
     };
     runInNewContext(source, context);
@@ -64,6 +76,10 @@ for (const {signedIn, existingReader} of [
     const clerkScripts = scripts.filter(script => script.src !== "/app.js");
     assert.deepEqual(clerkScripts.map(script => script.src), settings.browser_scripts.map(path => settings.frontend_api + path));
     assert.ok(clerkScripts.every(script => script.crossOrigin === "anonymous" && script.dataset.clerkPublishableKey === settings.publishable_key));
+    assert.equal(hints[0].href, settings.frontend_api + settings.browser_ui_chunks[0]);
+    assert.equal(hints[0].as, "script");
+    assert.equal(hints[0].fetchPriority, "low");
+    assert.equal(hints[0].crossOrigin, undefined);
     assert.equal(scripts.some(script => script.src === "/app.js"), signedIn);
     if (!signedIn) {
       identityListener({user: {id: "user_fixture"}, session: null});

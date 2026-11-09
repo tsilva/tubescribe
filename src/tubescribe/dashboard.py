@@ -35,9 +35,16 @@ ASSETS = Path(__file__).with_name("dashboard_assets")
 READER_STYLES = (ASSETS / "style.css").read_text(encoding="utf-8")
 CLERK_BOOTSTRAP = (ASSETS / "clerk-bootstrap.js").read_text(encoding="utf-8")
 CLERK_BOOTSTRAP_HASH = base64.b64encode(hashlib.sha256(CLERK_BOOTSTRAP.encode()).digest()).decode()
+CLERK_UI_VERSION = "1.40.0"
+CLERK_UI_DIST = f"/npm/@clerk/ui@{CLERK_UI_VERSION}/dist/"
 CLERK_BROWSER_SCRIPTS = (
-    "/npm/@clerk/ui@1.40.0/dist/ui.browser.js",
+    f"{CLERK_UI_DIST}ui.browser.js",
     "/npm/@clerk/clerk-js@6.39.0/dist/clerk.browser.js",
+)
+# The pinned UI bundle lists this build hash in its chunk filename resolver.
+CLERK_UI_CHUNKS = tuple(
+    f"{CLERK_UI_DIST}{name}_ui_96623b_{CLERK_UI_VERSION}.js"
+    for name in ("framework", "vendors", "ui-common")
 )
 STATIC_ASSETS = {
     "/": "index.html",
@@ -471,6 +478,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
         settings = {**access.configuration(), "realtime": configuration()}
         if access.enabled:
             settings["browser_scripts"] = CLERK_BROWSER_SCRIPTS
+            settings["browser_ui_chunks"] = CLERK_UI_CHUNKS
         if access.enabled and config.manual_queue:
             from .manual_queue import PROFILE
             from .openrouter import CHUNK_SECONDS, PRICE_PER_SECOND

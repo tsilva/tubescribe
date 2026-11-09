@@ -948,8 +948,11 @@ and user components, styled to match the reader. The signed-out page shows one s
 card; library status and Refresh appear after authentication. Its pinned ClerkJS/UI
 versions obey the seven-day package cutoff. The reader document includes the public
 configuration and preloads both pinned scripts. A hash-authorized startup script
-initializes Clerk and mounts the sign-in form for signed-out visitors while the
-reader bundle downloads. The reader takes over session changes after it loads.
+preloads three shared UI chunks at low priority while Clerk checks the session.
+When updating the pinned UI package, verify the chunk filenames in `ui.browser.js`
+and update `CLERK_UI_CHUNKS` in `dashboard.py`. The startup script mounts the
+sign-in form for signed-out visitors. The reader bundle loads once a session
+is available and then takes over session changes.
 When Clerk is enabled, the same reader stylesheet is included in the document
 so the sign-in card can render without a separate stylesheet request.
 The CSP allows Clerk Protect's alternate HTTPS ports for connections to its protection hosts.

@@ -28,6 +28,15 @@ window.tubeScribeClerkReady ??= (async () => {
       document.head.append(script);
     });
   }
+  // Fetch shared UI code while Clerk checks the session. Match the UI loader's request mode.
+  for (const path of settings.browser_ui_chunks ?? []) {
+    const link = document.createElement("link");
+    link.rel = "preload";
+    link.as = "script";
+    link.href = frontend.origin + path;
+    link.fetchPriority = "low";
+    document.head.append(link);
+  }
   await window.Clerk.load({
     ui: {ClerkUI: window.__internal_ClerkUICtor},
     localization: {signIn: {start: {title: "Sign in to TubeScribe", subtitle: "Your videos, ready to read."}}},
