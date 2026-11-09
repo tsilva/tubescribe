@@ -953,8 +953,9 @@ When updating the pinned UI package, verify the chunk filenames in `ui.browser.j
 and update `CLERK_UI_CHUNKS` in `dashboard.py`. The startup script mounts the
 sign-in form for signed-out visitors. The reader bundle loads once a session
 is available and then takes over session changes.
-When Clerk is enabled, the same reader stylesheet is included in the document
-so the sign-in card can render without a separate stylesheet request.
+The hosted document inlines the marked sign-in rules from `style.css`.
+After Clerk finds a session, the browser fetches the complete stylesheet and
+reader script together, then starts the reader once its stylesheet is ready.
 The CSP allows Clerk Protect's alternate HTTPS ports for connections to its protection hosts.
 The Python backend verifies session signatures, expiry, issuer, authorized party, and
 session token type with the official Clerk SDK. Agents use the same authenticated cookie

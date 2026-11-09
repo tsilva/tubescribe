@@ -33,6 +33,7 @@ from .transfer import operation
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
 READER_STYLES = (ASSETS / "style.css").read_text(encoding="utf-8")
+SIGN_IN_STYLES = "".join(re.findall(r"/\* sign-in:start \*/(.*?)/\* sign-in:end \*/", READER_STYLES, re.DOTALL))
 CLERK_BOOTSTRAP = (ASSETS / "clerk-bootstrap.js").read_text(encoding="utf-8")
 CLERK_BOOTSTRAP_HASH = base64.b64encode(hashlib.sha256(CLERK_BOOTSTRAP.encode()).digest()).decode()
 CLERK_UI_VERSION = "1.40.0"
@@ -716,7 +717,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                                 for script in CLERK_BROWSER_SCRIPTS
                             )
                             head.append(f"<script>{CLERK_BOOTSTRAP}</script>")
-                            head.append(f"<style>{READER_STYLES}</style>")
+                            head.append(f'<style id="tubescribe-sign-in-styles">{SIGN_IN_STYLES}</style>')
                         else:
                             head.append('<link rel="stylesheet" href="/style.css">')
                             head.append('<script src="/app.js" defer></script>')

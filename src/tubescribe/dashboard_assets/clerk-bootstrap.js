@@ -63,15 +63,37 @@ window.tubeScribeClerkReady ??= (async () => {
     mounted = visible;
   }
 
+  let readerRequested = false;
   function loadReader() {
     // A document left open across deployment may already include the reader.
-    if (document.querySelector('script[src="/app.js"]')) return;
+    if (readerRequested || document.querySelector('script[src="/app.js"]')) return;
+    readerRequested = true;
     const script = document.createElement("script");
     script.src = "/app.js";
     script.onerror = () => {
       document.getElementById("auth-message").textContent = "Your library could not load. Refresh to retry.";
     };
-    document.head.append(script);
+    const signInStyles = document.getElementById("tubescribe-sign-in-styles");
+    if (!signInStyles) {
+      document.head.append(script);
+      return;
+    }
+
+    const preload = document.createElement("link");
+    preload.rel = "preload";
+    preload.as = "script";
+    preload.href = script.src;
+    document.head.append(preload);
+
+    const stylesheet = document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = "/style.css";
+    stylesheet.onload = () => {
+      signInStyles.remove();
+      document.head.append(script);
+    };
+    stylesheet.onerror = script.onerror;
+    signInStyles.before(stylesheet);
   }
 
   if (window.Clerk.user && window.Clerk.session) {

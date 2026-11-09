@@ -19,6 +19,12 @@ for (const {signedIn, existingReader} of [
   test(`Clerk starts for a signed-${signedIn ? "in" : "out"} visitor${existingReader ? " with an older document" : ""}`, async () => {
     const scripts = existingReader ? [{src: "/app.js"}] : [];
     const hints = [];
+    const stylesheets = [];
+    let signInStylesRemoved = false;
+    const signInStyles = {
+      before(stylesheet) {stylesheets.push(stylesheet);},
+      remove() {signInStylesRemoved = true;},
+    };
     const listeners = {};
     const ui = {};
     const container = {};
@@ -52,7 +58,10 @@ for (const {signedIn, existingReader} of [
         querySelector: selector => selector.startsWith("meta")
           ? {content: JSON.stringify(settings)}
           : scripts.find(script => script.src === "/app.js"),
-        getElementById: id => ({"sign-in": container, "auth-message": message})[id],
+        getElementById: id => ({
+          "sign-in": container, "auth-message": message,
+          "tubescribe-sign-in-styles": existingReader ? null : signInStyles,
+        })[id],
         addEventListener: (event, callback) => {listeners[event] = callback;},
         createElement: () => ({dataset: {}}),
         head: {append(element) {
@@ -80,7 +89,8 @@ for (const {signedIn, existingReader} of [
     assert.equal(hints[0].as, "script");
     assert.equal(hints[0].fetchPriority, "low");
     assert.equal(hints[0].crossOrigin, undefined);
-    assert.equal(scripts.some(script => script.src === "/app.js"), signedIn);
+    assert.equal(scripts.some(script => script.src === "/app.js"), existingReader);
+    assert.equal(stylesheets.length, signedIn && !existingReader ? 1 : 0);
     if (!signedIn) {
       identityListener({user: {id: "user_fixture"}, session: null});
       assert.equal(scripts.some(script => script.src === "/app.js"), false);
@@ -88,6 +98,16 @@ for (const {signedIn, existingReader} of [
       identityListener({user: {id: "user_fixture"}, session: {}});
       await Promise.resolve();
       assert.equal(identityListener, undefined);
+    }
+    if (!existingReader) {
+      assert.equal(stylesheets.length, 1);
+      assert.equal(stylesheets[0].href, "/style.css");
+      assert.equal(stylesheets[0].rel, "stylesheet");
+      assert.equal(hints[1].href, "/app.js");
+      assert.equal(signInStylesRemoved, false);
+      assert.ok(!scripts.some(script => script.src === "/app.js"));
+      stylesheets[0].onload();
+      assert.equal(signInStylesRemoved, true);
     }
     assert.equal(scripts.filter(script => script.src === "/app.js").length, 1);
     assert.equal(loaded.ui.ClerkUI, ui);

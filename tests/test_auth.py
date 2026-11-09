@@ -195,12 +195,18 @@ class ClerkReader(unittest.TestCase):
         digest = base64.b64encode(hashlib.sha256(scripts[0].encode()).digest()).decode()
         self.assertIn(f"'sha256-{digest}'", csp["script-src"].split())
         self.assertNotIn("'unsafe-inline'", csp["script-src"].split())
-        self.assertLess(page.text.index("<script>"), page.text.index("<style>"))
+        style_tag = '<style id="tubescribe-sign-in-styles">'
+        self.assertLess(page.text.index("<script>"), page.text.index(style_tag))
         self.assertNotIn('href="/style.css"', page.text)
+        full_styles = self.client.get("/style.css").text
+        sign_in_styles = re.findall(r"/\* sign-in:start \*/(.*?)/\* sign-in:end \*/", full_styles, re.DOTALL)
         self.assertEqual(
-            re.findall(r"<style>(.*?)</style>", page.text, re.DOTALL),
-            [self.client.get("/style.css").text],
+            re.findall(style_tag + r"(.*?)</style>", page.text, re.DOTALL),
+            ["".join(sign_in_styles)],
         )
+        self.assertIn(".auth-panel .auth-title", "".join(sign_in_styles))
+        self.assertNotIn(".video-row", "".join(sign_in_styles))
+        self.assertIn(".video-row", full_styles)
         fallback = self.client.get("/clerk-bootstrap.js")
         self.assertEqual(fallback.text, scripts[0])
         self.assertNotIn(f"'sha256-{digest}'", fallback.headers["content-security-policy"])
