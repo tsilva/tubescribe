@@ -4,9 +4,10 @@ import io
 from collections import Counter
 from dataclasses import dataclass, field
 
+from .config import SPEAKER_REFERENCE_BUDGET as REFERENCE_BUDGET
+
 RATE = 16000
 REFERENCE_SECONDS = 10
-REFERENCE_BUDGET = 50
 PAUSE_SECONDS = 0.15
 MAX_REFERENCES = 32
 

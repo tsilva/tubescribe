@@ -21,14 +21,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, quote, urlsplit
 
-import httpx
-
-from .config import RuntimeConfig, database_path
+from .config import (
+    OPENROUTER_CHUNK_SECONDS,
+    OPENROUTER_PRICE_PER_SECOND,
+    OPENROUTER_PROFILE,
+    SPEAKER_REFERENCE_BUDGET,
+    RuntimeConfig,
+    database_path,
+)
 from .database import database_errors
 from .pipeline import status as stage
-from .repository import ArchiveViews
+from .repository import ArchiveViews, now
 from .resources import artifact_url, transcript_url
-from .storage import atomic_write, now
 from .transfer import operation
 
 ASSETS = Path(__file__).with_name("dashboard_assets")
@@ -481,13 +485,11 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             settings["browser_scripts"] = CLERK_BROWSER_SCRIPTS
             settings["browser_ui_chunks"] = CLERK_UI_CHUNKS
         if access.enabled and config.manual_queue:
-            from .manual_queue import PROFILE
-            from .openrouter import CHUNK_SECONDS, PRICE_PER_SECOND
-            from .speaker_continuity import REFERENCE_BUDGET
-
             settings["processing"] = {
-                "profile": PROFILE, "price_per_second": PRICE_PER_SECOND,
-                "chunk_seconds": CHUNK_SECONDS, "reference_seconds": REFERENCE_BUDGET,
+                "profile": OPENROUTER_PROFILE,
+                "price_per_second": OPENROUTER_PRICE_PER_SECOND,
+                "chunk_seconds": OPENROUTER_CHUNK_SECONDS,
+                "reference_seconds": SPEAKER_REFERENCE_BUDGET,
             }
         return settings
 
@@ -1204,6 +1206,8 @@ def dashboard_status(root: Path) -> dict:
         return {**locked, "ready": False}
     ready = False
     if locked["running"] and locked["pid"] == state.get("pid"):
+        import httpx
+
         try:
             address = urlsplit(state["url"])
             if address.hostname != "127.0.0.1" or address.scheme != "http":
@@ -1270,6 +1274,8 @@ def dashboard(root: Path, action="start", port=0):
                 return state
             time.sleep(0.1)
         raise RuntimeError(f"Dashboard startup timed out; inspect {root / 'dashboard.log'}")
+    from .storage import atomic_write
+
     with (root / "dashboard.lock").open("a") as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)

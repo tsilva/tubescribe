@@ -11,10 +11,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
-
 from .database import connect
-from .storage import now
+from .repository import now
 
 
 class AuthenticationUnavailable(Exception):
@@ -84,6 +82,7 @@ class ClerkAccess:
 
     def session_user(self, headers):
         """Only Clerk session JWTs, bound to this instance and allowed web origins."""
+        import httpx
         from clerk_backend_api.security import AuthenticateRequestOptions, authenticate_request
 
         try:

@@ -18,7 +18,8 @@ import httpx
 
 from .asr import validate
 from .blobs import file_digest
-from .config import LEGACY_OPENROUTER_PROFILE, OPENROUTER_PROFILE
+from .config import LEGACY_OPENROUTER_PROFILE, OPENROUTER_PRICE_PER_SECOND, OPENROUTER_PROFILE
+from .config import OPENROUTER_CHUNK_SECONDS as CHUNK_SECONDS
 from .execution import assert_owned
 from .repository import now
 
@@ -26,8 +27,7 @@ MODEL = "microsoft/mai-transcribe-2"
 TEXT_MODEL = "openai/gpt-6.1-sol"
 LEGACY_MODEL = "nvidia/nemotron-3.5-transcribe"
 PLACEHOLDER = "tubescribe_openrouter_proxy_placeholder"
-PRICE_PER_SECOND = 0.10 / 3600
-CHUNK_SECONDS = 60
+PRICE_PER_SECOND = OPENROUTER_PRICE_PER_SECOND
 MAX_REQUEST_BYTES = 23 * 1024 * 1024
 REJECTIONS = {400, 401, 402, 403, 404, 413, 415, 422, 429}
 
