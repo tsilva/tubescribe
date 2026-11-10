@@ -19,7 +19,7 @@
   <header class="app-bar">
     <a class="brand" href="/" aria-label="TubeScribe library"><img class="brand-mark" src="/brand/favicon-32.png" srcset="/brand/header-96.png 3x" width="32" height="32" alt=""><span>TubeScribe</span></a>
     <div id="library-status" class="live" hidden><span id="worker-status" class="visually-hidden" role="status">Connecting…</span><span id="updated"></span><button id="refresh" class="icon-button" aria-label="Refresh library" title="Refresh library"><img src="/icons/arrow-path.svg" loading="lazy" alt=""></button></div>
-    <div id="user-button" aria-label="Your account"></div>
+    <div id="user-button" aria-label="Your account" hidden></div>
   </header>
   <section id="auth-panel" class="auth-panel" aria-label="Sign in"><p id="auth-message" role="status">Connecting securely…</p><div id="sign-in"></div></section>
   <main class="workspace" hidden>
@@ -34,7 +34,7 @@
         <h1>Your library</h1><p id="archive-summary">Connecting to your library…</p>
       </header>
       <div id="error" class="error hidden" role="alert"></div>
-      <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" loading="lazy" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search your library…"></div><select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select><button id="rolling-summary" class="button" aria-pressed="false">7-day summary</button></div>
+      <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" loading="lazy" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search your library…"></div><select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select><button id="rolling-summary" class="button" aria-pressed="false" disabled>7-day summary</button></div>
       <div class="feed-controls">
         <button id="unprocessed-filter" class="button" aria-pressed="false">Unprocessed</button>
         <div id="processing-controls" hidden>
@@ -46,7 +46,7 @@
       <div class="feed-heading"><span>Latest videos</span><span id="result-count" role="status"></span></div>
       <div id="feed" class="video-feed" tabindex="-1" aria-label="Video feed"></div>
     </div>
-    <aside id="reader" class="reader" aria-labelledby="reader-title"></aside>
+    <aside id="reader" class="reader" aria-label="Reading pane" aria-labelledby="reader-title"></aside>
   </main>
 </body>
 </html>

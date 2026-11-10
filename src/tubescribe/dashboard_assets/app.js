@@ -168,12 +168,13 @@ function updateProcessingEstimate() {
   $("processing-estimate").textContent = selected.length ? `${selected.length} selected · ${cost}` : "";
   $("queue-selected").disabled = !selected.length || selected.some(id => pendingProcessing.has(id));
 }
-async function refreshProcessing() {
+async function refreshProcessing({initial = false} = {}) {
   if (!ownsLibrary || !processingSettings || !signedInUser) return;
   const revision = ++processingRevision;
+  const unavailable = "Processing status is unavailable. Refresh to retry.";
   try {
-    const response = await libraryFetch("/api/processing");
-    if (!response.ok) throw new Error("Processing status is unavailable. Refresh to retry.");
+    const response = await libraryFetch("/api/processing", initial ? {signal: AbortSignal.timeout(5000)} : undefined);
+    if (!response.ok) throw new Error(unavailable);
     const data = await response.json();
     if (revision !== processingRevision) return;
     processingRecords = new Map(data.videos.map(record => [record.video_id, record]));
@@ -181,10 +182,16 @@ async function refreshProcessing() {
       const jobs = archive?.jobs.filter(job => job.video_id === id) || [];
       if (!jobs.length || !canQueue(jobs)) selectedForProcessing.delete(id);
     }
-    renderFeed();
-    updateProcessingEstimate();
-  } catch (error) {
-    if (revision === processingRevision) $("processing-message").textContent = error.message;
+    if (!initial) {
+      const message = $("processing-message");
+      if (message.textContent === unavailable) message.textContent = "";
+      renderFeed();
+      updateProcessingEstimate();
+    }
+  } catch {
+    if (revision !== processingRevision) return;
+    if (initial) return unavailable;
+    $("processing-message").textContent = unavailable;
   }
 }
 async function changeProcessing(action, ids) {
@@ -485,12 +492,17 @@ function backToLibrary() {
   setReaderOpen(false);
   Array.from(document.querySelectorAll(".video-title")).find((button) => button.dataset.focus === `title-${selectedVideo}`)?.focus({preventScroll:true});
 }
-function resetReader() {
+function resetReader(showWelcome = true) {
   readerController?.abort();
   const pane = $("reader");
   delete pane.readerView;
   readerSignature = "";
   readerIdentity = "";
+  setReaderOpen(false);
+  if (!showWelcome) {
+    pane.replaceChildren();
+    return;
+  }
   const empty = node("div", undefined, "reader-empty");
   const welcome = node("div", undefined, "reader-welcome");
   const art = node("div", undefined, "reader-welcome-art");
@@ -511,7 +523,6 @@ function resetReader() {
   welcome.append(art, node("p", "Your reading space", "eyebrow"), title, intro, features);
   empty.append(welcome);
   pane.replaceChildren(empty);
-  setReaderOpen(false);
 }
 async function renderReader(jobs, job) {
   const tabs = [
@@ -908,13 +919,17 @@ function applyFeed(data) {
   };
   feedRevision = data.revision;
 }
-function showArchive(cached = false) {
-  $("archive-summary").textContent = `${archive.summary.channels} channel${archive.summary.channels === 1 ? "" : "s"} · ${archive.summary.videos} video${archive.summary.videos === 1 ? "" : "s"}`;
-  $("worker-status").textContent = cached ? "Checking for updates…" : "Library up to date";
-  $("updated").textContent = cached ? "Cached library" : `Updated ${new Date(archive.generated_at).toLocaleTimeString()}`;
+function showArchive({refreshQueue = true} = {}) {
+  const summary = $("archive-summary");
+  summary.removeAttribute("title");
+  summary.textContent = `${archive.summary.channels} channel${archive.summary.channels === 1 ? "" : "s"} · ${archive.summary.videos} video${archive.summary.videos === 1 ? "" : "s"}`;
+  $("worker-status").textContent = "Library up to date";
+  $("updated").textContent = `Updated ${new Date(archive.generated_at).toLocaleTimeString()}`;
+  $("rolling-summary").disabled = false;
   syncScopes();
   renderFeed();
-  void refreshProcessing();
+  if (refreshQueue) void refreshProcessing();
+  else updateProcessingEstimate();
 }
 function loadRealtime() {
   if (window.TubeScribeRealtime?.connect) return Promise.resolve(window.TubeScribeRealtime);
@@ -939,8 +954,9 @@ function loadRealtime() {
 }
 function showLiveUnavailable() {
   $("worker-status").textContent = "Live connection unavailable";
-  $("error").textContent = "Live updates unavailable. Refresh to reconnect. Your last snapshot is preserved.";
-  $("error").classList.remove("hidden");
+  const summary = $("archive-summary");
+  summary.textContent = "Live updates paused · Refresh to reconnect";
+  summary.title = "Live updates unavailable. Refresh to reconnect. Your last snapshot is preserved.";
 }
 async function refresh(event) {
   if (refreshing || !signedInUser) return;
@@ -964,7 +980,10 @@ async function refresh(event) {
     }
     if (liveFeed && liveFeed.status !== "error") {
       await liveFeed.wake();
-      if (event?.type === "click") refreshDigests();
+      if (event?.type === "click" && generation === identityGeneration) {
+        refreshDigests();
+        void refreshProcessing();
+      }
       return;
     }
     liveFeed?.close();
@@ -1016,25 +1035,37 @@ function showLibraryLoading() {
 }
 async function refreshSnapshot() {
   const generation = identityGeneration;
+  const initial = !archive;
   refreshing = true;
   $("refresh").disabled = true;
-  if (!archive) {
+  if (initial) {
     showLibraryLoading();
     $("error").classList.add("hidden");
   }
   try {
-    const response = await libraryFetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`);
-    const data = await response.json();
+    const feed = libraryFetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`).then(async response => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Archive unavailable");
+      return data;
+    });
+    // Draw the first rows with their queue controls and statuses already in place.
+    const [data, queueError] = await Promise.all([feed, initial ? refreshProcessing({initial: true}) : null]);
     if (generation !== identityGeneration) return;
-    if (!response.ok) throw new Error(data.error || "Archive unavailable");
     applyFeed(data);
     $("error").classList.add("hidden");
-    showArchive();
+    if (initial) $("processing-message").textContent = queueError || "";
+    showArchive({refreshQueue: !initial});
     refreshDigests();
   } catch (error) {
     if (generation !== identityGeneration) return;
-    $("error").textContent = `${error.message}. ${archive ? "Showing the last available snapshot." : "Could not load the archive."} Refresh will retry.`;
-    $("error").classList.remove("hidden");
+    if (archive) {
+      const summary = $("archive-summary");
+      summary.textContent = "Library update failed · Refresh to retry";
+      summary.title = error.message;
+    } else {
+      $("error").textContent = `${error.message}. Could not load the archive. Refresh will retry.`;
+      $("error").classList.remove("hidden");
+    }
     $("updated").textContent = "Connection unavailable";
     $("worker-status").textContent = "Library unavailable";
     if (!archive) $("feed").replaceChildren(node("p", "Videos are unavailable until the archive reconnects.", "empty"));
@@ -1292,6 +1323,7 @@ function clearPrivateLibrary() {
   selectedVideo = null; selectedProfile = null; libraryScope = "";
   readerSignature = ""; readerIdentity = ""; readerLevel = "video";
   $("rolling-summary").setAttribute("aria-pressed", "false");
+  $("rolling-summary").disabled = true;
   feedLimit = 50; feedSearch = "";
   $("video-search").value = "";
   $("channel-scope").replaceChildren(new Option("All channels", ""));
@@ -1299,11 +1331,12 @@ function clearPrivateLibrary() {
   $("channel-navigation").replaceChildren();
   delete $("channel-scope").dataset.signature;
   $("archive-summary").textContent = "Your private library";
+  $("archive-summary").removeAttribute("title");
   $("updated").textContent = "";
   $("result-count").textContent = "";
   $("error").classList.add("hidden");
   $("feed").replaceChildren();
-  resetReader();
+  resetReader(false);
   // Discard the former anonymous feed cache. Private data stays in memory only.
   try { sessionStorage.removeItem("tubescribe.feed.v2"); } catch { /* Storage disabled. */ }
 }
@@ -1333,17 +1366,23 @@ let setSignInVisible = visible => {
     window.Clerk.unmountSignIn($("sign-in"));
   }
 };
+function showSignedInLibrary() {
+  $("auth-panel").hidden = true;
+  $("library-status").hidden = false;
+  $("user-button").hidden = !authEnabled;
+  document.querySelector(".workspace").hidden = false;
+}
 async function syncIdentity({user, session}) {
   const next = user && session ? user.id : null;
   if (next === signedInUser) return;
   signedInUser = next;
   clearPrivateLibrary();
   const generation = identityGeneration;
-  if (next) showLibraryLoading();
   $("refresh").disabled = Boolean(next);
-  document.querySelector(".workspace").hidden = !next;
-  $("auth-panel").hidden = Boolean(next);
-  $("library-status").hidden = !next;
+  document.querySelector(".workspace").hidden = true;
+  $("auth-panel").hidden = false;
+  $("library-status").hidden = true;
+  $("user-button").hidden = true;
   if (!next) {
     window.Clerk.unmountUserButton($("user-button"));
     $("worker-status").textContent = "";
@@ -1351,6 +1390,7 @@ async function syncIdentity({user, session}) {
     setSignInVisible(true);
     return;
   }
+  $("auth-message").textContent = "Connecting securely…";
   setSignInVisible(false);
   window.Clerk.mountUserButton($("user-button"));
   try {
@@ -1367,9 +1407,11 @@ async function syncIdentity({user, session}) {
         return;
       }
     }
+    showSignedInLibrary();
     await refresh();
   } catch (error) {
     if (generation !== identityGeneration) return;
+    showSignedInLibrary();
     if (!archive) $("feed").replaceChildren();
     $("refresh").disabled = false;
     $("error").textContent = error.message;
@@ -1393,9 +1435,7 @@ async function initializeAuthentication() {
     realtimeSettings = settings.realtime || {enabled: false};
     if (!authEnabled) {
       signedInUser = "local";
-      $("auth-panel").hidden = true;
-      $("library-status").hidden = false;
-      document.querySelector(".workspace").hidden = false;
+      showSignedInLibrary();
       await refresh();
       return;
     }

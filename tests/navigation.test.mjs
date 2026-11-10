@@ -10,6 +10,7 @@ function element(tag, text = "", className) {
     append(...children) {this.children.push(...children);},
     replaceChildren(...children) {this.children = children;},
     setAttribute(name, value) {this.attributes[name] = value;},
+    removeAttribute(name) {delete this.attributes[name];},
     addEventListener(name, listener) {this.listeners[name] = listener;},
   };
 }

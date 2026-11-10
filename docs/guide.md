@@ -1276,11 +1276,15 @@ Catalogue data is fetched on entry, a committed change, or an explicit refresh.
 
 The Realtime script loads when the authenticated library starts live updates.
 The reader displays its authenticated snapshot before starting the subscription.
-A failed script download or stream preserves that snapshot and offers manual
-reconnection. Explicit **Refresh** also reloads the snapshot when the stream is
-unavailable. Summaries and documents remain on-demand reads; ordinary feed
-updates do not reread them. Local SQLite readers retain their existing
-on-demand HTTP path. Worker scheduling uses PostgreSQL LISTEN separately.
+For an owner with processing enabled, the initial feed and queue status load in
+parallel. The first rows render with their processing controls and statuses.
+If queue status is unavailable after five seconds, the reader shows the feed and
+offers a retry. A failed script download or stream preserves the snapshot and
+shows the reconnect message in the library subtitle. Explicit **Refresh** also
+reloads the snapshot when the stream is unavailable. Summaries and documents
+remain on-demand reads. Ordinary feed updates do not reread them. Local SQLite
+readers retain their existing on-demand HTTP path. Worker scheduling uses
+PostgreSQL LISTEN separately.
 
 The Node `/api/live` endpoint seals only the source-owned revision query. It reuses
 Python's Clerk session verifier through `/api/realtime-authorization`, which

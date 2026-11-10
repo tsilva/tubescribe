@@ -226,6 +226,9 @@ test("the reader loads its channel snapshot before a failed live connection and 
   const controls = new Map();
   const requests = [];
   const snapshot = {channels: [{id: "owner-channel"}], jobs: []};
+  let finishQueue;
+  const queue = new Promise(resolve => {finishQueue = resolve;});
+  const renders = [];
   const element = (tag, text, className = "") => ({
     tag, textContent: text, children: [],
     classList: {add() {}, remove() {}, contains: name => className.split(" ").includes(name)},
@@ -248,7 +251,8 @@ test("the reader loads its channel snapshot before a failed live connection and 
       return {ok: true, json: async () => snapshot};
     },
     applyFeed: data => {context.archive = data;},
-    showArchive() {}, refreshDigests() {},
+    refreshProcessing: () => queue,
+    showArchive: options => renders.push(options.refreshQueue), refreshDigests() {},
     loadRealtime: async () => ({connect: ({onState}) => ({
       status: "error", close() {},
       start: async () => {
@@ -259,10 +263,16 @@ test("the reader loads its channel snapshot before a failed live connection and 
   };
   runInNewContext(source.slice(source.indexOf("function showLiveUnavailable()"),
     source.indexOf('document.addEventListener("keydown"')), context);
-  await context.refresh();
+  const firstRefresh = context.refresh();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(requests, ["/api/feed"]);
+  assert.deepEqual(renders, [], "the first rows wait for queue status");
+  finishQueue();
+  await firstRefresh;
   assert.deepEqual(requests, ["/api/feed"]);
   assert.equal(context.archive.channels[0].id, "owner-channel");
-  assert.match(controls.get("error").textContent, /last snapshot is preserved/);
+  assert.deepEqual(renders, [false], "the initial queue status is reused");
+  assert.match(controls.get("archive-summary").title, /last snapshot is preserved/);
   await context.refresh({type: "click"});
   assert.deepEqual(requests, ["/api/feed", "/api/feed"]);
 
@@ -271,7 +281,7 @@ test("the reader loads its channel snapshot before a failed live connection and 
   context.loadRealtime = async () => null;
   await context.refresh();
   assert.equal(context.archive, snapshot);
-  assert.match(controls.get("error").textContent, /last snapshot is preserved/);
+  assert.match(controls.get("archive-summary").title, /last snapshot is preserved/);
 
   context.loadRealtime = async () => {
     context.identityGeneration++;
