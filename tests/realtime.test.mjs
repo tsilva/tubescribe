@@ -226,12 +226,21 @@ test("the reader loads its channel snapshot before a failed live connection and 
   const controls = new Map();
   const requests = [];
   const snapshot = {channels: [{id: "owner-channel"}], jobs: []};
+  const element = (tag, text, className = "") => ({
+    tag, textContent: text, children: [],
+    classList: {add() {}, remove() {}, contains: name => className.split(" ").includes(name)},
+    setAttribute() {},
+    append(...children) {this.children.push(...children);},
+    replaceChildren(...children) {this.children = children;},
+    get firstElementChild() {return this.children[0];},
+  });
   const context = {
     signedInUser: "user_owner", ownsLibrary: true, refreshing: false,
     identityGeneration: 1, archive: null, feedRevision: "", liveFeed: null,
     realtimeSettings: {enabled: true}, readerTab: "summary",
+    node: element,
     $: id => {
-      if (!controls.has(id)) controls.set(id, {classList: {add() {}, remove() {}}});
+      if (!controls.has(id)) controls.set(id, element("div"));
       return controls.get(id);
     },
     libraryFetch: async path => {

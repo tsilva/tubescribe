@@ -483,14 +483,30 @@ function backToLibrary() {
 }
 function resetReader() {
   readerController?.abort();
-  delete $("reader").readerView;
+  const pane = $("reader");
+  delete pane.readerView;
   readerSignature = "";
   readerIdentity = "";
   const empty = node("div", undefined, "reader-empty");
-  const title = node("h2", "Find your next idea.");
+  const welcome = node("div", undefined, "reader-welcome");
+  const art = node("div", undefined, "reader-welcome-art");
+  art.setAttribute("aria-hidden", "true");
+  art.append(icon("document-text"), node("span", undefined, "reader-welcome-play"));
+  const title = node("h2", "Select a video to start reading");
   title.id = "reader-title";
-  empty.append(node("p", "YOUR READING SPACE", "eyebrow"), title, node("p", "Select a video to read its summary or transcript."));
-  $("reader").replaceChildren(empty);
+  const intro = node("p", "Choose a video from your library to revisit the ideas worth keeping.", "reader-welcome-intro");
+  const features = node("dl", undefined, "reader-welcome-features");
+  for (const [label, description] of [
+    ["Summary", "Catch up on the key ideas at a glance."],
+    ["Transcript", "Read what was said and jump to a moment with timestamps."],
+  ]) {
+    const feature = node("div");
+    feature.append(node("dt", label), node("dd", description));
+    features.append(feature);
+  }
+  welcome.append(art, node("p", "Your reading space", "eyebrow"), title, intro, features);
+  empty.append(welcome);
+  pane.replaceChildren(empty);
   setReaderOpen(false);
 }
 async function renderReader(jobs, job) {
@@ -984,10 +1000,24 @@ async function refresh(event) {
   }
   await refreshSnapshot();
 }
+function showLibraryLoading() {
+  const feed = $("feed");
+  if (feed.firstElementChild?.classList.contains("feed-loading")) return;
+  const status = node("p", undefined, "empty feed-loading");
+  status.setAttribute("role", "status");
+  const spinner = node("span", undefined, "loading-spinner");
+  spinner.setAttribute("aria-hidden", "true");
+  status.append(spinner, node("span", "Loading your videos…"));
+  feed.replaceChildren(status);
+}
 async function refreshSnapshot() {
   const generation = identityGeneration;
   refreshing = true;
   $("refresh").disabled = true;
+  if (!archive) {
+    showLibraryLoading();
+    $("error").classList.add("hidden");
+  }
   try {
     const response = await libraryFetch(`/api/feed${feedRevision ? "?revision=" + encodeURIComponent(feedRevision) : ""}`);
     const data = await response.json();
@@ -1005,8 +1035,10 @@ async function refreshSnapshot() {
     $("worker-status").textContent = "Library unavailable";
     if (!archive) $("feed").replaceChildren(node("p", "Videos are unavailable until the archive reconnects.", "empty"));
   } finally {
-    refreshing = false;
-    $("refresh").disabled = false;
+    if (generation === identityGeneration) {
+      refreshing = false;
+      $("refresh").disabled = false;
+    }
   }
 }
 document.addEventListener("keydown", (event) => {
@@ -1241,6 +1273,7 @@ $("queue-selected").addEventListener("click", () => changeProcessing("queue", [.
 
 function clearPrivateLibrary() {
   identityGeneration += 1;
+  refreshing = false;
   liveFeed?.close();
   liveFeed = null;
   ownsLibrary = true;
@@ -1271,7 +1304,7 @@ function clearPrivateLibrary() {
   $("updated").textContent = "";
   $("result-count").textContent = "";
   $("error").classList.add("hidden");
-  $("feed").replaceChildren(node("p", "No videos yet", "empty"));
+  $("feed").replaceChildren();
   resetReader();
   // Discard the former anonymous feed cache. Private data stays in memory only.
   try { sessionStorage.removeItem("tubescribe.feed.v2"); } catch { /* Storage disabled. */ }
@@ -1308,6 +1341,8 @@ async function syncIdentity({user, session}) {
   signedInUser = next;
   clearPrivateLibrary();
   const generation = identityGeneration;
+  if (next) showLibraryLoading();
+  $("refresh").disabled = Boolean(next);
   document.querySelector(".workspace").hidden = !next;
   $("auth-panel").hidden = Boolean(next);
   $("library-status").hidden = !next;
@@ -1338,6 +1373,8 @@ async function syncIdentity({user, session}) {
     await refresh();
   } catch (error) {
     if (generation !== identityGeneration) return;
+    if (!archive) $("feed").replaceChildren();
+    $("refresh").disabled = false;
     $("error").textContent = error.message;
     $("error").classList.remove("hidden");
   }
