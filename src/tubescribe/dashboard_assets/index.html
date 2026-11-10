@@ -31,16 +31,18 @@
     </nav>
     <div class="library-column">
       <header class="page-heading">
-        <div><h1>Your library</h1><p id="archive-summary">Connecting to your library…</p></div>
-        <button id="discovered-view" class="button" aria-pressed="false" hidden>Discovered</button>
+        <h1>Your library</h1><p id="archive-summary">Connecting to your library…</p>
       </header>
       <div id="error" class="error hidden" role="alert"></div>
-      <div id="processing-controls" hidden>
-        <button id="queue-selected" class="button" disabled>Queue selected</button>
-        <span id="processing-estimate"></span>
+      <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" loading="lazy" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search your library…"></div><select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select><button id="rolling-summary" class="button" aria-pressed="false">7-day summary</button></div>
+      <div class="feed-controls">
+        <button id="unprocessed-filter" class="button" aria-pressed="false">Unprocessed</button>
+        <div id="processing-controls" hidden>
+          <button id="queue-selected" class="button" disabled>Queue selected</button>
+          <span id="processing-estimate" role="status"></span>
+        </div>
       </div>
       <p id="processing-message" role="status"></p>
-      <div class="toolbar"><div class="search-field"><img src="/icons/magnifying-glass.svg" loading="lazy" alt=""><input id="video-search" type="search" aria-label="Search channels or videos" placeholder="Search your library…"></div><select id="channel-scope" aria-label="Channel scope"><option value="">All channels</option></select><button id="rolling-summary" class="button" aria-pressed="false">7-day summary</button></div>
       <div class="feed-heading"><span>Latest videos</span><span id="result-count" role="status"></span></div>
       <div id="feed" class="video-feed" tabindex="-1" aria-label="Video feed"></div>
     </div>

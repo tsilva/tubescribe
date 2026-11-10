@@ -270,7 +270,7 @@ def main():
 
             if args.action == "submit":
                 if store.config.manual_queue:
-                    raise ValueError("Select videos in the library's Discovered view")
+                    raise ValueError("Select videos in the library to queue them")
                 if not args.request:
                     raise ValueError("queue submit requires --request")
                 request = JobRequest(**json.loads(args.request.read_text()))

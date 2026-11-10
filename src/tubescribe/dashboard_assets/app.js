@@ -29,7 +29,7 @@ let realtimeLoader = null;
 let liveFeed = null;
 let ownsLibrary = true;
 let processingSettings = null;
-let discoveredView = false;
+let unprocessedOnly = false;
 let processingRecords = null;
 let processingRevision = 0;
 const pendingProcessing = new Set();
@@ -159,12 +159,13 @@ function transcriptionEstimate(durations) {
   return `Estimated transcription $${base.toFixed(3)}${extra ? `–$${(base + extra).toFixed(3)} (includes speaker matching)` : ""}`;
 }
 function updateProcessingEstimate() {
+  $("processing-controls").hidden = !ownsLibrary || !processingSettings || !processingRecords;
   const selected = [...selectedForProcessing];
   const durations = selected.map(id => archive?.jobs.find(job => job.video_id === id)?.duration);
   const known = durations.filter(seconds => Number.isFinite(seconds) && seconds > 0);
   const missing = known.length < selected.length ? " · Some durations unknown" : "";
   const cost = known.length ? `${transcriptionEstimate(known)}${missing}` : "Duration unavailable";
-  $("processing-estimate").textContent = selected.length ? `${selected.length} selected · ${cost}` : "Select videos to process";
+  $("processing-estimate").textContent = selected.length ? `${selected.length} selected · ${cost}` : "";
   $("queue-selected").disabled = !selected.length || selected.some(id => pendingProcessing.has(id));
 }
 async function refreshProcessing() {
@@ -259,23 +260,20 @@ function videoRow(jobs) {
   const meta = [channel, date(video.published_at, true)].filter(Boolean);
   const bottom = node("div", undefined, "video-bottom");
   description.append(title, node("p", meta.join(" · "), "video-meta"));
-  if (discoveredView) {
-    const record = processingRecord(jobs);
-    const state = record?.state;
-    const current = jobs.find(job => job.profile === processingSettings.profile);
-    if (state && state !== "cancelled") bottom.append(statusBadge(current || job, jobs));
-    else bottom.append(node("span", "Discovered"));
-    if (record?.cost != null) bottom.append(node("span", `Transcription $${record.cost.toFixed(3)}`));
-    if (record?.retry_at) bottom.append(node("span", `Retries ${date(record.retry_at)}`, "muted"));
-    if (current?.transcript_url && current.diarization_state !== "complete") {
-      bottom.append(node("span", "Speaker labels unavailable", "muted"));
-    }
-    if (canQueue(jobs)) {
+  const record = processingRecord(jobs);
+  const queueable = canQueue(jobs);
+  const retryable = canRetry(jobs);
+  const removable = ownsLibrary && processingSettings && record?.state === "queued";
+  const pending = pendingProcessing.has(video.video_id);
+  if (displayStage(job) !== "complete" || retryable || removable) {
+    bottom.append(statusBadge(job, jobs));
+    if (queueable) {
       const checkbox = node("input");
       checkbox.type = "checkbox";
+      checkbox.dataset.focus = `select-${video.video_id}`;
       checkbox.checked = selectedForProcessing.has(video.video_id);
-      checkbox.disabled = pendingProcessing.has(video.video_id);
-      checkbox.setAttribute("aria-label", `Queue ${video.title}`);
+      checkbox.disabled = pending;
+      checkbox.setAttribute("aria-label", `Select ${video.title || video.video_id} for processing`);
       checkbox.addEventListener("change", () => {
         if (checkbox.checked && selectedForProcessing.size >= 50) {
           checkbox.checked = false;
@@ -287,44 +285,50 @@ function videoRow(jobs) {
         updateProcessingEstimate();
       });
       const label = node("label");
-      label.append(checkbox, " Select");
+      label.append(checkbox, node("span", "Select"));
       bottom.append(label);
-    } else if (["queued", "failed", "interrupted"].includes(state)) {
-      const action = state === "queued" ? "cancel" : "retry";
-      const button = node("button", action === "cancel" ? "Remove" : "Retry", "button");
-      button.disabled = pendingProcessing.has(video.video_id);
-      button.addEventListener("click", () => changeProcessing(action, [video.video_id]));
-      bottom.append(button);
     }
-    description.append(bottom);
-  } else if (displayStage(job) !== "complete") {
-    bottom.append(statusBadge(job, jobs));
     const {stage, label} = processingStatus(jobs, job);
-    const busy = pendingProcessing.has(video.video_id) || ["queued", "active", "downloading", "transcribing",
+    const busy = pending || removable || ["queued", "active", "downloading", "transcribing",
       "awaiting_diarization", "diarizing", "awaiting_postprocessing", "postprocessing",
       "awaiting_summary", "summarizing"].includes(stage);
-    if (busy || canQueue(jobs) || canRetry(jobs)) {
+    if (busy || queueable || retryable) {
+      const actionLabel = busy ? "Processing" : retryable ? "Retry" : "Process";
       const button = node("button", undefined, "button process-button");
       button.dataset.focus = `process-${video.video_id}`;
-      button.setAttribute("aria-label", `${busy ? "Processing" : "Process"} ${video.title || video.video_id}`);
+      button.setAttribute("aria-label", `${actionLabel} ${video.title || video.video_id}`);
       button.disabled = busy;
       if (busy) {
         button.setAttribute("aria-busy", "true");
-        button.title = pendingProcessing.has(video.video_id) ? "Updating processing queue" : label;
+        button.title = pending ? "Updating processing queue" : label;
         const spinner = node("span", undefined, "process-spinner");
         spinner.setAttribute("aria-hidden", "true");
         button.append(spinner, node("span", "Processing"));
       } else {
-        button.textContent = "Process";
+        button.textContent = actionLabel;
       }
       if (!busy && Number.isFinite(video.duration) && video.duration > 0) {
         button.title = transcriptionEstimate([video.duration]);
       }
-      button.addEventListener("click", () => changeProcessing(canRetry(jobs) ? "retry" : "queue", [video.video_id]));
+      button.addEventListener("click", () => changeProcessing(retryable ? "retry" : "queue", [video.video_id]));
       bottom.append(button);
     }
-    if (bottom.children.length) description.append(bottom);
+    if (removable) {
+      const button = node("button", "Remove", "button");
+      button.dataset.focus = `remove-${video.video_id}`;
+      button.setAttribute("aria-label", `Remove ${video.title || video.video_id} from queue`);
+      button.disabled = pending;
+      button.addEventListener("click", () => changeProcessing("cancel", [video.video_id]));
+      bottom.append(button);
+    }
+    description.append(bottom);
   }
+  const current = jobs.find(job => job.profile === processingSettings?.profile);
+  const notes = [];
+  if (record?.cost != null) notes.push(`Transcription $${record.cost.toFixed(3)}`);
+  if (record?.retry_at) notes.push(`Retries ${date(record.retry_at)}`);
+  if (record && current?.transcript_url && current.diarization_state !== "complete") notes.push("Speaker labels unavailable");
+  if (notes.length) description.append(node("p", notes.join(" · "), "muted video-processing-note"));
   main.append(description);
   row.append(main);
   return row;
@@ -332,7 +336,7 @@ function videoRow(jobs) {
 function renderFeed() {
   if (!archive) return;
   const search = $("video-search").value.trim().toLowerCase();
-  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, feedRevision, discoveredView, processingRecords && [...processingRecords], [...pendingProcessing], [...selectedForProcessing]]);
+  const signature = JSON.stringify([libraryScope, search, archive.channels, archive.jobs, feedRevision, unprocessedOnly, processingRecords && [...processingRecords], [...pendingProcessing], [...selectedForProcessing]]);
   if (signature === rendered) return;
   rendered = signature;
   const focused = document.activeElement?.dataset.focus;
@@ -349,8 +353,7 @@ function renderFeed() {
     const second = Number.isFinite(b.published) ? b.published : -Infinity;
     return (first === second ? 0 : second - first) || a.jobs[0].video_id.localeCompare(b.jobs[0].video_id);
   });
-  const matches = videos.filter(({jobs}) => (!discoveredView || !jobs.some(job => job.transcript_url) ||
-    Boolean(processingRecord(jobs))) &&
+  const matches = videos.filter(({jobs}) => (!unprocessedOnly || !jobs.some(job => job.transcript_url || displayStage(job) === "complete")) &&
     (!libraryScope || jobs[0].channel_id === libraryScope) && (!search || jobs.some((job) =>
     `${job.channel_title} ${job.channel_id} ${job.title} ${job.video_id}`.toLowerCase().includes(search))));
   if (!matches.some(({jobs}) => jobs[0].video_id === selectedVideo)) {
@@ -392,7 +395,7 @@ function renderFeed() {
   const visible = matches.slice(0, Math.max(feedLimit, selectedIndex + 1));
   const rows = visible.map(({jobs}) => {
     const id = jobs[0].video_id;
-    const signature = JSON.stringify([jobs, discoveredView, ownsLibrary, Boolean(processingSettings && processingRecords), processingRecord(jobs), pendingProcessing.has(id), selectedForProcessing.has(id)]);
+    const signature = JSON.stringify([jobs, ownsLibrary, Boolean(processingSettings && processingRecords), processingRecord(jobs), pendingProcessing.has(id), selectedForProcessing.has(id)]);
     let cached = rowCache.get(id);
     if (!cached || cached.signature !== signature) {
       cached = {signature, row: videoRow(jobs)};
@@ -415,7 +418,8 @@ function renderFeed() {
   }
   for (const id of rowCache.keys()) if (!allVideos.has(id)) rowCache.delete(id);
   $("feed-empty").hidden = matches.length > 0;
-  $("feed-empty").textContent = search ? "No videos match this search. Try a different title or channel." : "No videos yet";
+  $("feed-empty").textContent = search ? "No videos match this search. Try a different title or channel." :
+    unprocessedOnly ? "No unprocessed videos" : "No videos yet";
   $("feed-more").hidden = visible.length >= matches.length;
   $("feed-more").textContent = `Load older videos (${visible.length} of ${matches.length})`;
   $("result-count").textContent = `${matches.length} video${matches.length === 1 ? "" : "s"}${search ? " found" : ""}`;
@@ -1259,15 +1263,11 @@ async function renderDigest() {
 }
 $("channel-scope").addEventListener("change", (event) => chooseScope(event.target.value));
 $("rolling-summary").addEventListener("click", () => { chooseScope(libraryScope, true); setReaderOpen(true); });
-$("discovered-view").addEventListener("click", () => {
-  discoveredView = !discoveredView;
-  $("discovered-view").setAttribute("aria-pressed", String(discoveredView));
-  $("discovered-view").textContent = discoveredView ? "Back to library" : "Discovered";
-  $("processing-controls").hidden = !discoveredView;
+$("unprocessed-filter").addEventListener("click", () => {
+  unprocessedOnly = !unprocessedOnly;
+  $("unprocessed-filter").setAttribute("aria-pressed", String(unprocessedOnly));
   feedLimit = 50;
   renderFeed();
-  updateProcessingEstimate();
-  void refreshProcessing();
 });
 $("queue-selected").addEventListener("click", () => changeProcessing("queue", [...selectedForProcessing]));
 
@@ -1277,16 +1277,14 @@ function clearPrivateLibrary() {
   liveFeed?.close();
   liveFeed = null;
   ownsLibrary = true;
-  discoveredView = false;
+  unprocessedOnly = false;
   processingRecords = null;
   processingRevision += 1;
   pendingProcessing.clear();
   selectedForProcessing.clear();
   $("processing-controls").hidden = true;
   $("processing-message").textContent = "";
-  $("discovered-view").hidden = true;
-  $("discovered-view").setAttribute("aria-pressed", "false");
-  $("discovered-view").textContent = "Discovered";
+  $("unprocessed-filter").setAttribute("aria-pressed", "false");
   readerController?.abort();
   feedObserver?.disconnect();
   readingCache.clear(); rowCache.clear(); feedRecords.clear();
@@ -1361,7 +1359,6 @@ async function syncIdentity({user, session}) {
     if (generation !== identityGeneration) return;
     if (!response.ok || verified.user_id !== next) throw new Error("Could not verify your account. Refresh to retry.");
     ownsLibrary = verified.has_library;
-    $("discovered-view").hidden = !ownsLibrary || !processingSettings;
     const destination = new URLSearchParams(window.location.search).get("return_to");
     if (destination && destination.startsWith("/") && !destination.startsWith("//")) {
       const target = new URL(destination, window.location.origin);

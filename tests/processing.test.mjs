@@ -30,7 +30,7 @@ function fixture() {
     processingSettings: {profile: "mai-openrouter-v1", price_per_second: 0.1 / 3600,
       chunk_seconds: 60, reference_seconds: 50},
     processingRecords: null, processingRevision: 0, pendingProcessing: new Set(),
-    selectedForProcessing: new Set(), discoveredView: false,
+    selectedForProcessing: new Set(),
     archive: {channels: [], jobs: [video]}, selectedVideo: null, readerLevel: "video",
     node: element, bestJob: jobs => jobs[0], duration: () => "1m", date: () => "today",
     selectVideo: () => {throw new Error("Process must not open the reader");},
@@ -56,12 +56,12 @@ function fixture() {
   };
 }
 
-test("failed and interrupted videos restore Process and submit a retry for that video", async () => {
+test("failed and interrupted videos offer Retry and submit a retry for that video", async () => {
   for (const state of ["failed", "interrupted"]) {
     const f = fixture();
     await f.context.refreshProcessing();
     f.context.processingRecords = new Map([[video.video_id, {state}]]);
-    assert.equal(f.button().textContent, "Process");
+    assert.equal(f.button().textContent, "Retry");
     assert.equal(f.button().disabled, false);
     const pending = f.button().listeners.click();
     assert.equal(f.button().disabled, true);
@@ -90,7 +90,7 @@ test("Process queues exactly the clicked library video and keeps a spinner while
   const f = fixture();
   assert.equal(f.button(), undefined, "wait for owner queue status before admitting work");
   await f.context.refreshProcessing();
-  assert.equal(f.requests[0].path, "/api/processing", "queue status loads outside Discovered");
+  assert.equal(f.requests[0].path, "/api/processing");
   assert.match(f.button().title, /Estimated transcription \$0\.002/);
   const pending = f.button().listeners.click();
   assert.equal(f.button().disabled, true);
@@ -107,6 +107,34 @@ test("Process queues exactly the clicked library video and keeps a spinner while
   f.context.processingRecords = new Map([[video.video_id, {state: "queued", retry_at: 100}]]);
   assert.equal(f.button().disabled, true);
   assert.equal(f.button().title, "Retry scheduled");
+});
+
+test("library rows support bulk selection and removal of waiting videos", async () => {
+  const f = fixture();
+  const other = {...video, video_id: "other-video"};
+  f.context.archive.jobs.push(other);
+  await f.context.refreshProcessing();
+  for (const item of [video, other]) {
+    const checkbox = descendants(f.context.videoRow([item])).find(node => node.type === "checkbox");
+    checkbox.checked = true;
+    checkbox.listeners.change();
+  }
+  assert.equal(f.controls.get("queue-selected").disabled, false);
+  assert.match(f.controls.get("processing-estimate").textContent, /^2 selected/);
+  const queue = f.context.changeProcessing("queue", [...f.context.selectedForProcessing]);
+  assert.deepEqual(JSON.parse(f.requests.at(-1).options.body), {action: "queue", video_ids: [video.video_id, other.video_id]});
+  f.finish();
+  await queue;
+  assert.equal(f.controls.get("queue-selected").disabled, true);
+
+  const remove = () => descendants(f.context.videoRow([video])).find(node => node.dataset.focus === `remove-${video.video_id}`);
+  const cancellation = remove().listeners.click();
+  assert.equal(remove().disabled, true);
+  assert.deepEqual(JSON.parse(f.requests.at(-1).options.body), {action: "cancel", video_ids: [video.video_id]});
+  f.finish();
+  await cancellation;
+  f.context.processingRecords.set(video.video_id, {state: "active"});
+  assert.equal(remove(), undefined);
 });
 
 test("long-video estimate includes bounded voice reference usage", () => {
