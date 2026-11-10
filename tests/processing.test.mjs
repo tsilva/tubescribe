@@ -32,6 +32,7 @@ function fixture() {
     processingRecords: null, processingRevision: 0, pendingProcessing: new Set(),
     selectedForProcessing: new Set(),
     archive: {channels: [], jobs: [video]}, selectedVideo: null, readerLevel: "video",
+    setInterval: () => 1, clearInterval: () => {},
     node: element, bestJob: jobs => jobs[0], duration: () => "1m", date: () => "today",
     selectVideo: () => {throw new Error("Process must not open the reader");},
     renderFeed() {},

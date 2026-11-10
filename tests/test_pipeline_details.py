@@ -116,6 +116,42 @@ class PipelineDetails(unittest.TestCase):
         self.assertEqual(result["steps"][0]["cost_source"], "provider_reported")
         self.assertEqual(result["cost_usd"], .372)
 
+    def test_hosted_download_timing_spans_status_checks_and_excludes_settlement(self):
+        from tubescribe.cloud_download import download_metrics
+
+        job = self.job()
+
+        def attempt(identifier, stage, state, started, finished, usage, workflow=None):
+            with self.store.db:
+                self.store.db.execute(
+                    "INSERT INTO attempts(id,job_id,stage,workflow,state,started,finished,metrics) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (identifier, job, stage, workflow, state, started, finished, json.dumps(usage)),
+                )
+
+        media = {"nonce": "request", "run": {"id": "run", "usageTotalUsd": .01}}
+        attempt("poll", "download", "pending", 100, 101, download_metrics(media))
+        with self.store.db:
+            self.store.db.execute("UPDATE jobs SET download_state='active' WHERE id=?", (job,))
+        running = details(self.root, "video")["steps"][0]
+        self.assertEqual(running["active_started_at"], 100)
+        self.assertIsNone(running["ended_at"])
+        self.assertIsNone(running["elapsed_seconds"])
+
+        attempt("download", "download", "complete", 129, 130, download_metrics(media))
+        attempt("summary", "build_one", "complete", 170, 180, {}, workflow="summary")
+        media["run"]["usageTotalUsd"] = .02
+        attempt("old-settlement", "download", "complete", 200, 201, download_metrics(media))
+        media["run"]["usageTotalUsd"] = .03
+        attempt("settlement", "download", "complete", 210, 211, download_metrics(media), "settlement")
+        with self.store.db:
+            self.store.db.execute("UPDATE jobs SET download_state='complete' WHERE id=?", (job,))
+        finished = details(self.root, "video")["steps"][0]
+        self.assertEqual((finished["started_at"], finished["ended_at"]), (100, 130))
+        self.assertEqual(finished["elapsed_seconds"], 30)
+        self.assertEqual(finished["cost_usd"], .03)
+        self.assertIsNone(finished["active_started_at"])
+
     def test_failures_interruptions_and_retry_are_presented_without_raw_errors(self):
         job_id = self.job("turbo-v1")
         with self.store.db:

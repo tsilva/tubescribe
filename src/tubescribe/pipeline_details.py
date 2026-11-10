@@ -241,7 +241,41 @@ def details(root, video_id, profile=None):
         if not_billable:
             costs = [0]
         recorded = [cost for cost in costs if cost is not None]
-        elapsed = [number(a["elapsed"]) for a in history]
+        timing = history
+        if hosted_download:
+            # Older settlement attempts have no workflow marker. They only ran
+            # after summary started and refresh billing without acquiring media.
+            summary_started = next(
+                (a["started"] for a in attempts if a["stage"] == "build_one"
+                 and (a["workflow"] == "summary"
+                      or (a["workflow"] is None and "/summary/" in (a["run_id"] or "")))),
+                math.inf,
+            )
+            timing = [
+                a for a in history
+                if a["workflow"] != "settlement" and a["started"] < summary_started
+            ]
+        started_at = timing[0]["started"] if timing else None
+        latest = timing[-1] if timing else {}
+        active_started = (
+            number(latest.get("started"))
+            if state == "active" and latest.get("state") == "active"
+            else None
+        )
+        completed_at = row.get("completed_at") if state == "complete" and key != "download" else None
+        ended_at = (completed_at or latest.get("finished")) if state != "active" else None
+        elapsed = []
+        for attempt in timing:
+            seconds = number(attempt["elapsed"])
+            if seconds is None and attempt["finished"] is not None:
+                seconds = number(attempt["finished"] - attempt["started"])
+            elapsed.append(seconds)
+        if hosted_download and started_at is not None:
+            # The durable actor keeps working between status checks.
+            if state == "active":
+                active_started, elapsed = started_at, []
+            elif ended_at is not None:
+                elapsed = [number(ended_at - started_at)]
         fallback = (
             rows["transcription"].get("processing_seconds")
             if key == "transcription"
@@ -269,10 +303,10 @@ def details(root, video_id, profile=None):
                 "total_tokens": sum(t for t in tokens if t is not None)
                 if any(t is not None for t in tokens)
                 else number(row.get("total_tokens")),
-                "started_at": history[0]["started"] if history else None,
-                "completed_at": row.get("completed_at")
-                if state == "complete" and key != "download"
-                else None,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "ended_at": ended_at,
+                "active_started_at": active_started,
                 "retry_at": (number(row.get("next_retry")) or None)
                 if state in ("pending", "failed", "interrupted")
                 else None,
@@ -300,8 +334,8 @@ def details(root, video_id, profile=None):
         and all(s["cost_complete"] for s in steps if s["state"] != "included"),
         "cost_note": "Recorded charges only. Unreported provider charges, subscriptions, local compute and storage are not included.",
         "duration_seconds": number(video[0]) or number(rows["transcription"].get("duration")),
-        "processing_seconds": sum(s["elapsed_seconds"] or 0 for s in steps)
-        if any(s["elapsed_seconds"] is not None for s in steps)
+        "processing_seconds": sum(s["elapsed_seconds"] or 0 for s in steps if s["state"] != "included")
+        if any(s["elapsed_seconds"] is not None for s in steps if s["state"] != "included")
         else None,
         "started_at": min(started) if started else None,
         "completed_at": (

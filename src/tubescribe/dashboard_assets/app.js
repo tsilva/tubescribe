@@ -666,7 +666,10 @@ async function renderReader(jobs, job) {
   view.youtube.href = job.url;
   if (view.fullPage) view.fullPage.href = sourceUrl;
   updateReaderTabs(view, tabs);
-  if (view.pipelineData) renderPipeline(view.content, view.pipelineData, status);
+  if (view.pipelineData) {
+    renderPipeline(view.content, view.pipelineData, status);
+    syncPipelineTimer(view);
+  }
   // Queue/status updates affect the chrome, never a saved document's cache key.
   const version = readerTab === "pipeline" ? [feedRevision, job] :
     readerTab === "summary" ? [job.summary_updated_at, job.summary_dir] : [job.postprocessing_dir];
@@ -793,6 +796,7 @@ function refreshReaderPipeline(view, signature) {
           if (view.pipelineNext) continue;
           view.pipelineData = data;
           renderPipeline(view.content, data, view.status);
+          syncPipelineTimer(view);
           view.pipelineError?.remove();
           view.pipelineError = null;
         } catch (error) {
@@ -819,91 +823,180 @@ function refreshReaderPipeline(view, signature) {
 
 function renderPipeline(content, data, status) {
   let view = content.pipelineView;
-  const shape = JSON.stringify(data.steps.map(step => step.key));
+  const steps = data.steps.filter(step => step.state !== "included");
+  const shape = JSON.stringify(steps.map(step => step.key));
   if (!view || view.shape !== shape) {
+    const panel = node("section", undefined, "pipeline-panel");
     const heading = node("div", undefined, "pipeline-progress");
     const caption = node("div", undefined, "pipeline-progress-caption");
     caption.setAttribute("role", "status");
     caption.setAttribute("aria-live", "polite");
-    view = {shape, status: node("span"), count: node("span"), progress: node("progress"),
-      stats: [], steps: [], provenance: []};
+    view = {shape, count: caption, progress: node("progress"), live: node("span", "Live", "pipeline-live"),
+      stats: [], steps: []};
     view.progress.setAttribute("aria-label", "Video processing progress");
-    caption.append(view.status, view.count);
-    heading.append(caption, view.progress);
+    heading.append(node("h3", "Pipeline"), caption, view.progress);
     const stats = node("dl", undefined, "pipeline-stats");
-    for (let index = 0; index < 6; index++) {
-      const field = {label: node("dt"), value: node("dd")};
+    for (const label of ["Processing cost", "Processing time", "Video duration", "Recorded tokens"]) {
+      const field = {label: node("dt", label), value: node("span")};
       const item = node("div");
-      item.append(field.label, field.value);
+      const value = node("dd");
+      value.append(field.value);
+      if (label === "Processing time") value.append(view.live);
+      item.append(field.label, value);
       stats.append(item);
       view.stats.push(field);
     }
-    const steps = node("ol", undefined, "pipeline-steps");
-    for (const step of data.steps) {
-      const item = node("li", undefined, "pipeline-step");
-      const title = node("div", undefined, "pipeline-step-heading");
-      const field = {label: node("strong"), badge: node("span"), description: node("p"),
-        retry: node("p", undefined, "pipeline-step-meta")};
-      title.append(field.label, field.badge);
-      item.append(title, field.description, field.retry);
-      steps.append(item);
+    const stages = node("h4", "Stages");
+    stages.id = "pipeline-stages";
+    const table = node("table", undefined, "pipeline-stages");
+    table.setAttribute("role", "table");
+    table.setAttribute("aria-labelledby", stages.id);
+    const columns = ["Stage", "Status", "Started (UTC)", "Ended (UTC)", "Duration", "Cost (USD)"];
+    const header = node("thead");
+    header.setAttribute("role", "rowgroup");
+    const headerRow = node("tr");
+    headerRow.setAttribute("role", "row");
+    for (const label of columns) {
+      const column = node("th", label);
+      column.scope = "col";
+      column.setAttribute("role", "columnheader");
+      headerRow.append(column);
+    }
+    header.append(headerRow);
+    const rows = node("tbody");
+    rows.setAttribute("role", "rowgroup");
+    for (const step of steps) {
+      const row = node("tr");
+      row.setAttribute("role", "row");
+      const title = node("th", undefined, "pipeline-stage-name");
+      title.scope = "row";
+      title.setAttribute("role", "rowheader");
+      const field = {label: node("span", step.label), badge: node("span"), started: node("span"),
+        ended: node("span"), duration: node("span"), cost: node("span"),
+        retry: node("small", undefined, "pipeline-retry")};
+      title.append(field.label, field.retry);
+      row.append(title);
+      [field.badge, field.started, field.ended, field.duration, field.cost].forEach((value, index) => {
+        const cell = node("td");
+        cell.setAttribute("role", "cell");
+        const label = node("span", columns[index + 1], "pipeline-mobile-label");
+        label.setAttribute("aria-hidden", "true");
+        cell.append(label, value);
+        row.append(cell);
+      });
+      rows.append(row);
       view.steps.push(field);
     }
-    const provenance = node("dl", undefined, "pipeline-provenance");
-    for (const label of ["Profile", "Transcription model", "Language", "First recorded attempt", "Finished"]) {
-      const field = {label: node("dt", label), value: node("dd")};
-      provenance.append(field.label, field.value);
-      view.provenance.push(field);
-    }
-    content.replaceChildren(heading, stats, steps, provenance);
+    table.append(header, rows);
+    panel.append(heading, stats, stages, table);
+    content.replaceChildren(panel);
     content.pipelineView = view;
   }
-  const money = value => value == null ? "Not recorded" : "$" + value.toFixed(4);
-  const elapsed = value => value == null ? "Not recorded" : value < 60 ? value.toFixed(1) + "s" : duration(value);
-  const count = value => value == null ? "Not recorded" : value.toLocaleString();
-  // Hosted speaker attribution happens inside transcription, not as another
-  // completed phase before downloading has even started.
-  const required = data.steps.filter(step => step.state !== "included");
-  const completed = required.filter(step => step.state === "complete").length;
-  const progressText = completed + " of " + required.length + " steps complete";
-  setReaderText(view.status, data.complete ? "Pipeline complete" : status.label);
+  const completed = steps.filter(step => step.state === "complete").length;
+  const progressText = completed + " of " + steps.length + " steps complete";
   setReaderText(view.count, progressText);
-  view.progress.max = Math.max(required.length, 1);
+  view.progress.max = Math.max(steps.length, 1);
   view.progress.value = completed;
   view.progress.setAttribute("aria-valuetext", (data.complete ? "Pipeline complete. " : status.label + ". ") + progressText);
-  const stats = [
-    [data.cost_complete ? "Processing cost" : data.complete ? "Processing cost · partial" : "Processing cost so far", money(data.cost_usd)],
-    ["Processing time", elapsed(data.processing_seconds)],
-    ["Video duration", data.duration_seconds == null ? "Unknown" : duration(data.duration_seconds)],
-    ["Recorded tokens", count(data.total_tokens)],
-    ["Speakers", count(data.speakers)], ["Figures", count(data.figures)],
-  ];
-  stats.forEach(([label, value], index) => {
-    setReaderText(view.stats[index].label, label);
-    setReaderText(view.stats[index].value, value);
-  });
-  const descriptions = {
-    download: "Downloads the video's audio for transcription.",
-    transcription: "Turns speech into text with word-level timestamps.",
-    diarization: "Identifies speakers and labels their turns in the conversation.",
-    postprocessing: "Cleans up the transcript and adds speaker and visual context.",
-    summary: "Creates a concise summary of the video's main ideas.",
-  };
-  data.steps.forEach((step, index) => {
+  const partial = !data.cost_complete && data.cost_usd != null && data.complete;
+  setReaderText(view.stats[0].label, partial ? "Processing cost · partial" : "Processing cost");
+  view.stats[0].value.title = data.cost_note || "";
+  setReaderText(view.stats[0].value, pipelineCost(data.cost_usd));
+  setReaderText(view.stats[2].value, data.duration_seconds == null ? "Unknown" : duration(data.duration_seconds));
+  setReaderText(view.stats[3].value, data.total_tokens == null ? "Not recorded" : data.total_tokens.toLocaleString());
+  steps.forEach((step, index) => {
     const field = view.steps[index];
-    setReaderText(field.label, step.label);
-    setReaderText(field.badge, ({pending: "Waiting", active: "In progress", included: "Included"})[step.state] || human(step.state));
+    const waiting = step.state === "pending" && !step.started_at && !step.attempts;
+    const missing = waiting ? "—" : "Not recorded";
+    setReaderText(field.badge, ({pending: "Waiting", active: "Running"})[step.state] || human(step.state));
     field.badge.className = "badge " + step.state;
-    setReaderText(field.description, step.state === "included" ? "Identifies speakers as part of transcription." :
-      descriptions[step.key] || step.note || "Processes this part of the video.");
+    setPipelineTimestamp(field.started, step.started_at, missing);
+    setPipelineTimestamp(field.ended, step.ended_at ?? step.completed_at,
+      step.state === "active" ? "In progress" : missing);
+    let cost = pipelineCost(step.cost_usd);
+    if (waiting) cost = "—";
+    else if (step.state === "active" && (step.cost_usd == null || step.cost_source === "not_billable")) cost = "Pending";
+    else if (step.cost_usd != null && !step.cost_complete) cost += " (partial)";
+    setReaderText(field.cost, cost);
     field.retry.hidden = !step.retry_at;
     setReaderText(field.retry, step.retry_at ? "Retry scheduled: " + date(step.retry_at) : "");
   });
-  [data.profile, data.model, data.language, date(data.started_at), date(data.completed_at)].forEach((value, index) => {
-    const field = view.provenance[index];
-    field.label.hidden = field.value.hidden = !value;
-    setReaderText(field.value, value || "");
+  updatePipelineTime(view, data, steps);
+}
+
+function pipelineCost(value) {
+  return value == null ? "Not recorded" : "$" + value.toFixed(4);
+}
+
+function setPipelineTimestamp(cell, value, missing) {
+  const key = value == null ? "" : String(value);
+  if (cell.dataset.timestamp === key && cell.dataset.missing === missing) return;
+  cell.dataset.timestamp = key;
+  cell.dataset.missing = missing;
+  const stamp = parsedDate(value);
+  if (Number.isNaN(stamp.getTime())) {
+    setReaderText(cell, missing);
+    return;
+  }
+  const time = node("time", undefined, "pipeline-timestamp");
+  const iso = stamp.toISOString();
+  time.dateTime = iso;
+  const day = stamp.toLocaleDateString("en-GB", {day: "numeric", month: "short", year: "numeric", timeZone: "UTC"});
+  time.append(node("span", day), node("span", iso.slice(11, 19), "muted"));
+  cell.replaceChildren(time);
+}
+
+function updatePipelineTime(view, data, steps = data.steps.filter(step => step.state !== "included")) {
+  const elapsed = seconds => {
+    if (seconds < 60) return Math.floor(seconds) + "s";
+    if (seconds < 3600) return duration(seconds);
+    return duration(seconds) + " " + Math.floor(seconds % 60) + "s";
+  };
+  const now = Date.now() / 1000;
+  let running = false;
+  let extra = 0;
+  steps.forEach((step, index) => {
+    const active = step.state === "active" && step.active_started_at != null;
+    const liveSeconds = active ? Math.max(0, now - step.active_started_at) : 0;
+    running ||= active;
+    extra += liveSeconds;
+    const value = active || step.elapsed_seconds != null ? elapsed((step.elapsed_seconds ?? 0) + liveSeconds)
+      : step.state === "pending" && !step.attempts ? "—" : "Not recorded";
+    setReaderText(view.steps[index].duration, value);
   });
+  const total = running || data.processing_seconds != null
+    ? elapsed((data.processing_seconds ?? 0) + extra) : "Not recorded";
+  setReaderText(view.stats[1].value, total);
+  view.live.hidden = !running;
+}
+
+function syncPipelineTimer(view) {
+  const data = view.pipelineData;
+  const active = data.steps.some(step => step.state === "active");
+  const awaitingWork = !data.complete && ["active", "queued"].includes(view.status.stage);
+  if (active || awaitingWork) {
+    if (view.pipelineTimer != null) return;
+    let lastRead = Date.now();
+    const controller = view.controller;
+    view.pipelineTimer = setInterval(() => {
+      if (document.hidden) return;
+      updatePipelineTime(view.content.pipelineView, view.pipelineData);
+      // A stage attempt can start or finish just after a catalogue notification.
+      // Keep that gap bounded while this run is open and processing.
+      if (!view.pipelineRequest && Date.now() - lastRead >= 5000) {
+        lastRead = Date.now();
+        void refreshReaderPipeline(view, readerSignature);
+      }
+    }, 1000);
+    view.stopPipelineTimer = () => {
+      clearInterval(view.pipelineTimer);
+      view.pipelineTimer = null;
+      controller.signal.removeEventListener("abort", view.stopPipelineTimer);
+    };
+    controller.signal.addEventListener("abort", view.stopPipelineTimer, {once: true});
+  } else if (view.pipelineTimer != null) {
+    view.stopPipelineTimer();
+  }
 }
 
 function applyFeed(data) {
@@ -1095,7 +1188,7 @@ $("video-search").addEventListener("input", () => {
   renderFeed();
 });
 $("refresh").addEventListener("click", refresh);
-// Refresh on entry, explicit request, or returning to the tab; no background polling.
+// Refresh the library on entry, explicit request, or returning to the tab.
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && signedInUser) {
     if (realtimeSettings.enabled && ownsLibrary) liveFeed?.wake();

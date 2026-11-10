@@ -22,15 +22,21 @@ const flatten = node => [node, ...node.children.flatMap(flatten)];
 const job = {video_id: "test", profile: "hosted", stage: "queued", title: "Test video"};
 const data = {complete: true, cost_usd: 0.002, cost_complete: false, cost_note: "Recorded charges only.",
   steps: [{key: "transcription", label: "Transcription", state: "complete", cost_usd: 0.002, cost_complete: true,
+    started_at: 1794305660, ended_at: "2026-11-10T11:14:22+01:00",
     elapsed_seconds: 1.25, attempts: 2, total_tokens: 100},
   {key: "diarization", label: "Speaker attribution", state: "included", note: "Included in hosted transcription"},
   {key: "summary", label: "Summary", state: "pending"}],
   duration_seconds: 120, total_tokens: 100, speakers: 0, figures: 0, model: "Example", profile: "hosted"};
 function fixture() {
   const controls = new Map(), requests = [];
-  let result = data, failure = false;
+  let result = data, failure = false, now = 1794305670000, nextTimer = 0;
+  const timers = new Map();
   const context = {readerIdentity: "", readerTab: "summary", readerSignature: "", readerController: null,
     feedRevision: "1", node: element, AbortController, URL, location: {href: "http://localhost/"},
+    Date: class extends Date {static now() {return now;}},
+    document: {hidden: false},
+    setInterval: callback => {timers.set(++nextTimer, callback); return nextTimer;},
+    clearInterval: id => timers.delete(id),
     processingRecord: () => null, processingStatus: () => ({stage: "queued", label: "Queued"}),
     statusBadge: () => element("span", "Queued"), externalLink: () => element("a"),
     icon: () => element("img"), backToLibrary() {}, setReaderOpen() {}, date: value => value ? "Today" : "", duration: value => `${value}s`,
@@ -40,9 +46,11 @@ function fixture() {
     libraryFetch: async (url, options) => {requests.push({url, options}); if (failure) throw new Error("Offline");
       return {ok: true, json: async () => result};},
   };
+  runInNewContext(source.slice(source.indexOf("function parsedDate("), source.indexOf("function date(")), context);
   runInNewContext(source.slice(source.indexOf("function resetReader("), source.indexOf("function applyFeed(")), context);
   return {context, requests, nodes: () => flatten(controls.get("reader")), pane: () => controls.get("reader"),
-    result: value => {result = value;}, fail: () => {failure = true;}};
+    result: value => {result = value;}, fail: () => {failure = true;},
+    tick: seconds => {now += seconds * 1000; for (const callback of timers.values()) callback();}, timers};
 }
 
 test("unprocessed videos have an accessible Pipeline tab and no document links", async () => {
@@ -56,19 +64,56 @@ test("unprocessed videos have an accessible Pipeline tab and no document links",
   assert.equal(f.nodes().some(n => n.className === "reader-document-actions"), false);
   assert.ok(f.nodes().some(n => n.textContent === "$0.0020"));
   assert.ok(f.nodes().some(n => n.textContent === "Processing cost · partial"));
-  assert.ok(f.nodes().some(n => n.textContent === "Identifies speakers as part of transcription."));
+  assert.equal(f.nodes().some(n => n.textContent === "Speaker attribution"), false);
+  assert.ok(f.nodes().some(n => n.tag === "th" && n.textContent === "Started (UTC)"));
+  assert.ok(f.nodes().some(n => n.tag === "time" && n.dateTime === "2026-11-10T10:14:22.000Z"));
   assert.ok(f.nodes().some(n => n.textContent === "Waiting"));
   assert.equal(f.nodes().some(n => n.className === "pipeline-cost-note"), false);
 });
 
 test("unknown costs stay explicit and zero values remain visible", () => {
   const f = fixture(), content = element("div");
-  f.context.renderPipeline(content, {...data, cost_usd: null}, {label: "Queued"});
+  f.context.renderPipeline(content, {...data, cost_usd: null, total_tokens: 0,
+    steps: [{...data.steps[0], cost_usd: 0}, {...data.steps[1], state: "complete"}]}, {label: "Queued"});
   const nodes = flatten(content);
   assert.ok(nodes.some(n => n.textContent === "Not recorded"));
-  assert.equal(nodes.filter(n => n.tag === "dd" && n.textContent === "0").length, 2);
-  assert.equal(nodes.some(n => n.textContent === "Cost not recorded"), false);
-  assert.ok(nodes.some(n => n.textContent === "Turns speech into text with word-level timestamps."));
+  assert.ok(nodes.some(n => n.tag === "dd" && n.textContent === "0"));
+  assert.ok(nodes.some(n => n.textContent === "$0.0000"));
+  assert.ok(nodes.some(n => n.textContent === "Speaker attribution"));
+});
+
+test("an open running stage ticks, refreshes receipts, and stops on completion", async () => {
+  const f = fixture();
+  const running = {...data, complete: false, processing_seconds: 4,
+    steps: [data.steps[0], data.steps[1], {...data.steps[2], state: "active",
+      active_started_at: 1794305668, started_at: 1794305668}]};
+  f.result(running);
+  await f.context.renderReader([job], job);
+  const reader = f.pane().readerView;
+  const view = reader.content.pipelineView;
+  assert.equal(view.steps[1].ended.textContent, "In progress");
+  assert.equal(view.steps[1].duration.textContent, "2s");
+  assert.equal(view.stats[1].value.textContent, "6s");
+  assert.equal(view.live.hidden, false);
+  f.tick(2);
+  assert.equal(view.steps[1].duration.textContent, "4s");
+  assert.equal(f.requests.length, 1);
+  f.result({...running, cost_usd: 0.003, total_tokens: 110});
+  f.tick(3);
+  await reader.pipelineRequest;
+  assert.equal(f.requests.length, 2);
+  assert.equal(view.stats[0].value.textContent, "$0.0030");
+  assert.equal(view.stats[3].value.textContent, "110");
+  f.result({...running, complete: true, processing_seconds: 12,
+    steps: [data.steps[0], data.steps[1], {...running.steps[2], state: "complete",
+      ended_at: 1794305676, elapsed_seconds: 8}]});
+  f.tick(5);
+  await reader.pipelineRequest;
+  assert.equal(view.steps[1].ended.children[0].dateTime, "2026-11-10T10:14:36.000Z");
+  assert.equal(view.steps[1].duration.textContent, "8s");
+  assert.equal(view.stats[1].value.textContent, "12s");
+  assert.equal(view.live.hidden, true);
+  assert.equal(f.timers.size, 0);
 });
 
 test("pipeline reloads on catalogue revision changes and offers retry on failures", async () => {
@@ -104,13 +149,13 @@ test("late pipeline responses cannot replace another selected video", async () =
   f.context.libraryFetch = async () => ({ok: true, json: () => delayed});
   const pending = f.context.renderReader([job], job);
   await Promise.resolve();
-  f.context.libraryFetch = async () => ({ok: true, json: async () => ({...data, model: "Current model"})});
+  f.context.libraryFetch = async () => ({ok: true, json: async () => ({...data, cost_usd: 0.008})});
   const other = {...job, video_id: "other"};
   await f.context.renderReader([other], other);
-  finish({...data, model: "Stale model"});
+  finish({...data, cost_usd: 0.001});
   await pending;
-  assert.ok(f.nodes().some(n => n.textContent === "Current model"));
-  assert.equal(f.nodes().some(n => n.textContent === "Stale model"), false);
+  assert.ok(f.nodes().some(n => n.textContent === "$0.0080"));
+  assert.equal(f.nodes().some(n => n.textContent === "$0.0010"), false);
 });
 
 
@@ -264,7 +309,7 @@ test("a discovered video's first profile preserves the panel and rejects older p
   const delayed = new Promise(resolve => {finish = resolve;});
   f.context.libraryFetch = async () => {
     const ordinal = ++reads;
-    return {ok: true, json: async () => ordinal === 1 ? delayed : {...data, model: "New profile"}};
+    return {ok: true, json: async () => ordinal === 1 ? delayed : {...data, cost_usd: 0.008}};
   };
   f.context.feedRevision = "2";
   const pending = f.context.renderReader([discovered], discovered);
@@ -272,13 +317,13 @@ test("a discovered video's first profile preserves the panel and rejects older p
   const previous = view.controller;
   f.context.feedRevision = "3";
   await f.context.renderReader([job], job);
-  finish({...data, model: "Stale profile-less result"});
+  finish({...data, cost_usd: 0.001});
   await pending;
   assert.equal(pane.readerView, view);
   assert.equal(view.content, panel);
   assert.equal(pane.scrollTop, 250);
   assert.equal(previous.signal.aborted, true);
   assert.equal(view.job.profile, "hosted");
-  assert.ok(f.nodes().some(n => n.textContent === "New profile"));
-  assert.equal(f.nodes().some(n => n.textContent === "Stale profile-less result"), false);
+  assert.ok(f.nodes().some(n => n.textContent === "$0.0080"));
+  assert.equal(f.nodes().some(n => n.textContent === "$0.0010"), false);
 });

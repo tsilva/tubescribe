@@ -158,7 +158,7 @@ def acquisition(store, job, *, settle=False):
     key = f"transcripts/{job['channel_id']}/{job['video_id']}/{job['profile']}/cloud-media/apify.json"
     if settle and not store.exists(key):
         return None  # Existing non-Apify publications have no media bill to refresh.
-    attempt = store.begin_attempt(job["id"], "download")
+    attempt = store.begin_attempt(job["id"], "download", workflow="settlement" if settle else None)
     state = "failed"
     try:
         result = acquire(store, job, settle=settle)
