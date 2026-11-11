@@ -87,6 +87,7 @@ STATIC_ASSETS = {
         )
     },
 }
+BRAND_ASSETS = frozenset(path for path, asset in STATIC_ASSETS.items() if asset.startswith("brand/"))
 TEXT_FORMATS = {".json", ".txt", ".srt", ".md"}
 AUDIO_FORMATS = {".mp4", ".m4a", ".mp3", ".webm", ".wav", ".ogg", ".opus", ".flac"}
 CONTENT_TYPES = {
@@ -506,7 +507,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             *,
             disposition=None,
             generated_html=False,
-            public_shell=False,
+            public_content=False,
             content_encoding=None,
             vary_encoding=False,
         ):
@@ -530,11 +531,11 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             self.send_header("Cache-Control", cache)
             if access.enabled:
                 self.send_header("CDN-Cache-Control", "no-store")
-                # Only the fixed sign-in bootstrap is account-independent. Keep
+                # The fixed sign-in bootstrap and bundled branding are public. Keep
                 # browser/downstream storage disabled, and never cache data or
                 # credentialed/return-target requests at Vercel either.
-                cache_shell = (
-                    public_shell
+                cache_public = (
+                    public_content
                     and status == 200
                     and self.command in {"GET", "HEAD"}
                     and not urlsplit(self.path).query
@@ -543,7 +544,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                 )
                 self.send_header(
                     "Vercel-CDN-Cache-Control",
-                    "public, s-maxage=60" if cache_shell else "no-store",
+                    "public, s-maxage=60" if cache_public else "no-store",
                 )
             self.send_header("Vary", "Accept, Accept-Encoding" if vary_encoding else "Accept")
             if content_encoding:
@@ -744,7 +745,10 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             head.append('<script src="/app.js" defer></script>')
                         data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)
                     self.send_headers(
-                        200, CONTENT_TYPES[path.suffix], len(data), public_shell=url.path == "/"
+                        200,
+                        CONTENT_TYPES[path.suffix],
+                        len(data),
+                        public_content=url.path == "/" or url.path in BRAND_ASSETS,
                     )
                     self.write_data(data)
                     return

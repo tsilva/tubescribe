@@ -249,7 +249,40 @@ class ClerkReader(unittest.TestCase):
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(denied.headers["vercel-cdn-cache-control"], "no-store")
 
-    def test_shared_dashboard_gate_keeps_the_shell_out_of_all_caches(self):
+    def test_bundled_branding_is_public_without_caching_credentials_or_queries(self):
+        paths = (
+            "/favicon.ico", "/brand/favicon.ico", "/brand/logo.png", "/brand/favicon-16.png",
+            "/brand/favicon-32.png", "/brand/favicon-48.png", "/brand/header-96.png",
+            "/brand/apple-touch-icon.png", "/brand/android-chrome-192.png",
+            "/brand/android-chrome-512.png", "/brand/site.webmanifest",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                public = self.client.get(path)
+                self.assertEqual(public.status_code, 200)
+                self.assertEqual(public.headers["cache-control"], "no-store")
+                self.assertEqual(public.headers["cdn-cache-control"], "no-store")
+                self.assertEqual(public.headers["vercel-cdn-cache-control"], "public, s-maxage=60")
+                self.assertNotIn("set-cookie", public.headers)
+                head = self.client.head(path)
+                self.assertEqual(head.status_code, 200)
+                self.assertEqual(head.content, b"")
+                self.assertEqual(head.headers["content-length"], str(len(public.content)))
+                self.assertEqual(head.headers["vercel-cdn-cache-control"], "public, s-maxage=60")
+                cookie = self.client.get(path, headers={"Cookie": "__session=fixture"})
+                self.assertEqual(cookie.content, public.content)
+                for headers in (self.headers(), self.headers("user_other"), {"Authorization": ""}):
+                    credentialed = self.client.get(path, headers=headers)
+                    self.assertEqual(credentialed.content, public.content)
+                    self.assertEqual(credentialed.headers["vercel-cdn-cache-control"], "no-store")
+                query = self.client.get(path + "?account=fixture")
+                self.assertEqual(query.content, public.content)
+                self.assertEqual(query.headers["vercel-cdn-cache-control"], "no-store")
+        unknown = self.client.get("/brand/unknown.png")
+        self.assertEqual(unknown.status_code, 401)
+        self.assertEqual(unknown.headers["vercel-cdn-cache-control"], "no-store")
+
+    def test_shared_dashboard_gate_keeps_public_content_out_of_all_caches(self):
         token = "synthetic-dashboard-token-" * 2
         with patch.dict(os.environ, {"TUBESCRIBE_ACCESS_TOKEN": token}):
             server = make_server(self.root)
@@ -259,13 +292,15 @@ class ClerkReader(unittest.TestCase):
         with httpx.Client(
             base_url=f"http://127.0.0.1:{server.server_port}", trust_env=False
         ) as client:
-            denied = client.get("/")
-            self.assertEqual(denied.status_code, 401)
-            allowed = client.get("/", headers={"Cookie": "tubescribe_access=" + token})
-            self.assertEqual(allowed.status_code, 200)
-            self.assertEqual(allowed.headers["cache-control"], "no-store")
-            self.assertEqual(allowed.headers["cdn-cache-control"], "no-store")
-            self.assertEqual(allowed.headers["vercel-cdn-cache-control"], "no-store")
+            for path in ("/", "/brand/favicon-32.png", "/brand/site.webmanifest"):
+                with self.subTest(path=path):
+                    denied = client.get(path)
+                    self.assertEqual(denied.status_code, 401)
+                    allowed = client.get(path, headers={"Cookie": "tubescribe_access=" + token})
+                    self.assertEqual(allowed.status_code, 200)
+                    self.assertEqual(allowed.headers["cache-control"], "no-store")
+                    self.assertEqual(allowed.headers["cdn-cache-control"], "no-store")
+                    self.assertEqual(allowed.headers["vercel-cdn-cache-control"], "no-store")
 
     def test_owner_claims_once_and_new_users_have_an_empty_feed(self):
         owner = self.client.get("/api/feed", headers=self.headers())
