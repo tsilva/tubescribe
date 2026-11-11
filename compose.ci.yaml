@@ -1,0 +1,4 @@
+# Used only by scripts/rehearse-containers --prebuilt after image revision checks.
+services:
+  objects:
+    image: ${TUBESCRIBE_OBJECTS_IMAGE:?Exact-commit object-server CI image is required}

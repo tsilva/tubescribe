@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Cache only downloaded packages; APT still verifies signed indexes and hashes.
+set -euo pipefail
+if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+  if test -f /etc/apt/apt-mirrors.txt; then
+    printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+  fi
+  apt_options=(
+    -o Acquire::Retries=2
+    -o Acquire::http::Timeout=30
+    -o Acquire::https::Timeout=30
+    -o APT::Get::AllowUnauthenticated=false
+    -o Acquire::AllowInsecureRepositories=false
+    -o Acquire::AllowDowngradeToInsecureRepositories=false
+    -o Acquire::AllowWeakRepositories=false
+  )
+  if [[ -n "${TUBESCRIBE_APT_CACHE:-}" ]]; then
+    mkdir -p "$TUBESCRIBE_APT_CACHE"
+    apt_options+=(-o "Dir::Cache::archives=$TUBESCRIBE_APT_CACHE" -o APT::Keep-Downloaded-Packages=true)
+  fi
+  sudo apt-get "${apt_options[@]}" update
+  sudo apt-get "${apt_options[@]}" install -y --no-install-recommends ffmpeg
+fi
+ffmpeg -version
+ffprobe -version

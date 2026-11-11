@@ -48,6 +48,43 @@ jobs:
               raise SystemExit(1 if findings else 0)
           PYSCAN
 
+  checks:
+    name: Reader checks and Python lint
+    needs: secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.11.13'
+          python-version: '3.11'
+          enable-cache: true
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Install pinned reader package manager
+        run: npm install --global pnpm@10.33.0 --ignore-scripts
+      - name: Locate the package store
+        id: pnpm
+        run: printf 'store=%s\n' "$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore downloaded reader packages
+        id: pnpm-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-10.33.0-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc') }}
+      - name: Verify reader security tests and bundle reproducibility
+        run: scripts/verify --frontend
+      - name: Lint Python sources and tests
+        run: scripts/verify --lint
+      - name: Save downloaded reader packages from main only
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.pnpm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: ${{ steps.pnpm-cache.outputs.cache-primary-key }}
+
   local:
     needs: secrets
     name: Local tests (Python ${{ matrix.python }})
@@ -66,36 +103,95 @@ jobs:
           version: '0.11.13'
           python-version: ${{ matrix.python }}
           enable-cache: true
-      - name: Ensure media tools
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Select the weekly media package cache
+        id: media
+        run: printf 'week=%s\n' "$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Restore downloaded media packages
+        id: media-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/tubescribe-media-debs/*.deb
+          key: ${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-media-${{ steps.media.outputs.week }}-${{ hashFiles('scripts/ensure-media-tools') }}
+      - name: Ensure media tools through authenticated APT
         timeout-minutes: 8
-        run: |
-          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
-            # The runner's Azure mirror can stall on codec downloads. Keep
-            # Ubuntu signature verification and use its official HTTPS archive.
-            if test -f /etc/apt/apt-mirrors.txt; then
-              printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-            fi
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends ffmpeg
-          fi
-          ffmpeg -version
-          ffprobe -version
-      - name: Install pinned reader package manager
-        run: npm install --global pnpm@10.33.0 --ignore-scripts
-      - name: Lint and verify local recovery and upgrades
-        # Lifecycle scripts stay disabled; package versions satisfy the age cutoff.
-        run: scripts/verify
+        run: scripts/ensure-media-tools
+        env:
+          TUBESCRIBE_APT_CACHE: ${{ runner.temp }}/tubescribe-media-debs
+      - name: Verify local recovery and upgrades
+        run: scripts/verify --python
+      - name: Save downloaded media packages from main only
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.python == '3.11' && steps.media-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/tubescribe-media-debs/*.deb
+          key: ${{ steps.media-cache.outputs.cache-primary-key }}
 
   containers:
     name: PostgreSQL and S3 recovery, upgrade and restore
-    needs: local
+    needs: [checks, local]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set up the isolated BuildKit builder
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.38.1
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+      - name: Build the runtime CI image with layer caching
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: tubescribe-ci-runtime:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=tubescribe-ci-runtime-v1
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,version=2,scope=tubescribe-ci-runtime-v1,mode=max' || '' }}
+      - name: Build the rehearsal CI image with layer caching
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: rehearsal
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: tubescribe-ci-rehearsal:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=tubescribe-ci-rehearsal-v1
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,version=2,scope=tubescribe-ci-rehearsal-v1,mode=max' || '' }}
+      - name: Build the objects CI image with layer caching
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./deploy
+          file: ./deploy/Dockerfile.objects
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: tubescribe-ci-objects:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=tubescribe-ci-objects-v1
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,version=2,scope=tubescribe-ci-objects-v1,mode=max' || '' }}
+      - name: Build the cloud-media CI image with layer caching
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: cloud-media
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: tubescribe-ci-cloud-media:${{ github.sha }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,version=2,scope=tubescribe-ci-cloud-media-v1
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,version=2,scope=tubescribe-ci-cloud-media-v1,mode=max' || '' }}
       - name: Rehearse disposable services with synthetic inference
-        run: scripts/rehearse-containers
+        run: scripts/rehearse-containers --prebuilt
       - name: Verify the media image and native Workflow boundaries without network access
-        run: scripts/verify-cloud-media
+        run: scripts/verify-cloud-media --prebuilt

@@ -2,14 +2,29 @@
 # Reproduce the PR checks locally; inference is synthetic and network tests are opt-in.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+mode=${1:---all}
+if (( $# > 1 )); then
+  echo 'Usage: scripts/verify [--all|--frontend|--lint|--python]' >&2
+  exit 2
+fi
+case "$mode" in
+  --all|--frontend|--lint|--python) ;;
+  *) echo 'Usage: scripts/verify [--all|--frontend|--lint|--python]' >&2; exit 2 ;;
+esac
 # A developer may have a live archive configured in their shell. Test fixtures must
 # start from local defaults, then select their own temporary databases and objects.
 for task_setting in ${!TUBESCRIBE_@}; do
   unset "$task_setting"
 done
 unset NEON_REALTIME_URL NEON_REALTIME_SECRET
-pnpm install --frozen-lockfile --ignore-scripts
-pnpm run test:reader
-pnpm run check:reader
-uv --config-file uv.toml run --frozen --inexact --extra cloud --group dev ruff check src tests api cloud_workflows.py scripts/rehearse-containers
-TUBESCRIBE_NETWORK_TESTS=0 uv --config-file uv.toml run --frozen --inexact --extra cloud --group dev python -m unittest discover -s tests -v
+if [[ "$mode" == --all || "$mode" == --frontend ]]; then
+  pnpm install --frozen-lockfile --ignore-scripts
+  pnpm run test:reader
+  pnpm run check:reader
+fi
+if [[ "$mode" == --all || "$mode" == --lint ]]; then
+  uv --config-file uv.toml run --frozen --inexact --extra cloud --group dev ruff check src tests api cloud_workflows.py scripts/rehearse-containers
+fi
+if [[ "$mode" == --all || "$mode" == --python ]]; then
+  TUBESCRIBE_NETWORK_TESTS=0 uv --config-file uv.toml run --frozen --inexact --extra cloud --group dev python -m unittest discover -s tests -v
+fi

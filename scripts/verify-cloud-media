@@ -2,8 +2,23 @@
 # No credentials, network inference, registry publication or plan changes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-docker build --platform linux/amd64 --target cloud-media -t tubescribe-media-check .
-docker run --rm --platform linux/amd64 --network none \
+image=tubescribe-media-check
+if (( $# == 1 )) && [[ "$1" == --prebuilt ]]; then
+  revision=$(git rev-parse HEAD)
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+  image="tubescribe-ci-cloud-media:$revision"
+  actual=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
+  if [[ "$actual" != "$revision" ]]; then
+    echo 'Prebuilt media image does not match the checked-out commit' >&2
+    exit 1
+  fi
+elif (( $# == 0 )); then
+  docker build --platform linux/amd64 --target cloud-media -t "$image" .
+else
+  echo 'Usage: scripts/verify-cloud-media [--prebuilt]' >&2
+  exit 2
+fi
+docker run --rm --pull never --platform linux/amd64 --network none \
   --entrypoint python --workdir /verification \
   -v "$PWD/tests:/verification:ro" \
-  tubescribe-media-check -m unittest -v test_cloud_workflows test_cloud_media
+  "$image" -m unittest -v test_cloud_workflows test_cloud_media

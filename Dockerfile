@@ -7,25 +7,29 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates libgomp1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml uv.lock uv.toml README.md package.json ./
-COPY src ./src
 ENV UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/opt/venv PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 TUBESCRIBE_DATA=/scratch
 RUN useradd --uid 10001 --create-home tubescribe && mkdir -p /scratch /state /objects /home/tubescribe/.cache/tubescribe/models && chown -R tubescribe:tubescribe /scratch /state /objects /home/tubescribe/.cache
+# Source edits must not invalidate the locked dependency layer.
+RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable --extra cloud --no-install-project
 
 FROM base AS runtime
+COPY src ./src
 RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable --extra cloud
 USER tubescribe
 ENTRYPOINT ["tubescribe"]
 CMD ["dashboard", "serve", "--port", "8080"]
 
 FROM base AS gpu
+COPY src ./src
 # CUDA libraries arrive through locked inference wheels; supply the NVIDIA container runtime.
 RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable --extra asr --extra diarization
 USER tubescribe
 ENTRYPOINT ["python", "-m", "uvicorn"]
 CMD ["tubescribe.server:create_app", "--factory", "--host", "0.0.0.0", "--port", "18765"]
 
-FROM runtime AS rehearsal
-USER root
+FROM base AS rehearsal
+RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable --extra cloud --group rehearsal --no-install-project
+COPY src ./src
 RUN uv --config-file uv.toml sync --frozen --no-dev --no-editable --extra cloud --group rehearsal
 COPY tests /app/tests
 USER tubescribe
@@ -33,10 +37,10 @@ ENV TUBESCRIBE_NETWORK_TESTS=1
 ENTRYPOINT ["python"]
 CMD ["-m", "unittest", "discover", "-s", "tests", "-p", "test_network_runtime.py", "-v"]
 
-FROM runtime AS cloud-verification
-USER root
-RUN uv --config-file uv.toml sync --frozen --no-editable --extra cloud --group dev
+FROM base AS cloud-verification
+RUN uv --config-file uv.toml sync --frozen --no-editable --extra cloud --group dev --no-install-project
 COPY . /app
+RUN uv --config-file uv.toml sync --frozen --no-editable --extra cloud --group dev
 USER tubescribe
 ENV TUBESCRIBE_NETWORK_TESTS=0 TUBESCRIBE_DATA=""
 ENTRYPOINT ["/bin/sh", "-c"]

@@ -1391,8 +1391,32 @@ scripts/rehearse-containers    # complete disposable PostgreSQL/SeaweedFS recove
 ```
 
 `.github/workflows/ci.yml` runs on PRs, pushes to `main`, `v*` tags, and manual
-dispatch. Local checks cover Python 3.11, 3.12, and 3.13; the container rehearsal runs
-after they pass. Actions are pinned to commit hashes, dependencies use `uv.lock`, and
+dispatch. Reader lifecycle/security tests, bundle reproducibility, and Python lint
+run once in a shared job. The full Python suite still runs separately on Python
+3.11, 3.12, and 3.13; the container rehearsal waits for both the shared checks and
+all three Python jobs. `scripts/verify` retains the complete local check sequence;
+`--frontend`, `--lint`, and `--python` select the same groups individually.
+
+CI caches downloaded pnpm packages, authenticated APT package archives, and
+BuildKit layers. Cache hits never skip tests or frozen-lockfile installation.
+APT refreshes signed indexes and verifies package hashes before installing cached
+archives; the media-package cache rotates weekly. Only pushes to `main` save
+these caches; PRs, tags, and manual runs may read caches but do not publish them.
+Docker targets have separate cache scopes, and dependency installation precedes
+source copying so source edits do not invalidate dependency layers.
+
+The CI builder loads runtime, rehearsal, object-server, and cloud-media images
+locally without registry publication. `scripts/rehearse-containers --prebuilt`
+and `scripts/verify-cloud-media --prebuilt` require images labelled with the
+checked-out commit and fail if any are missing or stale. The rehearsal retains
+the complete synthetic inference, outage, restart, upgrade, and fresh-volume
+restore checks, with test-image pulls and implicit builds disabled. It explicitly
+pulls the database at its committed upstream digest. Media verification
+retains its offline network boundary. Normal invocations still build locally.
+CI caches and test images are never consumed by privileged production delivery;
+its successful exact-commit CI requirement and production verification are unchanged.
+
+Actions are pinned to commit hashes, dependencies use `uv.lock`, and
 the workflow has read-only repository permissions with no deployment or production
 credentials. Model services are synthetic, so verification consumes no inference tokens.
 `scripts/verify` clears inherited `TUBESCRIBE_*` settings before running local fixtures,
