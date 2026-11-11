@@ -1,10 +1,18 @@
 # Production delivery
 
-Push to `main` triggers `.github/workflows/production-delivery.yml`. After secret scanning, it calls the trusted workflow in public `tsilva/.github`, pinned to a reviewed full commit SHA. The privileged job checks out only the shared implementation, waits for the same latest main commit's CI, syncs its fixed Production allowlist, deploys that exact commit, and verifies the resulting READY deployment. Vercel's automatic Git deployments remain disabled so they cannot race synchronization.
+A successful `CI` completion for a push to `main` triggers `.github/workflows/production-delivery.yml` through `workflow_run`. After secret scanning, it calls the trusted workflow in public `tsilva/.github`, pinned to a reviewed full commit SHA. The privileged job checks out only the shared implementation, rechecks the same latest main commit's already successful CI, syncs its fixed Production allowlist, deploys that exact commit, and verifies the resulting READY deployment. Vercel's automatic Git deployments remain disabled so they cannot race synchronization.
+
+Automatic delivery accepts only successful main-push CI from this repository,
+for the same SHA as the delivery run and the current head of `main`. The CI
+workflow path, immutable repository IDs, run ID and rerun attempt are checked
+again against GitHub before secret access. Failed, cancelled, forked, stale or
+superseded runs cannot deploy. Manual and secret-change relay dispatches remain
+available, but fail immediately if the latest exact-commit CI is not already
+successful. CI artifacts and caches are not imported into the trusted sync job.
 
 Infisical remains the source of application secrets. Development uses the existing human CLI login. The shared GitHub reader has Viewer access to the assigned production vaults, and the completed rollout requires its server-side OIDC policy to match the exact approved reusable workflow revision, caller repository IDs, owner ID, main branch and Production context. The trusted `apps.json` selects the source vault and destination from the immutable caller repository ID; app files and inputs cannot change that mapping. The reader itself can access all assigned vaults inside the trusted job. Its token and fetched values never leave that job. The Vercel deployment credential remains in this repository's GitHub Production environment.
 
-The pinned shared source and [trust contract](https://github.com/tsilva/.github/blob/e0c6d64d4fc917ea0e108d27ce8d1a5304aeb3c6/.github/actions/production-delivery/README.md) are authoritative. App repositories retain only the pinned caller workflow. Source/destination mappings, credential handling and boundary tests are maintained centrally; no app code executes in the privileged job.
+The pinned shared source and [trust contract](https://github.com/tsilva/.github/blob/c262be7b75fe4654c170eb5e13240808a70b9936/.github/actions/production-delivery/README.md) are authoritative. App repositories retain only the pinned caller workflow. Source/destination mappings, credential handling and boundary tests are maintained centrally; no app code executes in the privileged job.
 
 The workflow does not run on pull requests or forks, export `.env` files, upload secret artifacts, delete secret variables, or change preview/development variables. All required source keys and destination targets are checked before writes. Failed CI or sync prevents deployment. Existing production remains live on failure.
 
