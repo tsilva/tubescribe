@@ -40,6 +40,11 @@ data, configuration endpoints, return-target URLs, and other authenticated-host
 responses continue to bypass caches. Verify the deployed shell's cache status and
 private-route denial after changing this policy.
 
+The sign-in HTML preloads Clerk's pinned browser scripts and its existing shared UI
+chunks. Shared chunks use low fetch priority and the same request mode as the UI
+loader; these hints do not execute code. The browser bootstrap retains its hints
+for older cached documents, and matching requests are coalesced by the browser.
+
 The optional [Workflow backend](guide.md#owner-selected-cloud-processing) preserves
 this delivery contract. Its dedicated cloud Agent Vault bindings, maintenance
 capability and immutable media image or clean snapshot are separately provisioned Production

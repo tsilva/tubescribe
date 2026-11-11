@@ -733,6 +733,10 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                                 f'<link rel="preload" as="script" href="{access.issuer}{script}" crossorigin="anonymous">'
                                 for script in CLERK_BROWSER_SCRIPTS
                             )
+                            head.extend(
+                                f'<link rel="preload" as="script" href="{access.issuer}{chunk}" fetchpriority="low">'
+                                for chunk in CLERK_UI_CHUNKS
+                            )
                             head.append(f"<script>{CLERK_BOOTSTRAP}</script>")
                             head.append(f'<style id="tubescribe-sign-in-styles">{SIGN_IN_STYLES}</style>')
                         else:
