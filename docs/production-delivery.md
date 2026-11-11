@@ -31,6 +31,15 @@ Production credentials must differ from Development and Preview; explicitly publ
 
 Vercel Production domain assignment and required integration checks, including Clerk DNS verification, must succeed before release is reported live. A READY build alone is insufficient. Backend PostgreSQL, media/S3, local processing and protected administration remain governed by [the hosting guide](guide.md#vercel-hosting-with-local-processing).
 
+The account-independent sign-in shell at `/` can be cached by Vercel for 60 seconds.
+Its browser and downstream-CDN headers remain `no-store`. Only successful GET/HEAD
+responses for that fixed public template are eligible, without query parameters,
+an Authorization header, or a shared dashboard access token. The shell contains
+public bootstrap configuration, never library records or account identity. Private
+data, configuration endpoints, return-target URLs, and other authenticated-host
+responses continue to bypass caches. Verify the deployed shell's cache status and
+private-route denial after changing this policy.
+
 The optional [Workflow backend](guide.md#owner-selected-cloud-processing) preserves
 this delivery contract. Its dedicated cloud Agent Vault bindings, maintenance
 capability and immutable media image or clean snapshot are separately provisioned Production

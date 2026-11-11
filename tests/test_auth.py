@@ -177,7 +177,7 @@ class ClerkReader(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         self.assertEqual(page.headers["cache-control"], "no-store")
-        self.assertEqual(page.headers["vercel-cdn-cache-control"], "no-store")
+        self.assertEqual(page.headers["vercel-cdn-cache-control"], "public, s-maxage=60")
         bootstrap = re.search(r'<meta name="tubescribe-config" content="([^"]+)">', page.text)
         self.assertIsNotNone(bootstrap)
         settings = json.loads(html.unescape(bootstrap[1]))
@@ -213,6 +213,54 @@ class ClerkReader(unittest.TestCase):
         self.assertIn("https://*.protect.clerk.com:*", csp["connect-src"].split())
         self.assertNotIn("https://*.protect.clerk.com:*", csp["script-src"].split())
         self.assertNotIn("https://*.protect.clerk.com:*", csp["frame-src"].split())
+
+    def test_public_sign_in_shell_is_identical_without_caching_identity_or_return_urls(self):
+        public = self.client.get("/")
+        self.assertEqual(public.headers["cache-control"], "no-store")
+        self.assertEqual(public.headers["cdn-cache-control"], "no-store")
+        self.assertEqual(public.headers["vercel-cdn-cache-control"], "public, s-maxage=60")
+        self.assertNotIn("set-cookie", public.headers)
+        self.assertEqual(
+            self.client.head("/").headers["vercel-cdn-cache-control"], "public, s-maxage=60"
+        )
+        cookie = self.client.get("/", headers={"Cookie": "__session=fixture"})
+        self.assertEqual(cookie.content, public.content)
+        self.assertNotIn(OWNER, public.text)
+        self.assertNotIn("Private title", public.text)
+        for headers in (self.headers(), self.headers("user_other"), {"Authorization": ""}):
+            with self.subTest(headers=bool(headers.get("Authorization"))):
+                page = self.client.get("/", headers=headers)
+                self.assertEqual(page.content, public.content)
+                self.assertEqual(page.headers["vercel-cdn-cache-control"], "no-store")
+        for path in ("/?return_to=%2Fread%2Fprivate-video", "/auth/config", "/style.css"):
+            with self.subTest(path=path):
+                page = self.client.get(path)
+                self.assertEqual(page.headers["cache-control"], "no-store")
+                self.assertEqual(page.headers["vercel-cdn-cache-control"], "no-store")
+        private = self.client.get("/api/feed", headers=self.headers())
+        self.assertIn("Private title", private.text)
+        self.assertEqual(private.headers["vercel-cdn-cache-control"], "no-store")
+        denied = self.client.get("/api/feed")
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(denied.headers["vercel-cdn-cache-control"], "no-store")
+
+    def test_shared_dashboard_gate_keeps_the_shell_out_of_all_caches(self):
+        token = "synthetic-dashboard-token-" * 2
+        with patch.dict(os.environ, {"TUBESCRIBE_ACCESS_TOKEN": token}):
+            server = make_server(self.root)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{server.server_port}", trust_env=False
+        ) as client:
+            denied = client.get("/")
+            self.assertEqual(denied.status_code, 401)
+            allowed = client.get("/", headers={"Cookie": "tubescribe_access=" + token})
+            self.assertEqual(allowed.status_code, 200)
+            self.assertEqual(allowed.headers["cache-control"], "no-store")
+            self.assertEqual(allowed.headers["cdn-cache-control"], "no-store")
+            self.assertEqual(allowed.headers["vercel-cdn-cache-control"], "no-store")
 
     def test_owner_claims_once_and_new_users_have_an_empty_feed(self):
         owner = self.client.get("/api/feed", headers=self.headers())

@@ -506,6 +506,7 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             *,
             disposition=None,
             generated_html=False,
+            public_shell=False,
             content_encoding=None,
             vary_encoding=False,
         ):
@@ -529,7 +530,21 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
             self.send_header("Cache-Control", cache)
             if access.enabled:
                 self.send_header("CDN-Cache-Control", "no-store")
-                self.send_header("Vercel-CDN-Cache-Control", "no-store")
+                # Only the fixed sign-in bootstrap is account-independent. Keep
+                # browser/downstream storage disabled, and never cache data or
+                # credentialed/return-target requests at Vercel either.
+                cache_shell = (
+                    public_shell
+                    and status == 200
+                    and self.command in {"GET", "HEAD"}
+                    and not urlsplit(self.path).query
+                    and not config.access_token
+                    and self.headers.get("Authorization") is None
+                )
+                self.send_header(
+                    "Vercel-CDN-Cache-Control",
+                    "public, s-maxage=60" if cache_shell else "no-store",
+                )
             self.send_header("Vary", "Accept, Accept-Encoding" if vary_encoding else "Accept")
             if content_encoding:
                 self.send_header("Content-Encoding", content_encoding)
@@ -724,7 +739,9 @@ def make_handler(root: Path, instance: str | None = None, *, public_origins=()):
                             head.append('<link rel="stylesheet" href="/style.css">')
                             head.append('<script src="/app.js" defer></script>')
                         data = data.replace(b"<!-- reader-bootstrap -->", "\n  ".join(head).encode(), 1)
-                    self.send_headers(200, CONTENT_TYPES[path.suffix], len(data))
+                    self.send_headers(
+                        200, CONTENT_TYPES[path.suffix], len(data), public_shell=url.path == "/"
+                    )
                     self.write_data(data)
                     return
 
