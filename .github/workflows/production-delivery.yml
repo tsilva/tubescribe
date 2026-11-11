@@ -5,13 +5,27 @@ on:
     workflows: [CI]
     types: [completed]
     branches: [main]
+  repository_dispatch:
+    types:
+      - vercel.deployment.success
+      - vercel.deployment.error
+      - vercel.deployment.canceled
+      - vercel.deployment.failed
+      - vercel.deployment.ignored
+      - vercel.deployment.skipped
   workflow_dispatch:
+    inputs:
+      verify_deployment_id:
+        description: Verify an existing event-driven deployment without syncing or redeploying
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: production-secret-delivery
+  # Completion events cannot replace queued deployment initiations.
+  group: ${{ github.event_name == 'repository_dispatch' && format('production-vercel-completion-{0}-{1}', github.actor_id, github.event.client_payload.id || github.run_id) || inputs.verify_deployment_id != '' && format('production-vercel-manual-{0}', inputs.verify_deployment_id) || 'production-secret-delivery' }}
   cancel-in-progress: false
 
 jobs:
@@ -26,11 +40,19 @@ jobs:
         github.event.workflow_run.head_sha == github.sha &&
         github.event.workflow_run.path == '.github/workflows/ci.yml' &&
         github.event.workflow_run.repository.id == github.repository_id &&
-        github.event.workflow_run.head_repository.id == github.repository_id))
+        github.event.workflow_run.head_repository.id == github.repository_id) ||
+       (github.event_name == 'repository_dispatch' &&
+        github.event.sender.id == 35613825 && github.event.sender.login == 'vercel[bot]' &&
+        github.actor_id == '35613825' &&
+        github.event.client_payload.project.id == 'prj_2O9aw5ukOM9mfDR1wSRM90sewBih' &&
+        github.event.client_payload.environment == 'production' &&
+        github.event.client_payload.git.sha == github.sha))
     permissions:
       contents: read
       actions: read
       id-token: write
-    uses: tsilva/.github/.github/workflows/production-delivery.yml@c262be7b75fe4654c170eb5e13240808a70b9936
+    uses: tsilva/.github/.github/workflows/production-delivery.yml@8b5a1eb901bad981e2d8a858c17966f6fc9ceccc
+    with:
+      verify_deployment_id: ${{ inputs.verify_deployment_id || '' }}
     secrets:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
