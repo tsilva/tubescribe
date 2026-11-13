@@ -9,6 +9,7 @@ if (( $# > 1 )); then
 fi
 case "$mode" in
   --all|--frontend|--lint|--python) ;;
+  --python-only) mode=--python ;;
   *) echo 'Usage: scripts/verify [--all|--frontend|--lint|--python]' >&2; exit 2 ;;
 esac
 # A developer may have a live archive configured in their shell. Test fixtures must

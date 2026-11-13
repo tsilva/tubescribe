@@ -1396,6 +1396,7 @@ run once in a shared job. The full Python suite still runs separately on Python
 3.11, 3.12, and 3.13; the container rehearsal waits for both the shared checks and
 all three Python jobs. `scripts/verify` retains the complete local check sequence;
 `--frontend`, `--lint`, and `--python` select the same groups individually.
+The earlier `--python-only` option remains an alias for `--python`.
 
 CI caches downloaded pnpm packages, authenticated APT package archives, and
 BuildKit layers. Cache hits never skip tests or frozen-lockfile installation.

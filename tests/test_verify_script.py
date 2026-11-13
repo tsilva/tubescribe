@@ -80,6 +80,16 @@ class VerifyScript(unittest.TestCase):
                 if expected:
                     self.assertEqual(row["network_tests"], "0")
 
+    def test_python_only_alias_preserves_the_python_group_and_failures(self):
+        expected, python_rows = self.invoke("--python")
+        result, alias_rows = self.invoke("--python-only")
+        self.assertEqual(expected.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(alias_rows, python_rows)
+        result, alias_rows = self.invoke("--python-only", fail="uv")
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual(len(alias_rows), 1)
+
     def test_invalid_modes_and_extra_arguments_execute_nothing(self):
         for args in (("--skip-tests",), ("--python", "--frontend")):
             result, rows = self.invoke(*args)
