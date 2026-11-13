@@ -53,6 +53,14 @@ Native Infisical syncs are disabled after this workflow has successfully replace
 
 The GitHub Production environment, project-scoped deployment credential, existing application CI and disabled direct Vercel Git deployments remain required.
 
+After successful completion verification, an unprivileged dependent job runs
+the existing three-sample Lighthouse audit against the public production URL.
+It runs for verified `vercel.deployment.success` callbacks and explicit manual
+completion verification, never for submission alone or failed/skipped delivery.
+Pushes no longer audit the previous deployment while CI and delivery are running.
+The standalone **Lighthouse CI** workflow remains manually dispatchable; its
+pinned implementation, sample timings and audit settings are unchanged.
+
 Neon Realtime uses the TubeScribe Infisical project's dedicated `/neon-realtime`
 folder in `prod`. `NEON_REALTIME_SECRET` is mirrored as a write-only Secret and
 `NEON_REALTIME_URL` as public Config, both in Vercel Production only. The currently

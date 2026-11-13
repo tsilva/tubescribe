@@ -1392,9 +1392,11 @@ scripts/rehearse-containers    # complete disposable PostgreSQL/SeaweedFS recove
 
 `.github/workflows/ci.yml` runs on PRs, pushes to `main`, `v*` tags, and manual
 dispatch. Reader lifecycle/security tests, bundle reproducibility, and Python lint
-run once in a shared job. The full Python suite still runs separately on Python
-3.11, 3.12, and 3.13; the container rehearsal waits for both the shared checks and
-all three Python jobs. `scripts/verify` retains the complete local check sequence;
+run once in a shared job. A second job shares authenticated media setup and runs
+the full Python suite on 3.11, 3.12, and 3.13 in separate environments. Later
+versions still run if an earlier suite fails; any failure blocks the container
+rehearsal and delivery. The container rehearsal waits for both jobs.
+`scripts/verify` retains the complete local check sequence;
 `--frontend`, `--lint`, and `--python` select the same groups individually.
 The earlier `--python-only` option remains an alias for `--python`.
 

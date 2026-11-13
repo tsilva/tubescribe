@@ -56,3 +56,14 @@ jobs:
       verify_deployment_id: ${{ inputs.verify_deployment_id || '' }}
     secrets:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+  lighthouse:
+    name: Audit verified production
+    needs: deliver
+    if: >-
+      needs.deliver.result == 'success' &&
+      ((github.event_name == 'repository_dispatch' &&
+        github.event.action == 'vercel.deployment.success') ||
+       (github.event_name == 'workflow_dispatch' && inputs.verify_deployment_id != ''))
+    permissions: {}
+    uses: ./.github/workflows/lighthouse-ci.yml
