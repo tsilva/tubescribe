@@ -22,3 +22,5 @@ models/
 /INBOX.md
 /.local/repo-inbox/
 /.internal/
+
+/.runbox.yaml

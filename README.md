@@ -70,5 +70,3 @@ Once configured, the hosted reader receives catalogue change notifications throu
 ## License
 
 [MIT License](LICENSE).
-
-Production delivery uses the reviewed shared workflow in `tsilva/.github`, pinned to a full commit SHA. A standalone signed Infisical relay triggers sync and deployment; see [production delivery](docs/production-delivery.md) for the trust boundary and recovery.
