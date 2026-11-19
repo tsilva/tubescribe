@@ -33,7 +33,7 @@ successful. CI artifacts and caches are not imported into the trusted sync job.
 
 Infisical remains the source of application secrets. The shared GitHub reader has Viewer access to the assigned production vaults, and the completed rollout requires its server-side OIDC policy to match the exact approved reusable workflow revision, caller repository IDs, owner ID, main branch and Production context. The trusted `apps.json` selects the source vault and destination from the immutable caller repository ID; app files and inputs cannot change that mapping. The reader itself can access all assigned vaults inside the trusted job. Its token and fetched values never leave that job. The Vercel deployment credential remains in this repository's GitHub Production environment.
 
-The pinned shared source and [trust contract](https://github.com/tsilva/.github/blob/8b5a1eb901bad981e2d8a858c17966f6fc9ceccc/.github/actions/production-delivery/README.md) are authoritative. App repositories retain only the pinned caller workflow. Source/destination mappings, credential handling and boundary tests are maintained centrally; no app code executes in the privileged job.
+The pinned shared source and [trust contract](https://github.com/tsilva/.github/blob/ba3373604c7234b7bcbdfb0acd23d027b29196f2/.github/actions/production-delivery/README.md) are authoritative. App repositories retain only the pinned caller workflow. Source/destination mappings, credential handling and boundary tests are maintained centrally. The privileged job runs only the shared code.
 
 The workflow does not run on pull requests or forks, export `.env` files, upload secret artifacts, delete secret variables, or change preview/development variables. All required source keys and destination targets are checked before writes. Failed CI or sync prevents deployment. Existing production remains live on failure.
 
@@ -62,15 +62,11 @@ The standalone **Lighthouse CI** workflow remains manually dispatchable; its
 pinned implementation, sample timings and audit settings are unchanged.
 
 Neon Realtime uses the TubeScribe Infisical project's dedicated `/neon-realtime`
-folder in `prod`. `NEON_REALTIME_SECRET` is mirrored as a write-only Secret and
-`NEON_REALTIME_URL` as public Config, both in Vercel Production only. The currently
-pinned shared allowlist still manages only `TUBESCRIBE_PUBLIC_ORIGIN`; it preserves
-these separately provisioned variables but does not synchronize their rotation.
-After changing the source credential, explicitly mirror these two values through
-the authorized Production settings workflow before running Production delivery.
-Do not expand shared OIDC trust or enable another sync as an application-release
-workaround. See [the Realtime reader](guide.md#neon-realtime-reader) for its scope
-and verification limits.
+folder in `prod`. The pinned delivery workflow syncs `NEON_REALTIME_SECRET` as
+a write-only Secret and `NEON_REALTIME_URL` as public Config to Vercel Production
+before submitting the deployment. Rotate the source credential in this folder
+and verify Production delivery for the expected commit. See
+[the Realtime reader](guide.md#neon-realtime-reader) for its scope and verification limits.
 
 Production credentials must differ from Development and Preview; explicitly public configuration stays Config, while private credentials stay write-only Secret. Require Separate Values remains enabled.
 
