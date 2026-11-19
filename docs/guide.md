@@ -1319,14 +1319,11 @@ origins, and configuring these **Production-only** values:
 | `NEON_REALTIME_SECRET` | Secret | Server-only SDK sealing credential. Never expose it to frontend code. |
 
 The target database is the existing `neondb`. Store the source values in the
-TubeScribe Infisical project (`1f9874ad-12bc-44a6-b0aa-59027a494b70`), in a dedicated
-`/neon-realtime` folder, and mirror them to Vercel Production using the authorized
-secret workflow. Preserve Require Separate Values and leave Preview/Development
-unset. The currently pinned shared delivery allowlist contains only
-`TUBESCRIBE_PUBLIC_ORIGIN`; it does not automatically sync these new values.
-Until that allowlist is separately extended, an explicitly scoped credential
-sync is required on setup/rotation before deploying. Do not bypass the CI gates
-or change the shared OIDC trust policy merely to deploy the application code.
+TubeScribe Infisical project (`1f9874ad-12bc-44a6-b0aa-59027a494b70`) in the
+`prod:/neon-realtime` folder. The pinned [Production delivery workflow](production-delivery.md)
+syncs both values to Vercel Production before deploying. Rotate them at the source
+and verify delivery for the expected commit. Preserve Require Separate Values
+and leave Preview and Development unset.
 
 Enabling Realtime enables logical replication and can restart the Neon compute.
 Keep local processing services paused while quota is exhausted. Activation and
